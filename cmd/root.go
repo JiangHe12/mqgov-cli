@@ -27,6 +27,7 @@ import (
 	"github.com/JiangHe12/opskit-core/telemetry"
 
 	"github.com/JiangHe12/mqgov-cli/internal/backend/fake"
+	kafkabackend "github.com/JiangHe12/mqgov-cli/internal/backend/kafka"
 	"github.com/JiangHe12/mqgov-cli/internal/mqclass"
 	"github.com/JiangHe12/mqgov-cli/internal/mqgov"
 	"github.com/JiangHe12/mqgov-cli/internal/mqgovctx"
@@ -237,17 +238,41 @@ func finishTelemetry(ctx context.Context, f *cliFlags, err error) {
 }
 
 func buildBroker(f *cliFlags) (mqgov.Broker, mqgovctx.Context, error) {
-	item, _, err := resolvedContext(f)
+	item, name, err := resolvedContext(f)
 	if err != nil {
 		return nil, mqgovctx.Context{}, err
 	}
 	backendName := firstNonEmpty(f.Backend, item.Backend, defaultFakeBackend)
 	if backendName != defaultFakeBackend {
-		return nil, mqgovctx.Context{}, apperrors.New(apperrors.CodeNotImplemented, "backend is not supported in P0", nil)
+		if backendName == "kafka" {
+			backend, err := buildKafkaBackend(f, item, name)
+			return backend, item, err
+		}
+		return nil, mqgovctx.Context{}, apperrors.New(apperrors.CodeNotImplemented, "backend is not supported", nil)
 	}
 	cluster := firstNonEmpty(f.Cluster, item.Cluster, "fake")
 	namespace := firstNonEmpty(f.Namespace, item.Namespace)
 	return fake.New(cluster, namespace), item, nil
+}
+
+func buildKafkaBackend(f *cliFlags, item mqgovctx.Context, contextName string) (mqgov.Broker, error) {
+	password, err := mqgovctx.ResolvePassword(context.Background(), contextName, item)
+	if err != nil {
+		return nil, err
+	}
+	return kafkabackend.New(kafkabackend.Options{
+		Brokers:        firstNonEmptyList(item.KafkaBrokers, os.Getenv("KAFKA_BROKERS")),
+		Cluster:        firstNonEmpty(f.Cluster, item.Cluster, "kafka"),
+		Namespace:      firstNonEmpty(f.Namespace, item.Namespace),
+		Username:       firstNonEmpty(item.Username, os.Getenv("KAFKA_USERNAME")),
+		Password:       firstNonEmpty(os.Getenv("KAFKA_PASSWORD"), password),
+		SASLMechanism:  firstNonEmpty(item.KafkaSASLMechanism, os.Getenv("KAFKA_SASL_MECHANISM")),
+		TLS:            item.KafkaTLS || os.Getenv("KAFKA_TLS") == "true",
+		CACertFile:     firstNonEmpty(item.KafkaCACertFile, os.Getenv("KAFKA_CA_CERT_FILE")),
+		ClientCertFile: firstNonEmpty(item.KafkaClientCertFile, os.Getenv("KAFKA_CLIENT_CERT_FILE")),
+		ClientKeyFile:  firstNonEmpty(item.KafkaClientKeyFile, os.Getenv("KAFKA_CLIENT_KEY_FILE")),
+		Timeout:        f.Timeout,
+	})
 }
 
 func resolvedContext(f *cliFlags) (mqgovctx.Context, string, error) {
@@ -412,6 +437,16 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
+}
+
+func firstNonEmptyList(values []string, fallback string) []string {
+	if len(values) > 0 {
+		return values
+	}
+	if fallback == "" {
+		return nil
+	}
+	return strings.Split(fallback, ",")
 }
 
 func validateOutput(output string) error {

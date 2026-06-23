@@ -1,0 +1,141 @@
+//go:build integration
+
+package kafka
+
+import (
+	"context"
+	"fmt"
+	"os"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/JiangHe12/opskit-core/apperrors"
+
+	"github.com/JiangHe12/mqgov-cli/internal/mqgov"
+)
+
+func TestKafkaIntegration(t *testing.T) {
+	brokers := os.Getenv("KAFKA_BROKERS")
+	if strings.TrimSpace(brokers) == "" {
+		t.Skip("KAFKA_BROKERS not set")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	backend, err := New(Options{
+		Brokers:        []string{brokers},
+		Cluster:        "integration",
+		Username:       os.Getenv("KAFKA_USERNAME"),
+		Password:       os.Getenv("KAFKA_PASSWORD"),
+		SASLMechanism:  os.Getenv("KAFKA_SASL_MECHANISM"),
+		TLS:            os.Getenv("KAFKA_TLS") == "true",
+		CACertFile:     os.Getenv("KAFKA_CA_CERT_FILE"),
+		ClientCertFile: os.Getenv("KAFKA_CLIENT_CERT_FILE"),
+		ClientKeyFile:  os.Getenv("KAFKA_CLIENT_KEY_FILE"),
+		Timeout:        10 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	topic := fmt.Sprintf("mqgov_it_%d", time.Now().UnixNano())
+	group := topic + "_group"
+	coord := mqgov.TopicCoordinate{Cluster: "integration", Topic: topic}
+	defer func() { _ = backend.DeleteTopic(context.Background(), coord) }()
+
+	if _, err := backend.CreateTopic(ctx, mqgov.TopicCreateRequest{Coordinate: coord, Partitions: 1}); err != nil {
+		t.Fatalf("CreateTopic() error = %v", err)
+	}
+	if _, err := backend.CreateTopic(ctx, mqgov.TopicCreateRequest{Coordinate: coord, Partitions: 1}); apperrors.AsAppError(err).Code != apperrors.CodeResourceAlreadyExists {
+		t.Fatalf("CreateTopic(existing) error = %v, want %s", err, apperrors.CodeResourceAlreadyExists)
+	} else if exit := apperrors.ExitCode(err); exit != 5 {
+		t.Fatalf("CreateTopic(existing) exit = %d, want 5", exit)
+	}
+	desc := waitTopic(t, ctx, backend, coord)
+	if desc.Partitions != 1 {
+		t.Fatalf("partitions = %d, want 1", desc.Partitions)
+	}
+	if _, err := backend.AlterTopic(ctx, mqgov.TopicAlterRequest{Coordinate: coord, Partitions: 2}); err != nil {
+		t.Fatalf("AlterTopic() error = %v", err)
+	}
+	desc = waitTopic(t, ctx, backend, coord)
+	if desc.Partitions < 2 {
+		t.Fatalf("partitions = %d, want at least 2", desc.Partitions)
+	}
+
+	produced, err := backend.Produce(ctx, mqgov.MessageProduceRequest{Coordinate: coord, Key: []byte("k"), Body: []byte("body")})
+	if err != nil {
+		t.Fatalf("Produce() error = %v", err)
+	}
+	peeked, err := backend.Peek(ctx, mqgov.MessagePeekRequest{Coordinate: coord, Partition: produced.Coordinate.Partition, Offset: produced.Coordinate.Offset, Count: 1})
+	if err != nil {
+		t.Fatalf("Peek() error = %v", err)
+	}
+	if peeked.Count != 1 || len(peeked.Messages) != 1 {
+		t.Fatalf("peeked = %+v, want one fingerprint", peeked)
+	}
+	if peeked.Messages[0].BodySHA256 != produced.Fingerprint.BodySHA256 || peeked.Messages[0].KeySHA256 != produced.Fingerprint.KeySHA256 {
+		t.Fatalf("peek fingerprint = %+v, want %+v", peeked.Messages[0], produced.Fingerprint)
+	}
+
+	plan, err := backend.PlanOffsetReset(ctx, mqgov.OffsetPlanRequest{
+		Group:  mqgov.GroupCoordinate{Cluster: "integration", Group: group},
+		Topic:  coord,
+		To:     "latest",
+		DryRun: true,
+	})
+	if err != nil {
+		t.Fatalf("PlanOffsetReset(latest) error = %v", err)
+	}
+	if plan.Total == 0 {
+		t.Fatalf("plan total = 0, want positive impact: %+v", plan)
+	}
+	applied, err := backend.ResetOffset(ctx, mqgov.OffsetPlanRequest{
+		Group: mqgov.GroupCoordinate{Cluster: "integration", Group: group},
+		Topic: coord,
+		To:    "latest",
+	})
+	if err != nil {
+		t.Fatalf("ResetOffset(latest) error = %v", err)
+	}
+	if applied.Total != plan.Total {
+		t.Fatalf("applied total = %d, want %d", applied.Total, plan.Total)
+	}
+	zero, err := backend.PlanOffsetReset(ctx, mqgov.OffsetPlanRequest{
+		Group:  mqgov.GroupCoordinate{Cluster: "integration", Group: group},
+		Topic:  coord,
+		To:     "latest",
+		DryRun: true,
+	})
+	if err != nil {
+		t.Fatalf("PlanOffsetReset after reset error = %v", err)
+	}
+	if zero.Total != 0 {
+		t.Fatalf("post-reset plan total = %d, want 0: %+v", zero.Total, zero)
+	}
+
+	purge, err := backend.PurgeTopic(ctx, mqgov.TopicPurgeRequest{Coordinate: coord, DryRun: true})
+	if err != nil {
+		t.Fatalf("PurgeTopic dry-run error = %v", err)
+	}
+	if purge.Total == 0 {
+		t.Fatalf("purge total = 0, want positive impact: %+v", purge)
+	}
+	if err := backend.DeleteTopic(ctx, coord); err != nil {
+		t.Fatalf("DeleteTopic() error = %v", err)
+	}
+}
+
+func waitTopic(t *testing.T, ctx context.Context, backend *Broker, coord mqgov.TopicCoordinate) mqgov.TopicDescription {
+	t.Helper()
+	var lastErr error
+	for range 20 {
+		desc, err := backend.DescribeTopic(ctx, coord)
+		if err == nil {
+			return desc
+		}
+		lastErr = err
+		time.Sleep(500 * time.Millisecond)
+	}
+	t.Fatalf("DescribeTopic() never succeeded: %v", lastErr)
+	return mqgov.TopicDescription{}
+}
