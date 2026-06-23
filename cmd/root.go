@@ -159,7 +159,7 @@ func newRootCmdWith(f *cliFlags) *cobra.Command {
 	}
 	cmd.PersistentFlags().StringVar(&f.Config, "config", "", "Override context config path")
 	cmd.PersistentFlags().StringVar(&f.Context, "context", "", "Temporarily use a named context for this command")
-	cmd.PersistentFlags().StringVar(&f.Backend, "backend", "", "Backend override: fake")
+	cmd.PersistentFlags().StringVar(&f.Backend, "backend", "", "Backend override: fake, kafka, rabbitmq, pulsar, rocketmq")
 	cmd.PersistentFlags().StringVar(&f.Cluster, "cluster", "", "Broker cluster")
 	cmd.PersistentFlags().StringVarP(&f.Namespace, "namespace", "n", "", "Broker namespace")
 	cmd.PersistentFlags().DurationVar(&f.Timeout, "timeout", defaultCommandTimeout, "Request timeout")
@@ -181,7 +181,7 @@ func newRootCmdWith(f *cliFlags) *cobra.Command {
 	cmd.PersistentFlags().StringVar(&f.OTLPEnd, "otel-endpoint", "", "OTLP trace endpoint")
 	cmd.PersistentFlags().StringVar(&f.OTLPMetrics, "otel-metrics-endpoint", "", "OTLP metrics endpoint")
 	cmd.PersistentFlags().BoolVar(&f.OTLPInsec, "otel-insecure", false, "Disable TLS for OTLP exporter")
-	cmd.AddCommand(newTopicCmd(f), newGroupCmd(f), newMessageCmd(f), newCapabilitiesCmd(f), newDoctorCmd(f), newVersionCmd(f))
+	cmd.AddCommand(newTopicCmd(f), newGroupCmd(f), newMessageCmd(f), newContextCmd(f), newAuditCmd(f), newInstallCmd(f), newCapabilitiesCmd(f), newDoctorCmd(f), newVersionCmd(f))
 	return cmd
 }
 

@@ -170,7 +170,7 @@ func newGroupResetOffsetCmd(f *cliFlags) *cobra.Command {
 			return newPrinter(f).JSONData("OffsetPlan", plan)
 		},
 	}
-	cmd.Flags().StringVar(&to, "to", "earliest", "Target offset: earliest | latest")
+	cmd.Flags().StringVar(&to, "to", "earliest", "Target offset: earliest | latest | offset:N | datetime:<RFC3339> | shift:±N (some targets are backend-specific and unsupported backends return clear errors)")
 	return cmd
 }
 
