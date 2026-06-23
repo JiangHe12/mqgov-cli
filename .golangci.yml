@@ -1,0 +1,130 @@
+version: "2"
+
+run:
+  timeout: 5m
+
+output:
+  formats:
+    text: {}
+
+linters:
+  default: none
+  enable:
+    - errcheck
+    - errorlint
+    - govet
+    - staticcheck
+    - ineffassign
+    - unused
+    - nilerr
+    - noctx
+    - bodyclose
+    - rowserrcheck
+    - sqlclosecheck
+    - tparallel
+    - wastedassign
+    - exhaustive
+    - predeclared
+    - copyloopvar
+    - forcetypeassert
+    - gocritic
+    - revive
+    - misspell
+    - unconvert
+    - unparam
+    - whitespace
+    - gocyclo
+    - nestif
+    - dupl
+    - prealloc
+    - nakedret
+    - gosec
+    - gomodguard_v2
+    - gomoddirectives
+    - sloglint
+    - forbidigo
+
+  settings:
+    errcheck:
+      check-type-assertions: true
+      check-blank: false
+      exclude-functions:
+        - fmt.Fprint
+        - fmt.Fprintf
+        - fmt.Fprintln
+    gocyclo:
+      min-complexity: 15
+    nestif:
+      min-complexity: 5
+    dupl:
+      threshold: 100
+    misspell:
+      locale: US
+    forbidigo:
+      analyze-types: true
+      forbid:
+        - pattern: '^fmt\.Errorf$'
+          msg: "in cmd/, build errors with apperrors.New(code, msg, cause); bare fmt.Errorf falls back to LOCAL_IO_ERROR (exit 6) and breaks the exit-code contract"
+        - pattern: '^errors\.New$'
+          msg: "in cmd/, use apperrors.New(code, msg, nil) instead of errors.New"
+    gosec:
+      excludes:
+        - G104
+    revive:
+      rules:
+        - name: blank-imports
+        - name: context-as-argument
+        - name: context-keys-type
+        - name: dot-imports
+        - name: empty-block
+        - name: error-naming
+        - name: error-return
+        - name: error-strings
+        - name: errorf
+        - name: increment-decrement
+        - name: indent-error-flow
+        - name: range
+        - name: receiver-naming
+        - name: redefines-builtin-id
+        - name: superfluous-else
+        - name: time-naming
+        - name: unexported-return
+        - name: unreachable-code
+        - name: unused-parameter
+          disabled: true
+        - name: var-declaration
+        - name: var-naming
+
+  exclusions:
+    rules:
+      - path: _test\.go
+        linters:
+          - gocyclo
+          - dupl
+          - gosec
+          - errcheck
+          - forcetypeassert
+      - path: cmd/.*\.go
+        linters:
+          - gocyclo
+        text: "cyclomatic complexity .* of func .*new.*Cmd"
+      - path: '(^|/)(internal|pkg|skills)/'
+        linters:
+          - forbidigo
+      - path: _test\.go
+        linters:
+          - forbidigo
+
+formatters:
+  enable:
+    - gofmt
+    - gofumpt
+    - goimports
+  settings:
+    goimports:
+      local-prefixes:
+        - github.com/JiangHe12/mqgov-cli
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0
