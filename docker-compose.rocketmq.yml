@@ -1,0 +1,18 @@
+services:
+  namesrv:
+    image: apache/rocketmq:5.3.2
+    command: sh mqnamesrv
+    ports:
+      - "9876:9876"
+
+  broker:
+    image: apache/rocketmq:5.3.2
+    depends_on:
+      - namesrv
+    command: sh mqbroker -n namesrv:9876 -c /home/rocketmq/rocketmq-5.3.2/conf/broker.conf
+    ports:
+      - "10909:10909"
+      - "10911:10911"
+      - "10912:10912"
+    volumes:
+      - ./testdata/rocketmq/broker.conf:/home/rocketmq/rocketmq-5.3.2/conf/broker.conf:ro

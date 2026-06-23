@@ -31,6 +31,7 @@ import (
 	kafkabackend "github.com/JiangHe12/mqgov-cli/internal/backend/kafka"
 	pulsarbackend "github.com/JiangHe12/mqgov-cli/internal/backend/pulsar"
 	rabbitmqbackend "github.com/JiangHe12/mqgov-cli/internal/backend/rabbitmq"
+	rocketmqbackend "github.com/JiangHe12/mqgov-cli/internal/backend/rocketmq"
 	"github.com/JiangHe12/mqgov-cli/internal/mqclass"
 	"github.com/JiangHe12/mqgov-cli/internal/mqgov"
 	"github.com/JiangHe12/mqgov-cli/internal/mqgovctx"
@@ -259,6 +260,10 @@ func buildBroker(f *cliFlags) (mqgov.Broker, mqgovctx.Context, error) {
 			backend, err := buildPulsarBackend(f, item, name)
 			return backend, item, err
 		}
+		if backendName == "rocketmq" {
+			backend, err := buildRocketMQBackend(f, item, name)
+			return backend, item, err
+		}
 		return nil, mqgovctx.Context{}, apperrors.New(apperrors.CodeNotImplemented, "backend is not supported", nil)
 	}
 	cluster := firstNonEmpty(f.Cluster, item.Cluster, "fake")
@@ -282,6 +287,26 @@ func buildPulsarBackend(f *cliFlags, item mqgovctx.Context, contextName string) 
 		CACertFile:     firstNonEmpty(item.PulsarCACertFile, os.Getenv("PULSAR_CA_CERT_FILE")),
 		ClientCertFile: firstNonEmpty(item.PulsarClientCertFile, os.Getenv("PULSAR_CLIENT_CERT_FILE")),
 		ClientKeyFile:  firstNonEmpty(item.PulsarClientKeyFile, os.Getenv("PULSAR_CLIENT_KEY_FILE")),
+		Timeout:        f.Timeout,
+	})
+}
+
+func buildRocketMQBackend(f *cliFlags, item mqgovctx.Context, contextName string) (mqgov.Broker, error) {
+	secretKey, err := mqgovctx.ResolvePassword(context.Background(), contextName, item)
+	if err != nil {
+		return nil, err
+	}
+	return rocketmqbackend.New(rocketmqbackend.Options{
+		NameServers:    firstNonEmptyList(item.RocketMQNameServers, os.Getenv("ROCKETMQ_NAMESRV_ADDR")),
+		BrokerAddr:     firstNonEmpty(item.RocketMQBrokerAddr, os.Getenv("ROCKETMQ_BROKER_ADDR")),
+		Cluster:        firstNonEmpty(f.Cluster, item.Cluster, "rocketmq"),
+		Namespace:      firstNonEmpty(f.Namespace, item.Namespace),
+		AccessKey:      firstNonEmpty(item.RocketMQAccessKey, os.Getenv("ROCKETMQ_ACCESS_KEY")),
+		SecretKey:      firstNonEmpty(os.Getenv("ROCKETMQ_SECRET_KEY"), secretKey),
+		TLS:            item.RocketMQTLS || os.Getenv("ROCKETMQ_TLS") == "true",
+		CACertFile:     firstNonEmpty(item.RocketMQCACertFile, os.Getenv("ROCKETMQ_CA_CERT_FILE")),
+		ClientCertFile: firstNonEmpty(item.RocketMQClientCertFile, os.Getenv("ROCKETMQ_CLIENT_CERT_FILE")),
+		ClientKeyFile:  firstNonEmpty(item.RocketMQClientKeyFile, os.Getenv("ROCKETMQ_CLIENT_KEY_FILE")),
 		Timeout:        f.Timeout,
 	})
 }

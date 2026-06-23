@@ -39,6 +39,13 @@ type Context struct {
 	PulsarCACertFile       string   `yaml:"pulsarCaCertFile,omitempty"`
 	PulsarClientCertFile   string   `yaml:"pulsarClientCertFile,omitempty"`
 	PulsarClientKeyFile    string   `yaml:"pulsarClientKeyFile,omitempty"`
+	RocketMQNameServers    []string `yaml:"rocketmqNameServers,omitempty"`
+	RocketMQBrokerAddr     string   `yaml:"rocketmqBrokerAddr,omitempty"`
+	RocketMQAccessKey      string   `yaml:"rocketmqAccessKey,omitempty"`
+	RocketMQTLS            bool     `yaml:"rocketmqTls,omitempty"`
+	RocketMQCACertFile     string   `yaml:"rocketmqCaCertFile,omitempty"`
+	RocketMQClientCertFile string   `yaml:"rocketmqClientCertFile,omitempty"`
+	RocketMQClientKeyFile  string   `yaml:"rocketmqClientKeyFile,omitempty"`
 }
 
 func (c *Context) base() *corectx.Base { return &c.Base }
