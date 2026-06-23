@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/signal"
 	osuser "os/user"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -28,6 +29,7 @@ import (
 
 	"github.com/JiangHe12/mqgov-cli/internal/backend/fake"
 	kafkabackend "github.com/JiangHe12/mqgov-cli/internal/backend/kafka"
+	rabbitmqbackend "github.com/JiangHe12/mqgov-cli/internal/backend/rabbitmq"
 	"github.com/JiangHe12/mqgov-cli/internal/mqclass"
 	"github.com/JiangHe12/mqgov-cli/internal/mqgov"
 	"github.com/JiangHe12/mqgov-cli/internal/mqgovctx"
@@ -248,11 +250,38 @@ func buildBroker(f *cliFlags) (mqgov.Broker, mqgovctx.Context, error) {
 			backend, err := buildKafkaBackend(f, item, name)
 			return backend, item, err
 		}
+		if backendName == "rabbitmq" {
+			backend, err := buildRabbitMQBackend(f, item, name)
+			return backend, item, err
+		}
 		return nil, mqgovctx.Context{}, apperrors.New(apperrors.CodeNotImplemented, "backend is not supported", nil)
 	}
 	cluster := firstNonEmpty(f.Cluster, item.Cluster, "fake")
 	namespace := firstNonEmpty(f.Namespace, item.Namespace)
 	return fake.New(cluster, namespace), item, nil
+}
+
+func buildRabbitMQBackend(f *cliFlags, item mqgovctx.Context, contextName string) (mqgov.Broker, error) {
+	password, err := mqgovctx.ResolvePassword(context.Background(), contextName, item)
+	if err != nil {
+		return nil, err
+	}
+	return rabbitmqbackend.New(rabbitmqbackend.Options{
+		AMQPURL:        firstNonEmpty(item.RabbitMQAMQPURL, os.Getenv("RABBITMQ_AMQP_URL")),
+		ManagementURL:  firstNonEmpty(item.RabbitMQManagementURL, os.Getenv("RABBITMQ_MANAGEMENT_URL")),
+		Host:           firstNonEmpty(item.RabbitMQHost, os.Getenv("RABBITMQ_HOST")),
+		Port:           firstNonZeroInt(item.RabbitMQPort, envInt("RABBITMQ_PORT")),
+		VHost:          firstNonEmpty(item.RabbitMQVHost, os.Getenv("RABBITMQ_VHOST")),
+		Cluster:        firstNonEmpty(f.Cluster, item.Cluster, "rabbitmq"),
+		Namespace:      firstNonEmpty(f.Namespace, item.Namespace),
+		Username:       firstNonEmpty(item.Username, os.Getenv("RABBITMQ_USERNAME"), "guest"),
+		Password:       firstNonEmpty(os.Getenv("RABBITMQ_PASSWORD"), password, "guest"),
+		TLS:            item.RabbitMQTLS || os.Getenv("RABBITMQ_TLS") == "true",
+		CACertFile:     firstNonEmpty(item.RabbitMQCACertFile, os.Getenv("RABBITMQ_CA_CERT_FILE")),
+		ClientCertFile: firstNonEmpty(item.RabbitMQClientCertFile, os.Getenv("RABBITMQ_CLIENT_CERT_FILE")),
+		ClientKeyFile:  firstNonEmpty(item.RabbitMQClientKeyFile, os.Getenv("RABBITMQ_CLIENT_KEY_FILE")),
+		Timeout:        f.Timeout,
+	})
 }
 
 func buildKafkaBackend(f *cliFlags, item mqgovctx.Context, contextName string) (mqgov.Broker, error) {
@@ -447,6 +476,27 @@ func firstNonEmptyList(values []string, fallback string) []string {
 		return nil
 	}
 	return strings.Split(fallback, ",")
+}
+
+func firstNonZeroInt(values ...int) int {
+	for _, value := range values {
+		if value != 0 {
+			return value
+		}
+	}
+	return 0
+}
+
+func envInt(name string) int {
+	value := os.Getenv(name)
+	if value == "" {
+		return 0
+	}
+	parsed, err := strconv.Atoi(value)
+	if err != nil {
+		return 0
+	}
+	return parsed
 }
 
 func validateOutput(output string) error {

@@ -11,17 +11,26 @@ import (
 const SupportedContextAPIVersion = "mqgov-cli.io/context/v1"
 
 type Context struct {
-	corectx.Base        `yaml:",inline"`
-	Backend             string   `yaml:"backend"`
-	Cluster             string   `yaml:"cluster,omitempty"`
-	Namespace           string   `yaml:"namespace,omitempty"`
-	Topics              []string `yaml:"protectedTopics,omitempty"`
-	KafkaBrokers        []string `yaml:"kafkaBrokers,omitempty"`
-	KafkaSASLMechanism  string   `yaml:"kafkaSaslMechanism,omitempty"`
-	KafkaTLS            bool     `yaml:"kafkaTls,omitempty"`
-	KafkaCACertFile     string   `yaml:"kafkaCaCertFile,omitempty"`
-	KafkaClientCertFile string   `yaml:"kafkaClientCertFile,omitempty"`
-	KafkaClientKeyFile  string   `yaml:"kafkaClientKeyFile,omitempty"`
+	corectx.Base           `yaml:",inline"`
+	Backend                string   `yaml:"backend"`
+	Cluster                string   `yaml:"cluster,omitempty"`
+	Namespace              string   `yaml:"namespace,omitempty"`
+	Topics                 []string `yaml:"protectedTopics,omitempty"`
+	KafkaBrokers           []string `yaml:"kafkaBrokers,omitempty"`
+	KafkaSASLMechanism     string   `yaml:"kafkaSaslMechanism,omitempty"`
+	KafkaTLS               bool     `yaml:"kafkaTls,omitempty"`
+	KafkaCACertFile        string   `yaml:"kafkaCaCertFile,omitempty"`
+	KafkaClientCertFile    string   `yaml:"kafkaClientCertFile,omitempty"`
+	KafkaClientKeyFile     string   `yaml:"kafkaClientKeyFile,omitempty"`
+	RabbitMQAMQPURL        string   `yaml:"rabbitmqAmqpUrl,omitempty"`
+	RabbitMQManagementURL  string   `yaml:"rabbitmqManagementUrl,omitempty"`
+	RabbitMQHost           string   `yaml:"rabbitmqHost,omitempty"`
+	RabbitMQPort           int      `yaml:"rabbitmqPort,omitempty"`
+	RabbitMQVHost          string   `yaml:"rabbitmqVhost,omitempty"`
+	RabbitMQTLS            bool     `yaml:"rabbitmqTls,omitempty"`
+	RabbitMQCACertFile     string   `yaml:"rabbitmqCaCertFile,omitempty"`
+	RabbitMQClientCertFile string   `yaml:"rabbitmqClientCertFile,omitempty"`
+	RabbitMQClientKeyFile  string   `yaml:"rabbitmqClientKeyFile,omitempty"`
 }
 
 func (c *Context) base() *corectx.Base { return &c.Base }

@@ -6,6 +6,7 @@ require (
 	github.com/JiangHe12/opskit-core v1.0.5
 	github.com/fatih/color v1.19.0
 	github.com/mattn/go-isatty v0.0.22
+	github.com/rabbitmq/amqp091-go v1.12.0
 	github.com/spf13/cobra v1.10.2
 	github.com/twmb/franz-go v1.21.3
 	github.com/twmb/franz-go/pkg/kadm v1.18.0
