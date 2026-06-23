@@ -1,0 +1,143 @@
+name: Integration
+
+# Real-backend integration tests (//go:build integration), run against live
+# Kafka (Redpanda), RabbitMQ, Pulsar and RocketMQ containers started on the
+# runner from the repo's docker-compose files. Kept SEPARATE from the PR/push CI
+# and the release pipeline so a slow broker boot or a transient flake never
+# blocks everyday commits or a release. Runs nightly and on manual dispatch only.
+
+on:
+  schedule:
+    - cron: '0 6 * * *'   # daily 06:00 UTC
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  kafka:
+    name: real-backend integration (kafka)
+    timeout-minutes: 15
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version: 'stable'
+          cache: true
+      - name: Start Redpanda
+        run: docker compose -f docker-compose.kafka.yml up -d
+      - name: Wait for readiness
+        shell: bash
+        run: |
+          set +e
+          ok=0
+          for i in $(seq 1 30); do
+            if (echo > /dev/tcp/127.0.0.1/9092) 2>/dev/null; then ok=1; break; fi
+            sleep 2
+          done
+          [ "$ok" = 1 ] || { echo "kafka not ready"; docker compose -f docker-compose.kafka.yml logs; exit 1; }
+          sleep 5
+      - name: Run integration tests
+        env:
+          KAFKA_BROKERS: 127.0.0.1:9092
+        run: go test -tags=integration -count=1 -v ./internal/backend/kafka/
+      - name: Tear down
+        if: always()
+        run: docker compose -f docker-compose.kafka.yml down -v || true
+
+  rabbitmq:
+    name: real-backend integration (rabbitmq)
+    timeout-minutes: 15
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version: 'stable'
+          cache: true
+      - name: Start RabbitMQ
+        run: docker compose -f docker-compose.rabbitmq.yml up -d
+      - name: Wait for readiness
+        shell: bash
+        run: |
+          set +e
+          ok=0
+          for i in $(seq 1 40); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' -u guest:guest http://127.0.0.1:15672/api/overview)
+            if [ "$code" = "200" ]; then ok=1; break; fi
+            sleep 3
+          done
+          [ "$ok" = 1 ] || { echo "rabbitmq not ready"; docker compose -f docker-compose.rabbitmq.yml logs; exit 1; }
+      - name: Run integration tests
+        env:
+          RABBITMQ_AMQP_URL: amqp://guest:guest@127.0.0.1:5672/
+          RABBITMQ_MANAGEMENT_URL: http://127.0.0.1:15672
+        run: go test -tags=integration -count=1 -v ./internal/backend/rabbitmq/
+      - name: Tear down
+        if: always()
+        run: docker compose -f docker-compose.rabbitmq.yml down -v || true
+
+  pulsar:
+    name: real-backend integration (pulsar)
+    timeout-minutes: 15
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version: 'stable'
+          cache: true
+      - name: Start Pulsar
+        run: docker compose -f docker-compose.pulsar.yml up -d
+      - name: Wait for readiness
+        shell: bash
+        run: |
+          set +e
+          ok=0
+          for i in $(seq 1 60); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/admin/v2/clusters)
+            if [ "$code" = "200" ]; then ok=1; break; fi
+            sleep 3
+          done
+          [ "$ok" = 1 ] || { echo "pulsar not ready"; docker compose -f docker-compose.pulsar.yml logs; exit 1; }
+      - name: Run integration tests
+        env:
+          PULSAR_SERVICE_URL: pulsar://127.0.0.1:6650
+          PULSAR_ADMIN_URL: http://127.0.0.1:8080
+        run: go test -tags=integration -count=1 -v ./internal/backend/pulsar/
+      - name: Tear down
+        if: always()
+        run: docker compose -f docker-compose.pulsar.yml down -v || true
+
+  rocketmq:
+    name: real-backend integration (rocketmq)
+    timeout-minutes: 15
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version: 'stable'
+          cache: true
+      - name: Start RocketMQ
+        run: docker compose -f docker-compose.rocketmq.yml up -d
+      - name: Wait for readiness
+        shell: bash
+        run: |
+          set +e
+          ok=0
+          for i in $(seq 1 40); do
+            if docker compose -f docker-compose.rocketmq.yml logs broker 2>/dev/null | grep -q 'boot success'; then ok=1; break; fi
+            sleep 3
+          done
+          [ "$ok" = 1 ] || { echo "rocketmq not ready"; docker compose -f docker-compose.rocketmq.yml logs; exit 1; }
+          sleep 5
+      - name: Run integration tests
+        env:
+          ROCKETMQ_NAMESRV_ADDR: 127.0.0.1:9876
+          ROCKETMQ_BROKER_ADDR: 127.0.0.1:10911
+        run: go test -tags=integration -count=1 -v ./internal/backend/rocketmq/
+      - name: Tear down
+        if: always()
+        run: docker compose -f docker-compose.rocketmq.yml down -v || true
