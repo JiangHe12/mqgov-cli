@@ -31,6 +31,14 @@ type Context struct {
 	RabbitMQCACertFile     string   `yaml:"rabbitmqCaCertFile,omitempty"`
 	RabbitMQClientCertFile string   `yaml:"rabbitmqClientCertFile,omitempty"`
 	RabbitMQClientKeyFile  string   `yaml:"rabbitmqClientKeyFile,omitempty"`
+	PulsarServiceURL       string   `yaml:"pulsarServiceUrl,omitempty"`
+	PulsarAdminURL         string   `yaml:"pulsarAdminUrl,omitempty"`
+	PulsarTenant           string   `yaml:"pulsarTenant,omitempty"`
+	PulsarNamespace        string   `yaml:"pulsarNamespace,omitempty"`
+	PulsarTLS              bool     `yaml:"pulsarTls,omitempty"`
+	PulsarCACertFile       string   `yaml:"pulsarCaCertFile,omitempty"`
+	PulsarClientCertFile   string   `yaml:"pulsarClientCertFile,omitempty"`
+	PulsarClientKeyFile    string   `yaml:"pulsarClientKeyFile,omitempty"`
 }
 
 func (c *Context) base() *corectx.Base { return &c.Base }

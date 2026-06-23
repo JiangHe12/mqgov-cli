@@ -29,6 +29,7 @@ import (
 
 	"github.com/JiangHe12/mqgov-cli/internal/backend/fake"
 	kafkabackend "github.com/JiangHe12/mqgov-cli/internal/backend/kafka"
+	pulsarbackend "github.com/JiangHe12/mqgov-cli/internal/backend/pulsar"
 	rabbitmqbackend "github.com/JiangHe12/mqgov-cli/internal/backend/rabbitmq"
 	"github.com/JiangHe12/mqgov-cli/internal/mqclass"
 	"github.com/JiangHe12/mqgov-cli/internal/mqgov"
@@ -254,11 +255,35 @@ func buildBroker(f *cliFlags) (mqgov.Broker, mqgovctx.Context, error) {
 			backend, err := buildRabbitMQBackend(f, item, name)
 			return backend, item, err
 		}
+		if backendName == "pulsar" {
+			backend, err := buildPulsarBackend(f, item, name)
+			return backend, item, err
+		}
 		return nil, mqgovctx.Context{}, apperrors.New(apperrors.CodeNotImplemented, "backend is not supported", nil)
 	}
 	cluster := firstNonEmpty(f.Cluster, item.Cluster, "fake")
 	namespace := firstNonEmpty(f.Namespace, item.Namespace)
 	return fake.New(cluster, namespace), item, nil
+}
+
+func buildPulsarBackend(f *cliFlags, item mqgovctx.Context, contextName string) (mqgov.Broker, error) {
+	token, err := mqgovctx.ResolvePassword(context.Background(), contextName, item)
+	if err != nil {
+		return nil, err
+	}
+	return pulsarbackend.New(pulsarbackend.Options{
+		ServiceURL:     firstNonEmpty(item.PulsarServiceURL, os.Getenv("PULSAR_SERVICE_URL")),
+		AdminURL:       firstNonEmpty(item.PulsarAdminURL, os.Getenv("PULSAR_ADMIN_URL")),
+		Tenant:         firstNonEmpty(item.PulsarTenant, os.Getenv("PULSAR_TENANT"), "public"),
+		Namespace:      firstNonEmpty(item.PulsarNamespace, os.Getenv("PULSAR_NAMESPACE"), "default"),
+		Cluster:        firstNonEmpty(f.Cluster, item.Cluster, "pulsar"),
+		Token:          firstNonEmpty(os.Getenv("PULSAR_TOKEN"), token),
+		TLS:            item.PulsarTLS || os.Getenv("PULSAR_TLS") == "true",
+		CACertFile:     firstNonEmpty(item.PulsarCACertFile, os.Getenv("PULSAR_CA_CERT_FILE")),
+		ClientCertFile: firstNonEmpty(item.PulsarClientCertFile, os.Getenv("PULSAR_CLIENT_CERT_FILE")),
+		ClientKeyFile:  firstNonEmpty(item.PulsarClientKeyFile, os.Getenv("PULSAR_CLIENT_KEY_FILE")),
+		Timeout:        f.Timeout,
+	})
 }
 
 func buildRabbitMQBackend(f *cliFlags, item mqgovctx.Context, contextName string) (mqgov.Broker, error) {
