@@ -76,6 +76,19 @@ func TestKafkaIntegration(t *testing.T) {
 	if peeked.Messages[0].BodySHA256 != produced.Fingerprint.BodySHA256 || peeked.Messages[0].KeySHA256 != produced.Fingerprint.KeySHA256 {
 		t.Fatalf("peek fingerprint = %+v, want %+v", peeked.Messages[0], produced.Fingerprint)
 	}
+	tailer, ok := mqgov.SupportsTail(backend)
+	if !ok {
+		t.Fatalf("SupportsTail() = false, want true")
+	}
+	tailReq := mqgov.MessageTailRequest{Coordinate: coord, Partition: produced.Coordinate.Partition, From: fmt.Sprintf("offset:%d", produced.Coordinate.Offset), MaxMessages: 1}
+	firstTail := collectTail(t, ctx, tailer, tailReq)
+	secondTail := collectTail(t, ctx, tailer, tailReq)
+	if len(firstTail) != 1 || len(secondTail) != 1 {
+		t.Fatalf("tail counts = %d/%d, want 1/1", len(firstTail), len(secondTail))
+	}
+	if firstTail[0] != secondTail[0] || firstTail[0].BodySHA256 != produced.Fingerprint.BodySHA256 {
+		t.Fatalf("tail fingerprints = %+v / %+v, produced=%+v", firstTail[0], secondTail[0], produced.Fingerprint)
+	}
 
 	plan, err := backend.PlanOffsetReset(ctx, mqgov.OffsetPlanRequest{
 		Group:  mqgov.GroupCoordinate{Cluster: "integration", Group: group},
@@ -123,6 +136,22 @@ func TestKafkaIntegration(t *testing.T) {
 	if err := backend.DeleteTopic(ctx, coord); err != nil {
 		t.Fatalf("DeleteTopic() error = %v", err)
 	}
+}
+
+func collectTail(t *testing.T, ctx context.Context, tailer mqgov.Tailer, req mqgov.MessageTailRequest) []mqgov.MessageFingerprint {
+	t.Helper()
+	var messages []mqgov.MessageFingerprint
+	result, err := tailer.Tail(ctx, req, func(fp mqgov.MessageFingerprint) error {
+		messages = append(messages, fp)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("Tail() error = %v", err)
+	}
+	if result.Count != int64(len(messages)) {
+		t.Fatalf("Tail() result count = %d, collected=%d", result.Count, len(messages))
+	}
+	return messages
 }
 
 func waitTopic(t *testing.T, ctx context.Context, backend *Broker, coord mqgov.TopicCoordinate) mqgov.TopicDescription {

@@ -102,6 +102,26 @@ func TestPulsarIntegration(t *testing.T) {
 	if afterPeek.Total != before.Total {
 		t.Fatalf("peek changed backlog: before=%d after=%d", before.Total, afterPeek.Total)
 	}
+	tailer, ok := mqgov.SupportsTail(backend)
+	if !ok {
+		t.Fatalf("SupportsTail() = false, want true")
+	}
+	tailReq := mqgov.MessageTailRequest{Coordinate: coord, From: "earliest", MaxMessages: 1}
+	firstTail := collectTail(t, ctx, tailer, tailReq)
+	secondTail := collectTail(t, ctx, tailer, tailReq)
+	if len(firstTail) != 1 || len(secondTail) != 1 {
+		t.Fatalf("tail counts = %d/%d, want 1/1", len(firstTail), len(secondTail))
+	}
+	if firstTail[0] != secondTail[0] || firstTail[0].BodySHA256 != peeked.Messages[0].BodySHA256 {
+		t.Fatalf("tail fingerprints = %+v / %+v, peek=%+v", firstTail[0], secondTail[0], peeked.Messages[0])
+	}
+	afterTail, err := backend.Lag(ctx, mqgov.GroupCoordinate{Cluster: "integration", Namespace: "public/default", Group: sub}, coord)
+	if err != nil {
+		t.Fatalf("Lag() after tail error = %v", err)
+	}
+	if afterTail.Total != before.Total {
+		t.Fatalf("tail changed backlog: before=%d after=%d", before.Total, afterTail.Total)
+	}
 	plan, err := backend.PlanOffsetReset(ctx, mqgov.OffsetPlanRequest{
 		Group:  mqgov.GroupCoordinate{Cluster: "integration", Namespace: "public/default", Group: sub},
 		Topic:  coord,
@@ -144,6 +164,22 @@ func TestPulsarIntegration(t *testing.T) {
 	if err := backend.DeleteTopic(ctx, coord); err != nil {
 		t.Fatalf("DeleteTopic() error = %v", err)
 	}
+}
+
+func collectTail(t *testing.T, ctx context.Context, tailer mqgov.Tailer, req mqgov.MessageTailRequest) []mqgov.MessageFingerprint {
+	t.Helper()
+	var messages []mqgov.MessageFingerprint
+	result, err := tailer.Tail(ctx, req, func(fp mqgov.MessageFingerprint) error {
+		messages = append(messages, fp)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("Tail() error = %v", err)
+	}
+	if result.Count != int64(len(messages)) {
+		t.Fatalf("Tail() result count = %d, collected=%d", result.Count, len(messages))
+	}
+	return messages
 }
 
 func getenvDefault(name, fallback string) string {

@@ -60,6 +60,9 @@ func TestRocketMQIntegration(t *testing.T) {
 	if _, err := backend.Peek(ctx, mqgov.MessagePeekRequest{Coordinate: coord, Partition: queue.QueueId, Offset: 0, Count: 1}); apperrors.AsAppError(err).Code != apperrors.CodeNotImplemented {
 		t.Fatalf("Peek() error = %v, want NotImplemented", err)
 	}
+	if _, ok := mqgov.SupportsTail(backend); ok {
+		t.Fatalf("SupportsTail() = true, want false")
+	}
 	if _, ok := mqgov.SupportsOffsets(backend); ok {
 		t.Fatalf("SupportsOffsets() = true, want false")
 	}

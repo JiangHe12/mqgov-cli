@@ -4,7 +4,7 @@
 
 **Governed message-broker operations for humans _and_ AI agents.**
 
-One safe command line for **Kafka**, **RabbitMQ**, **Pulsar**, and **RocketMQ** — list, describe, peek, produce, reset offsets, purge, and delete topics without ever fat-fingering production or silently draining a queue.
+One safe command line for **Kafka**, **RabbitMQ**, **Pulsar**, and **RocketMQ** — list, describe, peek, tail, produce, reset offsets, purge, and delete topics without ever fat-fingering production or silently draining a queue.
 
 [![npm version](https://img.shields.io/npm/v/mqgov-cli.svg)](https://www.npmjs.com/package/mqgov-cli)
 [![CI](https://github.com/JiangHe12/mqgov-cli/actions/workflows/ci.yml/badge.svg)](https://github.com/JiangHe12/mqgov-cli/actions/workflows/ci.yml)
@@ -25,7 +25,7 @@ Message brokers — **Kafka**, **RabbitMQ**, **Pulsar**, **RocketMQ** — are th
 
 - 🔎 **Shows you the blast radius first** — `--dry-run` / `--plan` print the exact per-partition impact (how many messages an offset reset will replay or skip) before anything happens.
 - 🛡️ **Refuses to do something dangerous without explicit sign-off** — risky commands need a confirmation flag, a change ticket, and an explicit `--allow-*` for the operation.
-- 👀 **Peeks without consuming** — inspecting messages never advances a consumer's position or drains a queue.
+- 👀 **Peeks/tails without consuming** — inspecting or streaming message fingerprints never advances a consumer's position or drains a queue.
 - 📜 **Records everything in a tamper-evident audit log** — sha256 fingerprints and counts only, **never your message bodies**.
 - 🤖 **Is safe to hand to an AI agent** — the agent can read and preview freely, but **cannot** invent the human approvals required for dangerous actions.
 
@@ -38,10 +38,10 @@ It's built on the shared [`opskit-core`](https://github.com/JiangHe12/opskit-cor
 | | |
 |---|---|
 | 📨 **Four brokers** | **Kafka** (franz-go), **RabbitMQ** (AMQP + management API), **Pulsar** (client + admin REST), **RocketMQ** (rocketmq-client-go/v2). One backend-agnostic governance model; pick per context or override per command. |
-| 🧱 **topic / group / message** | topics: list · describe · create · alter · delete · purge. consumer groups: list · lag · reset-offset. messages: non-destructive peek · produce. |
+| 🧱 **topic / group / message** | topics: list · describe · create · alter · delete · purge. consumer groups: list · lag · reset-offset. messages: non-destructive peek · tail · produce. |
 | 🔐 **R0–R3 governance** | every operation is risk-classified by the fail-closed `mqclass` engine; protected contexts and internal/system topics escalate one tier; AI callers can never self-authorize. |
 | 🎯 **Real blast-radius preview** | `reset-offset --dry-run` and `purge --dry-run` compute the actual per-partition message delta from the live broker — no guessing. The preview is read-only and never mutates. |
-| 👀 **Non-destructive peek** | inspect messages as fingerprints without consuming them or moving any cursor (Pulsar Reader, RabbitMQ get+requeue). Where a broker can't guarantee this, peek fails closed rather than silently consuming. |
+| 👀 **Non-destructive peek/tail** | inspect or stream messages as fingerprints without consuming them or moving any cursor (Kafka direct partition reads, Pulsar Reader, RabbitMQ get+requeue for peek only). Where a broker can't guarantee this, the operation fails closed rather than silently consuming. |
 | 🧭 **Honest capabilities** | brokers differ — mqgov reports what each one actually supports (`capabilities -o json`) and **fails closed with `NOT_IMPLEMENTED`** for the rest, never faking it. |
 | 📜 **Tamper-evident audit** | hash-chained log of every action (sha256 fingerprints + counts, **no message bodies/keys/headers**); `audit verify` detects tampering. |
 | 🩺 **Ops & DX** | backend-bound `ctx` contexts with credstore-backed secrets, `doctor` diagnostics, shell `completion`, OpenTelemetry traces/metrics, JSON output everywhere. |
@@ -54,11 +54,12 @@ It's built on the shared [`opskit-core`](https://github.com/JiangHe12/opskit-cor
 | topic list / describe / create / delete | ✅ | ✅ | ✅ | ✅ |
 | produce | ✅ | ✅ | ✅ | ✅ |
 | **non-destructive peek** | ✅ | ✅ (Reader) | ✅ (get+requeue) | ❌ `NOT_IMPLEMENTED`¹ |
+| **non-destructive tail** | ✅ | ✅ (Reader) | ❌ `NOT_IMPLEMENTED`² | ❌ `NOT_IMPLEMENTED`¹ |
 | **offset lag / reset** | ✅ | ✅ (cursor) | ❌ (no offsets) | ❌ |
 | alter partitions | ✅ | ✅ | ❌ | ❌ |
 | purge | ✅ | ✅ | ✅ | ❌ |
 
-¹ RocketMQ's Go v2 `PullConsumer` enters the consumer-group lifecycle and commits offsets, so it cannot guarantee a non-destructive peek — mqgov fails closed instead of silently advancing offsets. Unsupported operations always return `NOT_IMPLEMENTED` (exit 12), never a fake success.
+¹ RocketMQ's Go v2 `PullConsumer` enters the consumer-group lifecycle and commits offsets, so it cannot guarantee non-destructive peek/tail — mqgov fails closed instead of silently advancing offsets. ² RabbitMQ has no forward non-destructive tail because reads are consume/requeue oriented. Unsupported operations always return `NOT_IMPLEMENTED` (exit 12), never a fake success.
 
 ---
 
@@ -100,6 +101,7 @@ mqgov ctx test                       # ping the broker through the context
 mqgov topic list -o json
 mqgov topic describe orders -o json
 mqgov message peek orders --count 5 -o json     # fingerprints only, nothing consumed
+mqgov message tail orders --max-messages 10 -o json
 
 # 3. Preview the blast radius of a dangerous op — nothing is changed yet
 mqgov group reset-offset billing orders --to latest --dry-run -o json   # shows per-partition delta
@@ -121,7 +123,7 @@ Every command is sorted into one of four **risk tiers** by the fail-closed `mqcl
 
 | Tier | What it covers | What you must provide |
 |:---:|---|---|
-| **R0** | Reads & previews (`topic list/describe`, `group list/lag`, `message peek`, `*-dry-run`, `audit query/verify`, `doctor`) | Nothing — but it's still audited |
+| **R0** | Reads & previews (`topic list/describe`, `group list/lag`, `message peek`, `message tail`, `*-dry-run`, `audit query/verify`, `doctor`) | Nothing — but it's still audited |
 | **R1** | Ordinary writes (`message produce`, `topic create`) | `--yes` (or an interactive confirmation) |
 | **R2** | Elevated mutations (`topic alter`, `group create/delete`, produce to a **protected** topic) | `--yes` **and** a non-empty `--ticket` |
 | **R3** | Destructive / irreversible (`group reset-offset`, `topic purge`, `topic delete`, produce to an **internal/system** topic) | The above **plus** the exact `--allow-*` flag |
@@ -179,14 +181,15 @@ Offsets are a Kafka and Pulsar concept. On RabbitMQ and RocketMQ, `group lag` / 
 </details>
 
 <details>
-<summary><b>message</b> — peek & produce</summary>
+<summary><b>message</b> — peek, tail & produce</summary>
 
 ```bash
 mqgov message peek    <topic> [--partition N] [--offset N] [--count N] -o json     # R0, non-destructive, fingerprints only
+mqgov message tail    <topic> [--partition N] [--from earliest|latest|offset:N] [--follow] [--max-messages N] [--timeout 30s] -o json
 mqgov message produce <topic> [--key <k>] [--body <text>] --yes                    # R1 (R3 + --allow-internal-produce for internal topics)
 ```
 
-`peek` never consumes a message or moves a cursor, and returns only sha256 fingerprints (`keySha256`, `bodySha256`, size) — never the body. On RocketMQ, `peek` fails closed (`NOT_IMPLEMENTED`).
+`peek` and `tail` never consume a message or move a cursor, and return only sha256 fingerprints (`keySha256`, `bodySha256`, size, optional timestamp) — never the body. `tail` is bounded by `--max-messages` and `--timeout`; `--follow` streams new messages only until those bounds or cancellation. Tail is supported by Kafka and Pulsar. On RabbitMQ and RocketMQ, `tail` fails closed (`NOT_IMPLEMENTED`); on RocketMQ, `peek` also fails closed.
 </details>
 
 <details>
@@ -220,7 +223,7 @@ mqgov version
 
 mqgov-cli is designed to be driven by autonomous agents safely:
 
-- Run `mqgov capabilities -o json` first to discover what the bound backend supports — brokers differ, don't assume (e.g. RabbitMQ/RocketMQ have no offsets; RocketMQ has no peek).
+- Run `mqgov capabilities -o json` first to discover what the bound backend supports — brokers differ, don't assume (e.g. RabbitMQ/RocketMQ have no offsets; RabbitMQ/RocketMQ have no tail; RocketMQ has no peek).
 - Use `-o json` everywhere; every command returns a stable, versioned envelope.
 - Get blast radius from `--dry-run` / `--plan`, never from your own reasoning.
 - **Never self-fill `--ticket`, `--allow-*`, or a high-risk `--yes`.** Surface the required human approval and stop.

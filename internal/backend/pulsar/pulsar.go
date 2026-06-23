@@ -122,7 +122,7 @@ func (b *Broker) Capabilities() mqgov.Capabilities {
 	return mqgov.Capabilities{
 		Backend:            "pulsar",
 		ResourceTypes:      []string{"topic", "group", "message", "offset"},
-		Verbs:              []string{"list", "describe", "lag", "peek", "produce", "create", "alter", "delete", "purge", "reset-offset"},
+		Verbs:              []string{"list", "describe", "lag", "peek", "tail", "produce", "create", "alter", "delete", "purge", "reset-offset"},
 		SupportsOffsets:    true,
 		SupportsPartitions: true,
 		SupportsACL:        false,
@@ -266,6 +266,46 @@ func (b *Broker) Produce(ctx context.Context, req mqgov.MessageProduceRequest) (
 		Coordinate:  mqgov.MessageCoordinate{TopicCoordinate: req.Coordinate, Partition: int(msgID.PartitionIdx()), Offset: msgID.EntryID()},
 		Fingerprint: mqgov.Fingerprints(req.Key, req.Body, 1),
 	}, nil
+}
+
+func (b *Broker) Tail(ctx context.Context, req mqgov.MessageTailRequest, emit func(mqgov.MessageFingerprint) error) (mqgov.MessageTailResult, error) {
+	start, inclusive, err := pulsarTailStart(req.From)
+	if err != nil {
+		return mqgov.MessageTailResult{}, err
+	}
+	reader, err := b.client.CreateReader(pulsarclient.ReaderOptions{
+		Topic:                   b.fqn(req.Coordinate.Topic),
+		StartMessageID:          start,
+		StartMessageIDInclusive: inclusive,
+		ReceiverQueueSize:       maxInt(req.MaxMessages, 1),
+	})
+	if err != nil {
+		return mqgov.MessageTailResult{}, backendErr(err)
+	}
+	defer reader.Close()
+	result := mqgov.MessageTailResult{Coordinate: req.Coordinate}
+	impact := map[int]*mqgov.PartitionImpact{}
+	for req.MaxMessages <= 0 || int(result.Count) < req.MaxMessages {
+		if !req.Follow && !reader.HasNext() {
+			break
+		}
+		msg, err := reader.Next(ctx)
+		if err != nil {
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				break
+			}
+			return result, backendErr(err)
+		}
+		fp := tailFingerprint(msg)
+		if err := emit(fp); err != nil {
+			return result, err
+		}
+		result.Count++
+		result.TotalSize += int64(fp.Size)
+		updateTailImpact(impact, fp.Partition, fp.Offset)
+	}
+	result.Impact = tailImpactSlice(impact)
+	return result, nil
 }
 
 func (b *Broker) AlterTopic(ctx context.Context, req mqgov.TopicAlterRequest) (mqgov.TopicDescription, error) {
@@ -582,6 +622,58 @@ func fingerprint(msg pulsarclient.Message) mqgov.MessageFingerprint {
 		BodySHA256: mqgov.Fingerprints(nil, msg.Payload(), 0).BodySHA256,
 		Size:       len(msg.Payload()),
 	}
+}
+
+func tailFingerprint(msg pulsarclient.Message) mqgov.MessageFingerprint {
+	fp := fingerprint(msg)
+	if !msg.EventTime().IsZero() {
+		fp.Timestamp = msg.EventTime().UTC().Format(time.RFC3339Nano)
+	}
+	return fp
+}
+
+func pulsarTailStart(from string) (pulsarclient.MessageID, bool, error) {
+	switch {
+	case from == "" || from == "earliest":
+		return pulsarclient.EarliestMessageID(), true, nil
+	case from == "latest":
+		return pulsarclient.LatestMessageID(), false, nil
+	case strings.HasPrefix(from, "offset:"):
+		return nil, false, apperrors.New(apperrors.CodeUsageError, "Pulsar tail does not support offset:N start positions", nil)
+	default:
+		return nil, false, apperrors.New(apperrors.CodeUsageError, "unsupported tail start position", nil)
+	}
+}
+
+func updateTailImpact(impact map[int]*mqgov.PartitionImpact, partition int, offset int64) {
+	item, ok := impact[partition]
+	if !ok {
+		impact[partition] = &mqgov.PartitionImpact{Partition: partition, From: offset, To: offset + 1, Count: 1}
+		return
+	}
+	if offset < item.From {
+		item.From = offset
+	}
+	if offset+1 > item.To {
+		item.To = offset + 1
+	}
+	item.Count++
+}
+
+func tailImpactSlice(impact map[int]*mqgov.PartitionImpact) []mqgov.PartitionImpact {
+	out := make([]mqgov.PartitionImpact, 0, len(impact))
+	for _, item := range impact {
+		out = append(out, *item)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Partition < out[j].Partition })
+	return out
+}
+
+func maxInt(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
 }
 
 func buildTLSConfig(opts Options) (*tls.Config, error) {

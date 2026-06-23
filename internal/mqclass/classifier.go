@@ -13,6 +13,7 @@ const (
 	OperationDescribe    Operation = "describe"
 	OperationLag         Operation = "lag"
 	OperationPeek        Operation = "peek"
+	OperationTail        Operation = "tail"
 	OperationClusterInfo Operation = "cluster-info"
 	OperationProduce     Operation = "produce"
 	OperationCreateTopic Operation = "create-topic"
@@ -83,7 +84,7 @@ func applyDestructivePins(result Result, op Operation, target Target) Result {
 
 func classifyBase(op Operation) Result {
 	switch op {
-	case OperationList, OperationDescribe, OperationLag, OperationPeek, OperationClusterInfo:
+	case OperationList, OperationDescribe, OperationLag, OperationPeek, OperationTail, OperationClusterInfo:
 		return Result{Risk: safety.R0, Reason: "read-only broker operation"}
 	case OperationProduce, OperationCreateTopic:
 		return Result{Risk: safety.R1, Reason: "non-protected topic write"}

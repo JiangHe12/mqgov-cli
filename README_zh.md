@@ -4,7 +4,7 @@
 
 **面向人类_和_ AI agent 的受治理消息中间件操作工具。**
 
-一条安全的命令行,统一管理 **Kafka**、**RabbitMQ**、**Pulsar**、**RocketMQ** —— 列出、查看、peek、生产、重置 offset、清空、删除 topic,绝不手滑搞挂生产、也绝不静默清空一个队列。
+一条安全的命令行,统一管理 **Kafka**、**RabbitMQ**、**Pulsar**、**RocketMQ** —— 列出、查看、peek、tail、生产、重置 offset、清空、删除 topic,绝不手滑搞挂生产、也绝不静默清空一个队列。
 
 [![npm version](https://img.shields.io/npm/v/mqgov-cli.svg)](https://www.npmjs.com/package/mqgov-cli)
 [![CI](https://github.com/JiangHe12/mqgov-cli/actions/workflows/ci.yml/badge.svg)](https://github.com/JiangHe12/mqgov-cli/actions/workflows/ci.yml)
@@ -25,7 +25,7 @@
 
 - 🔎 **先给你看爆炸半径** —— `--dry-run` / `--plan` 在动手前打印精确的每分区影响(一次 offset 重置会重放/跳过多少条消息)。
 - 🛡️ **危险操作没有显式签字就拒绝** —— 高危命令需要确认标志、变更工单、以及该操作专属的 `--allow-*`。
-- 👀 **peek 不消费** —— 查看消息绝不推进消费者位点、也不清空队列。
+- 👀 **peek/tail 不消费** —— 查看或流式读取消息指纹绝不推进消费者位点、也不清空队列。
 - 📜 **一切记入防篡改审计日志** —— 只记 sha256 指纹和计数,**绝不记你的消息体**。
 - 🤖 **可安全交给 AI agent** —— agent 可自由读取和预览,但**无法**伪造危险操作所需的人工审批。
 
@@ -38,10 +38,10 @@
 | | |
 |---|---|
 | 📨 **四个 broker** | **Kafka**(franz-go)、**RabbitMQ**(AMQP + 管理 API)、**Pulsar**(客户端 + admin REST)、**RocketMQ**(rocketmq-client-go/v2)。一套与后端无关的治理模型;按 context 选择或按命令覆盖。 |
-| 🧱 **topic / group / message** | topic:list · describe · create · alter · delete · purge。消费组:list · lag · reset-offset。消息:非破坏性 peek · produce。 |
+| 🧱 **topic / group / message** | topic:list · describe · create · alter · delete · purge。消费组:list · lag · reset-offset。消息:非破坏性 peek · tail · produce。 |
 | 🔐 **R0–R3 治理** | 每个操作由 fail-closed 的 `mqclass` 引擎分级;保护上下文与内部/系统 topic 升一档;AI 调用方永远无法自我授权。 |
 | 🎯 **真实爆炸半径预览** | `reset-offset --dry-run` 和 `purge --dry-run` 从实时 broker 计算真实的每分区消息 delta —— 不靠猜。预览只读,绝不变更。 |
-| 👀 **非破坏性 peek** | 把消息以指纹形式查看,不消费、不移动游标(Pulsar Reader、RabbitMQ get+requeue)。无法保证非破坏的 broker 上,peek **失败关闭**而非静默消费。 |
+| 👀 **非破坏性 peek/tail** | 把消息以指纹形式查看或流式读取,不消费、不移动游标(Kafka 直接分区读取、Pulsar Reader、RabbitMQ 仅 peek 使用 get+requeue)。无法保证非破坏的 broker 上,操作 **失败关闭**而非静默消费。 |
 | 🧭 **诚实的能力声明** | broker 各不相同 —— mqgov 如实报告每个 broker 实际支持什么(`capabilities -o json`),其余一律 **`NOT_IMPLEMENTED` 失败关闭**,绝不伪造。 |
 | 📜 **防篡改审计** | 每个操作哈希链记录(sha256 指纹 + 计数,**不含消息体/key/header**);`audit verify` 检测篡改。 |
 | 🩺 **运维与体验** | 后端绑定的 `ctx` 上下文(密钥经 credstore)、`doctor` 诊断、shell `completion`、OpenTelemetry 链路/指标、处处 JSON 输出。 |
@@ -54,11 +54,12 @@
 | topic list / describe / create / delete | ✅ | ✅ | ✅ | ✅ |
 | produce | ✅ | ✅ | ✅ | ✅ |
 | **非破坏性 peek** | ✅ | ✅(Reader) | ✅(get+requeue) | ❌ `NOT_IMPLEMENTED`¹ |
+| **非破坏性 tail** | ✅ | ✅(Reader) | ❌ `NOT_IMPLEMENTED`² | ❌ `NOT_IMPLEMENTED`¹ |
 | **offset lag / reset** | ✅ | ✅(游标) | ❌(无 offset) | ❌ |
 | alter 分区 | ✅ | ✅ | ❌ | ❌ |
 | purge | ✅ | ✅ | ✅ | ❌ |
 
-¹ RocketMQ 的 Go v2 `PullConsumer` 会进入消费组生命周期并提交 offset,无法保证非破坏性 peek —— mqgov 选择失败关闭,而非静默推进 offset。不支持的操作一律返回 `NOT_IMPLEMENTED`(exit 12),绝不假装成功。
+¹ RocketMQ 的 Go v2 `PullConsumer` 会进入消费组生命周期并提交 offset,无法保证非破坏性 peek/tail —— mqgov 选择失败关闭,而非静默推进 offset。² RabbitMQ 没有向前的非破坏性 tail,读取语义是 consume/requeue。不支持的操作一律返回 `NOT_IMPLEMENTED`(exit 12),绝不假装成功。
 
 ---
 
@@ -100,6 +101,7 @@ mqgov ctx test                       # 经 context ping 一下 broker
 mqgov topic list -o json
 mqgov topic describe orders -o json
 mqgov message peek orders --count 5 -o json     # 只返回指纹,什么都不消费
+mqgov message tail orders --max-messages 10 -o json
 
 # 3. 预览一个高危操作的爆炸半径 —— 此刻什么都没变
 mqgov group reset-offset billing orders --to latest --dry-run -o json   # 显示每分区 delta
@@ -121,7 +123,7 @@ mqgov audit query --since 1h -o json
 
 | 档 | 涵盖 | 你必须提供 |
 |:---:|---|---|
-| **R0** | 读与预览(`topic list/describe`、`group list/lag`、`message peek`、`*-dry-run`、`audit query/verify`、`doctor`) | 无 —— 但仍会审计 |
+| **R0** | 读与预览(`topic list/describe`、`group list/lag`、`message peek`、`message tail`、`*-dry-run`、`audit query/verify`、`doctor`) | 无 —— 但仍会审计 |
 | **R1** | 普通写(`message produce`、`topic create`) | `--yes`(或交互确认) |
 | **R2** | 升级变更(`topic alter`、`group create/delete`、向**保护** topic 生产) | `--yes` **且**非空 `--ticket` |
 | **R3** | 破坏性 / 不可逆(`group reset-offset`、`topic purge`、`topic delete`、向**内部/系统** topic 生产) | 以上 **再加**该操作专属的 `--allow-*` 标志 |
@@ -179,14 +181,15 @@ offset 是 Kafka 与 Pulsar 的概念。在 RabbitMQ 与 RocketMQ 上,`group lag
 </details>
 
 <details>
-<summary><b>message</b> —— peek 与 produce</summary>
+<summary><b>message</b> —— peek、tail 与 produce</summary>
 
 ```bash
 mqgov message peek    <topic> [--partition N] [--offset N] [--count N] -o json     # R0,非破坏,仅指纹
+mqgov message tail    <topic> [--partition N] [--from earliest|latest|offset:N] [--follow] [--max-messages N] [--timeout 30s] -o json
 mqgov message produce <topic> [--key <k>] [--body <text>] --yes                    # R1(内部 topic 为 R3 + --allow-internal-produce)
 ```
 
-`peek` 绝不消费消息、不移动游标,只返回 sha256 指纹(`keySha256`、`bodySha256`、size)—— 绝不返回消息体。RocketMQ 上 `peek` 失败关闭(`NOT_IMPLEMENTED`)。
+`peek` 和 `tail` 绝不消费消息、不移动游标,只返回 sha256 指纹(`keySha256`、`bodySha256`、size、可选 timestamp)—— 绝不返回消息体。`tail` 受 `--max-messages` 与 `--timeout` 约束;`--follow` 也只会流式读取到这些边界或取消为止。Tail 支持 Kafka 与 Pulsar;RabbitMQ 与 RocketMQ 上 `tail` 失败关闭(`NOT_IMPLEMENTED`);RocketMQ 上 `peek` 也失败关闭。
 </details>
 
 <details>
@@ -220,7 +223,7 @@ mqgov version
 
 mqgov-cli 设计为可被自治 agent 安全驱动:
 
-- 先跑 `mqgov capabilities -o json` 发现绑定后端支持什么 —— broker 各异,别假设(如 RabbitMQ/RocketMQ 无 offset;RocketMQ 无 peek)。
+- 先跑 `mqgov capabilities -o json` 发现绑定后端支持什么 —— broker 各异,别假设(如 RabbitMQ/RocketMQ 无 offset;RabbitMQ/RocketMQ 无 tail;RocketMQ 无 peek)。
 - 处处用 `-o json`;每个命令返回稳定、带版本的信封。
 - 爆炸半径来自 `--dry-run` / `--plan`,绝不来自你自己的推理。
 - **绝不自填 `--ticket`、`--allow-*` 或高危 `--yes`。** 把所需人工审批上报并停下。

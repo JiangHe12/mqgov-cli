@@ -12,7 +12,7 @@ Hard rules:
 
 - Never invent or self-fill `--ticket`, `--yes`, or `--allow-*`; these are human authorization inputs.
 - Message body, key, and headers must not be copied into audit summaries or tickets. Use fingerprints and counts.
-- Check `mqgov capabilities -o json` before assuming a backend supports offsets, partitions, ACL, or peek.
+- Check `mqgov capabilities -o json` before assuming a backend supports offsets, partitions, ACL, peek, or tail.
 - Unsupported backend operations fail closed with `NOT_IMPLEMENTED`.
 
 Common setup:
@@ -34,6 +34,7 @@ mqgov topic describe <topic> -o json
 mqgov group list -o json
 mqgov group lag <group> <topic> -o json
 mqgov message peek <topic> --partition 0 --offset 0 --count 1 -o json
+mqgov message tail <topic> --from earliest --max-messages 10 --timeout 30s -o json
 ```
 
 Writes require human authorization according to risk:
@@ -54,3 +55,5 @@ Audit:
 mqgov audit query --since 24h --limit 100 -o json
 mqgov audit verify --strict -o json
 ```
+
+`message tail` is fingerprint-only and non-destructive. It is supported by Kafka and Pulsar. RabbitMQ and RocketMQ return `NOT_IMPLEMENTED` for tail; RocketMQ also returns `NOT_IMPLEMENTED` for peek.

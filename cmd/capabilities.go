@@ -94,6 +94,7 @@ func buildCapabilities(backendCaps mqgov.Capabilities) capabilitiesData {
 				{Noun: "group", Verb: "create/delete", Risk: "R2"},
 				{Noun: "group", Verb: "reset-offset", Risk: "R3", AllowFlag: "allow-offset-reset"},
 				{Noun: "message", Verb: "peek", Risk: "R0"},
+				{Noun: "message", Verb: "tail", Risk: "R0"},
 				{Noun: "message", Verb: "produce", Risk: "R1/R2 protected"},
 				{Noun: "message", Verb: "produce internal/system", Risk: "R3", AllowFlag: "allow-internal-produce"},
 			},

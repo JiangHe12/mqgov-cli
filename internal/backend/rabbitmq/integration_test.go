@@ -90,6 +90,9 @@ func TestRabbitMQIntegration(t *testing.T) {
 	if afterPeek != beforePeek {
 		t.Fatalf("peek changed message count: before=%d after=%d", beforePeek, afterPeek)
 	}
+	if _, ok := mqgov.SupportsTail(backend); ok {
+		t.Fatalf("SupportsTail() = true, want false")
+	}
 
 	plan, err := backend.PurgeTopic(ctx, mqgov.TopicPurgeRequest{Coordinate: coord, DryRun: true})
 	if err != nil {

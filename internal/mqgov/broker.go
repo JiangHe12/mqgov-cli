@@ -100,12 +100,27 @@ type MessagePeekRequest struct {
 	Count      int
 }
 
+type MessageTailRequest struct {
+	Coordinate  TopicCoordinate
+	Partition   int
+	From        string
+	Follow      bool
+	MaxMessages int
+}
+
 type MessagePeekResult struct {
 	Coordinate TopicCoordinate      `json:"coordinate"`
 	Partition  int                  `json:"partition"`
 	Offset     int64                `json:"offset"`
 	Count      int                  `json:"count"`
 	Messages   []MessageFingerprint `json:"messages"`
+}
+
+type MessageTailResult struct {
+	Coordinate TopicCoordinate   `json:"coordinate"`
+	Count      int64             `json:"count"`
+	TotalSize  int64             `json:"totalSize"`
+	Impact     []PartitionImpact `json:"impact,omitempty"`
 }
 
 type OffsetPlanRequest struct {
@@ -138,6 +153,7 @@ type MessageFingerprint struct {
 	KeySHA256  string `json:"keySha256,omitempty"`
 	BodySHA256 string `json:"bodySha256,omitempty"`
 	Size       int    `json:"size"`
+	Timestamp  string `json:"timestamp,omitempty"`
 }
 
 type ResourceFingerprints struct {
@@ -192,6 +208,10 @@ type ACLManager interface {
 	DeleteACL(ctx context.Context, resource string) error
 }
 
+type Tailer interface {
+	Tail(ctx context.Context, req MessageTailRequest, emit func(MessageFingerprint) error) (MessageTailResult, error)
+}
+
 func SupportsOffsets(b Broker) (OffsetManager, bool) {
 	manager, ok := b.(OffsetManager)
 	return manager, ok
@@ -205,4 +225,9 @@ func SupportsPartitions(b Broker) (PartitionManager, bool) {
 func SupportsACL(b Broker) (ACLManager, bool) {
 	manager, ok := b.(ACLManager)
 	return manager, ok
+}
+
+func SupportsTail(b Broker) (Tailer, bool) {
+	tailer, ok := b.(Tailer)
+	return tailer, ok
 }

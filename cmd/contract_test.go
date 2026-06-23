@@ -25,6 +25,7 @@ func TestContractJSONEnvelopeAndExitCodes(t *testing.T) {
 		{name: "R0 topic list json envelope", args: []string{"-o", "json", "topic", "list"}, wantExit: 0, wantKind: "TopicList"},
 		{name: "R1 produce requires yes", args: []string{"-o", "json", "message", "produce", "orders", "--key", "secret-key", "--body", "secret-body"}, wantExit: 8},
 		{name: "R1 produce with yes", args: []string{"-o", "json", "--yes", "message", "produce", "orders", "--key", "secret-key", "--body", "secret-body"}, wantExit: 0, wantKind: "MessageProduceResult"},
+		{name: "tail unsupported backend fails closed", args: []string{"-o", "json", "message", "tail", "orders", "--max-messages", "1"}, wantExit: 12},
 		{name: "reset dry-run previews without high-risk authorization", args: []string{"-o", "json", "group", "reset-offset", "billing", "orders", "--dry-run"}, wantExit: 0, wantKind: "OffsetPlan"},
 		{name: "reset real execution still requires high-risk authorization", args: []string{"-o", "json", "group", "reset-offset", "billing", "orders"}, wantExit: 8},
 		{name: "purge dry-run previews without high-risk authorization", args: []string{"-o", "json", "topic", "purge", "orders", "--dry-run"}, wantExit: 0, wantKind: "TopicPurgeResult"},

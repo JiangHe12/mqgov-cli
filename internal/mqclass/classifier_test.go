@@ -18,6 +18,7 @@ func TestClassifyGovernanceInvariants(t *testing.T) {
 		{name: "describe R0", op: OperationDescribe, want: safety.R0},
 		{name: "lag R0", op: OperationLag, want: safety.R0},
 		{name: "peek R0", op: OperationPeek, want: safety.R0},
+		{name: "tail R0", op: OperationTail, want: safety.R0},
 		{name: "cluster info R0", op: OperationClusterInfo, want: safety.R0},
 		{name: "produce R1", op: OperationProduce, target: Target{Topic: "orders"}, want: safety.R1},
 		{name: "create topic R1", op: OperationCreateTopic, target: Target{Topic: "orders"}, want: safety.R1},
@@ -39,6 +40,50 @@ func TestClassifyGovernanceInvariants(t *testing.T) {
 			t.Parallel()
 			if got := Classify(tt.op, tt.target); got.Risk != tt.want {
 				t.Fatalf("Classify() risk = %v, want %v (%s)", got.Risk, tt.want, got.Reason)
+			}
+		})
+	}
+}
+
+func TestClassifyTailEscalation(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		target Target
+		want   safety.Risk
+	}{
+		{name: "base R0", target: Target{Topic: "orders"}, want: safety.R0},
+		{name: "protected R1", target: Target{Topic: "orders", ProtectedTopic: true}, want: safety.R1},
+		{name: "internal R1", target: Target{Topic: "__consumer_offsets", InternalTopic: true}, want: safety.R1},
+		{name: "wildcard R1", target: Target{Topic: "orders-*"}, want: safety.R1},
+		{name: "protected internal wildcard escalates to R3 by target escalation", target: Target{Topic: "__consumer_*", ProtectedTopic: true, InternalTopic: true}, want: safety.R3},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := Classify(OperationTail, tt.target); got.Risk != tt.want {
+				t.Fatalf("Classify(tail) risk = %v, want %v (%s)", got.Risk, tt.want, got.Reason)
+			}
+		})
+	}
+}
+
+func TestClassifyTailMatchesPeek(t *testing.T) {
+	t.Parallel()
+	targets := []Target{
+		{Topic: "orders"},
+		{Topic: "orders", ProtectedTopic: true},
+		{Topic: "__consumer_offsets", InternalTopic: true},
+		{Topic: "orders-*"},
+		{Topic: "__consumer_*", ProtectedTopic: true, InternalTopic: true},
+	}
+	for _, target := range targets {
+		t.Run(target.Topic, func(t *testing.T) {
+			t.Parallel()
+			tail := Classify(OperationTail, target)
+			peek := Classify(OperationPeek, target)
+			if tail.Risk != peek.Risk {
+				t.Fatalf("tail risk = %v, peek risk = %v for target %+v", tail.Risk, peek.Risk, target)
 			}
 		})
 	}

@@ -3,6 +3,7 @@ package mqgov
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"time"
 )
 
 func FingerprintMessage(partition int, offset int64, key, body []byte) MessageFingerprint {
@@ -13,6 +14,14 @@ func FingerprintMessage(partition int, offset int64, key, body []byte) MessageFi
 		BodySHA256: sha256Hex(body),
 		Size:       len(body),
 	}
+}
+
+func FingerprintMessageAt(partition int, offset int64, key, body []byte, timestamp time.Time) MessageFingerprint {
+	fp := FingerprintMessage(partition, offset, key, body)
+	if !timestamp.IsZero() {
+		fp.Timestamp = timestamp.UTC().Format(time.RFC3339Nano)
+	}
+	return fp
 }
 
 func Fingerprints(key, body []byte, count int64) ResourceFingerprints {

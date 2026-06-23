@@ -71,7 +71,7 @@ func (b *Broker) Capabilities() mqgov.Capabilities {
 	return mqgov.Capabilities{
 		Backend:            "kafka",
 		ResourceTypes:      []string{"topic", "group", "message", "offset"},
-		Verbs:              []string{"list", "describe", "lag", "peek", "produce", "create", "alter", "delete", "purge", "reset-offset"},
+		Verbs:              []string{"list", "describe", "lag", "peek", "tail", "produce", "create", "alter", "delete", "purge", "reset-offset"},
 		SupportsOffsets:    true,
 		SupportsPartitions: true,
 		SupportsACL:        false,
@@ -240,6 +240,69 @@ func (b *Broker) Produce(ctx context.Context, req mqgov.MessageProduceRequest) (
 		Coordinate:  mqgov.MessageCoordinate{TopicCoordinate: req.Coordinate, Partition: int(produced.Partition), Offset: produced.Offset},
 		Fingerprint: mqgov.Fingerprints(req.Key, req.Body, 1),
 	}, nil
+}
+
+func (b *Broker) Tail(ctx context.Context, req mqgov.MessageTailRequest, emit func(mqgov.MessageFingerprint) error) (mqgov.MessageTailResult, error) {
+	starts, ends, err := b.tailOffsets(ctx, req)
+	if err != nil {
+		return mqgov.MessageTailResult{}, err
+	}
+	client, err := b.tailClient(starts)
+	if err != nil {
+		return mqgov.MessageTailResult{}, err
+	}
+	defer client.Close()
+	result := mqgov.MessageTailResult{Coordinate: req.Coordinate}
+	impact := map[int]*mqgov.PartitionImpact{}
+	done := tailDonePartitions(starts, ends)
+	for !tailLimitReached(req, result) {
+		if !req.Follow && tailAllDone(done, starts[req.Coordinate.Topic]) {
+			break
+		}
+		fetches := client.PollFetches(ctx)
+		if err := fetches.Err(); err != nil {
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				break
+			}
+			return result, backendErr(err)
+		}
+		if fetches.Empty() {
+			if !req.Follow {
+				break
+			}
+			continue
+		}
+		if err := processKafkaTailFetches(fetches, req, ends, done, impact, &result, emit); err != nil {
+			return result, err
+		}
+	}
+	result.Impact = tailImpactSlice(impact)
+	return result, nil
+}
+
+func processKafkaTailFetches(fetches kgo.Fetches, req mqgov.MessageTailRequest, ends kadm.ListedOffsets, done map[int32]bool, impact map[int]*mqgov.PartitionImpact, result *mqgov.MessageTailResult, emit func(mqgov.MessageFingerprint) error) error {
+	iter := fetches.RecordIter()
+	for !iter.Done() && !tailLimitReached(req, *result) {
+		record := iter.Next()
+		if record == nil {
+			continue
+		}
+		if !req.Follow && kafkaTailPastEnd(record, ends) {
+			done[record.Partition] = true
+			continue
+		}
+		fp := mqgov.FingerprintMessageAt(int(record.Partition), record.Offset, record.Key, record.Value, record.Timestamp)
+		if err := emit(fp); err != nil {
+			return err
+		}
+		result.Count++
+		result.TotalSize += int64(fp.Size)
+		updateTailImpact(impact, int(record.Partition), record.Offset)
+		if !req.Follow && kafkaTailReachedEnd(record, ends) {
+			done[record.Partition] = true
+		}
+	}
+	return nil
 }
 
 func (b *Broker) AlterTopic(ctx context.Context, req mqgov.TopicAlterRequest) (mqgov.TopicDescription, error) {
@@ -499,6 +562,123 @@ func (b *Broker) peekClient(req mqgov.MessagePeekRequest) (*kgo.Client, error) {
 		return nil, unreachable(err)
 	}
 	return client, nil
+}
+
+func (b *Broker) tailOffsets(ctx context.Context, req mqgov.MessageTailRequest) (map[string]map[int32]kgo.Offset, kadm.ListedOffsets, error) {
+	start, err := b.admin.ListStartOffsets(ctx, req.Coordinate.Topic)
+	if err != nil {
+		return nil, nil, backendErr(err)
+	}
+	end, err := b.admin.ListEndOffsets(ctx, req.Coordinate.Topic)
+	if err != nil {
+		return nil, nil, backendErr(err)
+	}
+	if err := start.Error(); err != nil {
+		return nil, nil, topicNotFoundErr(err)
+	}
+	if err := end.Error(); err != nil {
+		return nil, nil, topicNotFoundErr(err)
+	}
+	partitions := make(map[int32]kgo.Offset)
+	for partition, listed := range end[req.Coordinate.Topic] {
+		if req.Partition >= 0 && int(partition) != req.Partition {
+			continue
+		}
+		offset, err := kafkaTailStartOffset(req.From, start[req.Coordinate.Topic][partition].Offset, listed.Offset)
+		if err != nil {
+			return nil, nil, err
+		}
+		partitions[partition] = kgo.NewOffset().At(offset)
+	}
+	if len(partitions) == 0 {
+		return nil, nil, apperrors.New(apperrors.CodeResourceNotFound, "partition not found", nil)
+	}
+	return map[string]map[int32]kgo.Offset{req.Coordinate.Topic: partitions}, end, nil
+}
+
+func (b *Broker) tailClient(partitions map[string]map[int32]kgo.Offset) (*kgo.Client, error) {
+	kopts, err := kgoOptions(b.opts)
+	if err != nil {
+		return nil, err
+	}
+	kopts = append(kopts, kgo.ConsumePartitions(partitions))
+	client, err := kgo.NewClient(kopts...)
+	if err != nil {
+		return nil, unreachable(err)
+	}
+	return client, nil
+}
+
+func kafkaTailStartOffset(from string, start, end int64) (int64, error) {
+	switch {
+	case from == "" || from == "earliest":
+		return start, nil
+	case from == "latest":
+		return end, nil
+	case strings.HasPrefix(from, "offset:"):
+		value, err := strconv.ParseInt(strings.TrimPrefix(from, "offset:"), 10, 64)
+		if err != nil || value < 0 {
+			return 0, apperrors.New(apperrors.CodeUsageError, "invalid tail offset", err)
+		}
+		return value, nil
+	default:
+		return 0, apperrors.New(apperrors.CodeUsageError, "unsupported tail start position", nil)
+	}
+}
+
+func tailDonePartitions(starts map[string]map[int32]kgo.Offset, ends kadm.ListedOffsets) map[int32]bool {
+	done := map[int32]bool{}
+	for topic, partitions := range starts {
+		for partition, offset := range partitions {
+			end := ends[topic][partition].Offset
+			if end >= 0 && offset.EpochOffset().Offset >= end {
+				done[partition] = true
+			}
+		}
+	}
+	return done
+}
+
+func tailLimitReached(req mqgov.MessageTailRequest, result mqgov.MessageTailResult) bool {
+	return req.MaxMessages > 0 && int(result.Count) >= req.MaxMessages
+}
+
+func tailAllDone(done map[int32]bool, partitions map[int32]kgo.Offset) bool {
+	return len(done) == len(partitions)
+}
+
+func kafkaTailPastEnd(record *kgo.Record, ends kadm.ListedOffsets) bool {
+	end := ends[record.Topic][record.Partition].Offset
+	return end >= 0 && record.Offset >= end
+}
+
+func kafkaTailReachedEnd(record *kgo.Record, ends kadm.ListedOffsets) bool {
+	end := ends[record.Topic][record.Partition].Offset
+	return end >= 0 && record.Offset+1 >= end
+}
+
+func updateTailImpact(impact map[int]*mqgov.PartitionImpact, partition int, offset int64) {
+	item, ok := impact[partition]
+	if !ok {
+		impact[partition] = &mqgov.PartitionImpact{Partition: partition, From: offset, To: offset + 1, Count: 1}
+		return
+	}
+	if offset < item.From {
+		item.From = offset
+	}
+	if offset+1 > item.To {
+		item.To = offset + 1
+	}
+	item.Count++
+}
+
+func tailImpactSlice(impact map[int]*mqgov.PartitionImpact) []mqgov.PartitionImpact {
+	out := make([]mqgov.PartitionImpact, 0, len(impact))
+	for _, item := range impact {
+		out = append(out, *item)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Partition < out[j].Partition })
+	return out
 }
 
 func (b *Broker) timeout() time.Duration {

@@ -11,7 +11,7 @@ mqgov-cli is the governed message-broker operations CLI for AI agents: one entry
 point for **Kafka**, **RabbitMQ**, **Pulsar**, and **RocketMQ**. It provides
 backend-bound contexts, a fail-closed message-operation risk classifier
 (`mqclass`), R0-R3 authorization with protected-context escalation,
-non-destructive peek, real per-partition blast-radius previews, tamper-evident
+non-destructive peek/tail where the backend can guarantee it, real per-partition blast-radius previews, tamper-evident
 fingerprint-only audit, and redaction. It is built on the shared `opskit-core`
 governance engine.
 
@@ -72,8 +72,8 @@ go mod tidy                             # must be a no-op
   bodies, keys, headers, tickets, or reasons. `Message.Key/Body/Headers` are
   `json:"-"` so payloads can never serialize. Redaction applies before caller
   output and before audit persistence.
-- Peek must be non-destructive (no consume, no cursor/offset advance) or fail
-  closed (`NotImplemented`) — never silently consume on an R0 read.
+- Peek/tail must be non-destructive (no consume, no cursor/offset advance) or
+  fail closed (`NotImplemented`) — never silently consume on an R0 read.
 - No insecure transport: SASL/TLS and mTLS via credstore; never an
   insecure-skip-verify option. A backend that does not support requested TLS
   fails closed; it never silently connects in plaintext.
@@ -81,10 +81,10 @@ go mod tidy                             # must be a no-op
 ## Backends — the dumb-adapter contract
 
 - Backends implement `mqgov.Broker`; optional capabilities use the separate
-  `OffsetManager` / `PartitionManager` / `ACLManager` interfaces, type-asserted
+  `OffsetManager` / `PartitionManager` / `ACLManager` / `Tailer` interfaces, type-asserted
   and gated by `Supports*`. Unsupported capabilities fail closed with
   `NotImplemented` — never faked. Capabilities must reflect what the client
-  actually supports (e.g. RabbitMQ/RocketMQ `SupportsOffsets=false`).
+  actually supports (e.g. RabbitMQ/RocketMQ `SupportsOffsets=false`; RabbitMQ/RocketMQ do not support non-destructive tail).
 - **Backends are dumb**: they only execute broker operations. All R0-R3
   authorization stays in `cmd/` + `mqclass`; a backend must never make an
   authorization decision.
