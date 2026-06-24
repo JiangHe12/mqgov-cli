@@ -84,13 +84,15 @@ go mod tidy                             # must be a no-op
   `OffsetManager` / `PartitionManager` / `ACLManager` / `Tailer` interfaces, type-asserted
   and gated by `Supports*`. Unsupported capabilities fail closed with
   `NotImplemented` — never faked. Capabilities must reflect what the client
-  actually supports (e.g. RabbitMQ/RocketMQ `SupportsOffsets=false`; RabbitMQ/RocketMQ do not support non-destructive tail; Kafka and RabbitMQ support ACL, Pulsar/RocketMQ do not).
+  actually supports (e.g. RabbitMQ/RocketMQ `SupportsOffsets=false`; RabbitMQ/RocketMQ do not support non-destructive tail; Kafka, RabbitMQ, and Pulsar support ACL, RocketMQ does not).
 - **Backends are dumb**: they only execute broker operations. All R0-R3
   authorization stays in `cmd/` + `mqclass`; a backend must never make an
   authorization decision.
 - ACL mappings must stay backend-native and honest: Kafka uses broker ACLs with
   literal/prefixed patterns; RabbitMQ uses user-vhost permission regexes
-  (`configure`, `write`, `read`) and allow-only grants. Do not emulate unsupported
+  (`configure`, `write`, `read`) and allow-only grants; Pulsar uses namespace/topic
+  role permissions (`produce`, `consume`, `functions`, `sources`, `sinks`,
+  `packages`) and allow-only grants. Do not emulate unsupported
   ACL models or silently translate deny into allow.
 - All broker clients must be cgo-free (Kafka franz-go, RabbitMQ amqp091-go,
   Pulsar pulsar-client-go, RocketMQ rocketmq-client-go/v2). Never the legacy/cgo

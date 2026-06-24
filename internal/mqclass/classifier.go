@@ -189,7 +189,7 @@ func broadACLGrant(target ACLTarget) bool {
 
 func knownACLResourceType(resourceType string) bool {
 	switch normalizeACLToken(resourceType) {
-	case "any", "topic", "group", "cluster", "transactionalid", "delegationtoken", "user", "vhost":
+	case "any", "topic", "group", "cluster", "transactionalid", "delegationtoken", "user", "vhost", "namespace":
 		return true
 	default:
 		return false
@@ -204,7 +204,7 @@ func broadACLPatternType(patternType string) bool {
 func broadACLOperation(operation string) bool {
 	normalized := normalizeACLToken(operation)
 	switch normalized {
-	case "", "all", "alter", "clusteraction", "alterconfigs", "idempotentwrite":
+	case "", "all", "alter", "clusteraction", "alterconfigs", "idempotentwrite", "functions", "sources", "sinks", "packages":
 		return true
 	default:
 		return !knownACLOperation(normalized)
@@ -244,7 +244,7 @@ func normalizeACLToken(value string) string {
 
 func knownACLOperation(operation string) bool {
 	switch operation {
-	case "any", "all", "read", "write", "configure", "create", "delete", "alter", "describe", "clusteraction", "describeconfigs", "alterconfigs", "idempotentwrite", "createtokens", "describetokens":
+	case "any", "all", "read", "write", "configure", "produce", "consume", "functions", "sources", "sinks", "packages", "create", "delete", "alter", "describe", "clusteraction", "describeconfigs", "alterconfigs", "idempotentwrite", "createtokens", "describetokens":
 		return true
 	default:
 		return false

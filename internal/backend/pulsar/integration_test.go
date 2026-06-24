@@ -106,8 +106,39 @@ func TestPulsarIntegration(t *testing.T) {
 	if !ok {
 		t.Fatalf("SupportsTail() = false, want true")
 	}
-	if _, ok := mqgov.SupportsACL(backend); ok {
-		t.Fatalf("SupportsACL() = true, want false")
+	aclManager, ok := mqgov.SupportsACL(backend)
+	if !ok {
+		t.Fatalf("SupportsACL() = false, want true")
+	}
+	aclRole := fmt.Sprintf("mqgov-acl-it-%d", time.Now().UnixNano())
+	aclResource := backend.opts.Tenant + "/" + backend.opts.Namespace
+	aclBinding := mqgov.ACLBinding{
+		Principal:    aclRole,
+		ResourceType: "namespace",
+		ResourceName: aclResource,
+		PatternType:  "literal",
+		Operation:    "produce",
+		Permission:   "allow",
+	}
+	if err := aclManager.GrantACL(ctx, aclBinding); err != nil {
+		t.Fatalf("GrantACL() error = %v", err)
+	}
+	acls, err := aclManager.ListACLs(ctx, mqgov.ACLFilter{Principal: aclRole, ResourceType: "namespace", ResourceName: aclResource, Operation: "produce"})
+	if err != nil {
+		t.Fatalf("ListACLs(after grant) error = %v", err)
+	}
+	if len(acls) != 1 {
+		t.Fatalf("ListACLs(after grant) = %+v, want one produce binding", acls)
+	}
+	if err := aclManager.RevokeACL(ctx, aclBinding); err != nil {
+		t.Fatalf("RevokeACL() error = %v", err)
+	}
+	acls, err = aclManager.ListACLs(ctx, mqgov.ACLFilter{Principal: aclRole, ResourceType: "namespace", ResourceName: aclResource, Operation: "produce"})
+	if err != nil {
+		t.Fatalf("ListACLs(after revoke) error = %v", err)
+	}
+	if len(acls) != 0 {
+		t.Fatalf("ListACLs(after revoke) = %+v, want none", acls)
 	}
 	tailReq := mqgov.MessageTailRequest{Coordinate: coord, From: "earliest", MaxMessages: 1}
 	firstTail := collectTail(t, ctx, tailer, tailReq)

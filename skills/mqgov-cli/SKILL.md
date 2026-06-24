@@ -52,13 +52,16 @@ mqgov acl grant --principal User:svc --resource-type topic --resource-name <topi
 mqgov acl revoke --principal User:svc --resource-type topic --resource-name <topic> --pattern literal --operation read --permission allow --yes --ticket <ticket> --allow-destructive-acl -o json
 mqgov acl grant --principal svc --vhost / --resource-type vhost --resource-name '^orders$' --pattern regex --operation read --permission allow --yes --ticket <ticket> -o json
 mqgov acl revoke --principal svc --vhost / --resource-type vhost --resource-name '^orders$' --pattern regex --operation read --permission allow --yes --ticket <ticket> --allow-destructive-acl -o json
+mqgov acl grant --principal app-role --resource-type namespace --resource-name public/default --pattern literal --operation produce --permission allow --yes --ticket <ticket> -o json
+mqgov acl revoke --principal app-role --resource-type topic --resource-name <topic> --pattern literal --operation consume --permission allow --yes --ticket <ticket> --allow-destructive-acl -o json
 ```
 
 ACL governance:
 
-- Kafka and RabbitMQ support `acl list|grant|revoke`; Pulsar and RocketMQ fail closed with `NOT_IMPLEMENTED`.
+- Kafka, RabbitMQ, and Pulsar support `acl list|grant|revoke`; RocketMQ fails closed with `NOT_IMPLEMENTED`.
 - Kafka uses broker ACLs with `literal`/`prefixed` patterns. RabbitMQ uses native user-vhost permission regexes with operations `configure`, `write`, and `read`; RabbitMQ rejects deny and non-regex patterns.
-- `acl list` is R0. Normal `acl grant` is R2. Broad grants, including Kafka prefixed patterns and broad RabbitMQ regexes such as `.*`, `.+`, `.`, or `orders.*`, and every `acl revoke` are R3 and require `--allow-destructive-acl`.
+- Pulsar uses native role permissions on namespaces or topics with actions `produce`, `consume`, `functions`, `sources`, `sinks`, and `packages`; Pulsar rejects deny and non-literal patterns.
+- `acl list` is R0. Normal `acl grant` is R2. Broad grants, including Kafka prefixed patterns, broad RabbitMQ regexes such as `.*`, `.+`, `.`, or `orders.*`, and Pulsar `functions`/`sources`/`sinks`/`packages`, and every `acl revoke` are R3 and require `--allow-destructive-acl`.
 
 Audit:
 

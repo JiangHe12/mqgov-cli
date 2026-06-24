@@ -121,11 +121,11 @@ func (b *Broker) Describe() mqgov.Description {
 func (b *Broker) Capabilities() mqgov.Capabilities {
 	return mqgov.Capabilities{
 		Backend:            "pulsar",
-		ResourceTypes:      []string{"topic", "group", "message", "offset"},
-		Verbs:              []string{"list", "describe", "lag", "peek", "tail", "produce", "create", "alter", "delete", "purge", "reset-offset"},
+		ResourceTypes:      []string{"topic", "group", "message", "offset", "acl"},
+		Verbs:              []string{"list", "describe", "lag", "peek", "tail", "produce", "create", "alter", "delete", "purge", "reset-offset", "grant-acl", "revoke-acl"},
 		SupportsOffsets:    true,
 		SupportsPartitions: true,
-		SupportsACL:        false,
+		SupportsACL:        true,
 	}
 }
 
@@ -356,6 +356,71 @@ func (b *Broker) PurgeTopic(ctx context.Context, req mqgov.TopicPurgeRequest) (m
 	}, nil
 }
 
+func (b *Broker) ListACLs(ctx context.Context, filter mqgov.ACLFilter) ([]mqgov.ACLBinding, error) {
+	target, err := b.pulsarACLTarget(filter.ResourceType, filter.ResourceName, true)
+	if err != nil {
+		return nil, err
+	}
+	if err := validatePulsarACLFilter(filter); err != nil {
+		return nil, err
+	}
+	filter.ResourceType = target.resourceType
+	filter.ResourceName = target.resourceName
+	permissions, err := b.pulsarPermissions(ctx, target)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]mqgov.ACLBinding, 0, len(permissions))
+	for role, actions := range permissions {
+		for _, action := range actions {
+			binding := mqgov.ACLBinding{
+				Principal:    role,
+				Host:         "*",
+				ResourceType: target.resourceType,
+				ResourceName: target.resourceName,
+				PatternType:  "literal",
+				Operation:    strings.ToLower(strings.TrimSpace(action)),
+				Permission:   "allow",
+			}
+			if pulsarACLMatches(binding, filter) {
+				out = append(out, binding)
+			}
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return pulsarACLSortKey(out[i]) < pulsarACLSortKey(out[j]) })
+	return out, nil
+}
+
+func (b *Broker) GrantACL(ctx context.Context, binding mqgov.ACLBinding) error {
+	target, err := b.validatePulsarACLBinding(binding)
+	if err != nil {
+		return err
+	}
+	permissions, err := b.pulsarPermissions(ctx, target)
+	if err != nil {
+		return err
+	}
+	actions := pulsarMergeAction(permissions[binding.Principal], binding.Operation)
+	return b.postPulsarPermissions(ctx, target, binding.Principal, actions)
+}
+
+func (b *Broker) RevokeACL(ctx context.Context, binding mqgov.ACLBinding) error {
+	target, err := b.validatePulsarACLBinding(binding)
+	if err != nil {
+		return err
+	}
+	permissions, err := b.pulsarPermissions(ctx, target)
+	if err != nil {
+		return err
+	}
+	actions := pulsarRemoveAction(permissions[binding.Principal], binding.Operation)
+	if len(actions) == 0 {
+		_, err = b.adminJSON(ctx, http.MethodDelete, target.path+"/"+pathEscape(binding.Principal), nil)
+		return err
+	}
+	return b.postPulsarPermissions(ctx, target, binding.Principal, actions)
+}
+
 func (b *Broker) Lag(ctx context.Context, group mqgov.GroupCoordinate, topic mqgov.TopicCoordinate) (mqgov.OffsetPlan, error) {
 	stats, err := b.stats(ctx, topic.Topic)
 	if err != nil {
@@ -558,6 +623,197 @@ func (b *Broker) ensureSubscriptionInactive(ctx context.Context, group, topic st
 		return apperrors.New(apperrors.CodeBackendError, "subscription has active consumers", nil)
 	}
 	return nil
+}
+
+type pulsarACLTarget struct {
+	resourceType string
+	resourceName string
+	path         string
+}
+
+func (b *Broker) validatePulsarACLBinding(binding mqgov.ACLBinding) (pulsarACLTarget, error) {
+	if strings.TrimSpace(binding.Principal) == "" {
+		return pulsarACLTarget{}, apperrors.New(apperrors.CodeUsageError, "ACL principal is required", nil)
+	}
+	if strings.TrimSpace(binding.ResourceName) == "" {
+		return pulsarACLTarget{}, apperrors.New(apperrors.CodeUsageError, "ACL resource name is required", nil)
+	}
+	if !pulsarLiteralPattern(binding.PatternType) {
+		return pulsarACLTarget{}, apperrors.New(apperrors.CodeUsageError, "Pulsar ACL pattern type must be literal", nil)
+	}
+	if !pulsarACLAction(binding.Operation) {
+		return pulsarACLTarget{}, apperrors.New(apperrors.CodeUsageError, "Pulsar ACL operation must be produce, consume, functions, sources, sinks, or packages", nil)
+	}
+	if strings.ToLower(strings.TrimSpace(binding.Permission)) != "allow" {
+		return pulsarACLTarget{}, apperrors.New(apperrors.CodeUsageError, "Pulsar ACL permission must be allow", nil)
+	}
+	return b.pulsarACLTarget(binding.ResourceType, binding.ResourceName, false)
+}
+
+func validatePulsarACLFilter(filter mqgov.ACLFilter) error {
+	if filter.PatternType != "" && !pulsarLiteralPattern(filter.PatternType) {
+		return apperrors.New(apperrors.CodeUsageError, "Pulsar ACL pattern type must be literal", nil)
+	}
+	if filter.Operation != "" && !pulsarACLAction(filter.Operation) {
+		return apperrors.New(apperrors.CodeUsageError, "Pulsar ACL operation must be produce, consume, functions, sources, sinks, or packages", nil)
+	}
+	if filter.Permission != "" && strings.ToLower(strings.TrimSpace(filter.Permission)) != "allow" {
+		return apperrors.New(apperrors.CodeUsageError, "Pulsar ACL permission must be allow", nil)
+	}
+	return nil
+}
+
+func (b *Broker) pulsarACLTarget(resourceType, resourceName string, allowDefault bool) (pulsarACLTarget, error) {
+	resourceType = normalizePulsarACLValue(resourceType)
+	resourceName = strings.TrimSpace(resourceName)
+	if resourceType == "" && allowDefault {
+		resourceType = "namespace"
+	}
+	switch resourceType {
+	case "namespace":
+		tenant, namespace, err := b.pulsarNamespaceParts(resourceName, allowDefault)
+		if err != nil {
+			return pulsarACLTarget{}, err
+		}
+		name := tenant + "/" + namespace
+		return pulsarACLTarget{
+			resourceType: "namespace",
+			resourceName: name,
+			path:         "/admin/v2/namespaces/" + pathEscape(tenant) + "/" + pathEscape(namespace) + "/permissions",
+		}, nil
+	case "topic":
+		if resourceName == "" {
+			return pulsarACLTarget{}, apperrors.New(apperrors.CodeUsageError, "Pulsar topic ACL resource name is required", nil)
+		}
+		topic := shortTopicName(resourceName)
+		return pulsarACLTarget{
+			resourceType: "topic",
+			resourceName: topic,
+			path:         b.topicPath(topic) + "/permissions",
+		}, nil
+	default:
+		return pulsarACLTarget{}, apperrors.New(apperrors.CodeUsageError, "Pulsar ACL resource type must be namespace or topic", nil)
+	}
+}
+
+func (b *Broker) pulsarNamespaceParts(resourceName string, allowDefault bool) (string, string, error) {
+	if resourceName == "" && allowDefault {
+		return b.opts.Tenant, b.opts.Namespace, nil
+	}
+	parts := strings.Split(resourceName, "/")
+	if len(parts) != 2 || strings.TrimSpace(parts[0]) == "" || strings.TrimSpace(parts[1]) == "" {
+		return "", "", apperrors.New(apperrors.CodeUsageError, "Pulsar namespace ACL resource name must be tenant/namespace", nil)
+	}
+	return strings.TrimSpace(parts[0]), strings.TrimSpace(parts[1]), nil
+}
+
+func (b *Broker) pulsarPermissions(ctx context.Context, target pulsarACLTarget) (map[string][]string, error) {
+	body, err := b.adminJSON(ctx, http.MethodGet, target.path, nil)
+	if err != nil {
+		return nil, err
+	}
+	permissions := map[string][]string{}
+	if len(bytes.TrimSpace(body)) == 0 {
+		return permissions, nil
+	}
+	if err := json.Unmarshal(body, &permissions); err != nil {
+		return nil, backendErr(fmt.Errorf("decode Pulsar permissions: %w", err))
+	}
+	return permissions, nil
+}
+
+func (b *Broker) postPulsarPermissions(ctx context.Context, target pulsarACLTarget, role string, actions []string) error {
+	data, err := json.Marshal(actions)
+	if err != nil {
+		return backendErr(err)
+	}
+	_, err = b.adminJSON(ctx, http.MethodPost, target.path+"/"+pathEscape(role), data)
+	return err
+}
+
+func pulsarMergeAction(actions []string, action string) []string {
+	seen := map[string]struct{}{}
+	out := make([]string, 0, len(actions)+1)
+	for _, existing := range actions {
+		normalized := strings.ToLower(strings.TrimSpace(existing))
+		if normalized == "" {
+			continue
+		}
+		if _, ok := seen[normalized]; ok {
+			continue
+		}
+		seen[normalized] = struct{}{}
+		out = append(out, normalized)
+	}
+	normalized := strings.ToLower(strings.TrimSpace(action))
+	if _, ok := seen[normalized]; !ok {
+		out = append(out, normalized)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func pulsarRemoveAction(actions []string, action string) []string {
+	remove := strings.ToLower(strings.TrimSpace(action))
+	out := make([]string, 0, len(actions))
+	seen := map[string]struct{}{}
+	for _, existing := range actions {
+		normalized := strings.ToLower(strings.TrimSpace(existing))
+		if normalized == "" || normalized == remove {
+			continue
+		}
+		if _, ok := seen[normalized]; ok {
+			continue
+		}
+		seen[normalized] = struct{}{}
+		out = append(out, normalized)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func pulsarACLMatches(binding mqgov.ACLBinding, filter mqgov.ACLFilter) bool {
+	if filter.Principal != "" && binding.Principal != filter.Principal {
+		return false
+	}
+	if filter.ResourceType != "" && normalizePulsarACLValue(filter.ResourceType) != binding.ResourceType {
+		return false
+	}
+	if filter.ResourceName != "" && binding.ResourceName != strings.TrimSpace(filter.ResourceName) {
+		return false
+	}
+	if filter.PatternType != "" && !pulsarLiteralPattern(filter.PatternType) {
+		return false
+	}
+	if filter.Operation != "" && normalizePulsarACLValue(filter.Operation) != binding.Operation {
+		return false
+	}
+	if filter.Permission != "" && strings.ToLower(strings.TrimSpace(filter.Permission)) != "allow" {
+		return false
+	}
+	return true
+}
+
+func pulsarACLAction(action string) bool {
+	switch normalizePulsarACLValue(action) {
+	case "produce", "consume", "functions", "sources", "sinks", "packages":
+		return true
+	default:
+		return false
+	}
+}
+
+func pulsarLiteralPattern(pattern string) bool {
+	normalized := normalizePulsarACLValue(pattern)
+	return normalized == "" || normalized == "literal"
+}
+
+func pulsarACLSortKey(binding mqgov.ACLBinding) string {
+	return binding.ResourceType + "\x00" + binding.ResourceName + "\x00" + binding.Principal + "\x00" + binding.Operation
+}
+
+func normalizePulsarACLValue(value string) string {
+	return strings.ToLower(strings.NewReplacer("_", "", "-", "", ".", "").Replace(strings.TrimSpace(value)))
 }
 
 func (b *Broker) adminJSON(ctx context.Context, method, path string, payload []byte) ([]byte, error) {
