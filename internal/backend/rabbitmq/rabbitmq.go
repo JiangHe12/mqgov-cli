@@ -1,12 +1,14 @@
 package rabbitmq
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"os"
@@ -82,11 +84,11 @@ func (b *Broker) Describe() mqgov.Description {
 func (b *Broker) Capabilities() mqgov.Capabilities {
 	return mqgov.Capabilities{
 		Backend:            "rabbitmq",
-		ResourceTypes:      []string{"topic", "message"},
-		Verbs:              []string{"list", "describe", "peek", "produce", "create", "delete", "purge"},
+		ResourceTypes:      []string{"topic", "message", "acl"},
+		Verbs:              []string{"list", "describe", "peek", "produce", "create", "delete", "purge", "grant-acl", "revoke-acl"},
 		SupportsOffsets:    false,
 		SupportsPartitions: true,
-		SupportsACL:        false,
+		SupportsACL:        true,
 	}
 }
 
@@ -280,30 +282,301 @@ type managementQueue struct {
 	Consumers int    `json:"consumers"`
 }
 
+type rabbitMQPermission struct {
+	User      string `json:"user"`
+	Vhost     string `json:"vhost"`
+	Configure string `json:"configure"`
+	Write     string `json:"write"`
+	Read      string `json:"read"`
+}
+
 func (b *Broker) listQueues(ctx context.Context) ([]managementQueue, error) {
 	endpoint := strings.TrimRight(b.manageURL, "/") + "/api/queues/" + url.PathEscape(b.vhost())
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	resp, err := b.managementRequest(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
-		return nil, apperrors.New(apperrors.CodeUsageError, "invalid RabbitMQ management URL", err)
-	}
-	req.SetBasicAuth(b.opts.Username, b.opts.Password)
-	resp, err := b.httpClient.Do(req)
-	if err != nil {
-		return nil, unreachable(err)
+		return nil, err
 	}
 	defer func() { _ = resp.Body.Close() }()
-	switch resp.StatusCode {
-	case http.StatusOK:
-	case http.StatusUnauthorized, http.StatusForbidden:
-		return nil, apperrors.New(apperrors.CodeAuthFailed, "RabbitMQ management authentication failed", nil)
-	default:
-		return nil, backendErr(fmt.Errorf("rabbitmq management status %d", resp.StatusCode))
+	if err := rabbitMQManagementStatus(resp, http.StatusOK, http.StatusOK); err != nil {
+		return nil, err
 	}
 	var queues []managementQueue
 	if err := json.NewDecoder(resp.Body).Decode(&queues); err != nil {
 		return nil, backendErr(err)
 	}
 	return queues, nil
+}
+
+func (b *Broker) ListACLs(ctx context.Context, filter mqgov.ACLFilter) ([]mqgov.ACLBinding, error) {
+	if err := validateRabbitMQACLFilter(filter); err != nil {
+		return nil, err
+	}
+	vhost := strings.TrimSpace(filter.Vhost)
+	endpoint := strings.TrimRight(b.manageURL, "/") + "/api/permissions"
+	if vhost != "" {
+		endpoint += "/" + url.PathEscape(vhost)
+	}
+	resp, err := b.managementRequest(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if err := rabbitMQManagementStatus(resp, http.StatusOK, http.StatusOK); err != nil {
+		return nil, err
+	}
+	var permissions []rabbitMQPermission
+	if err := json.NewDecoder(resp.Body).Decode(&permissions); err != nil {
+		return nil, backendErr(err)
+	}
+	out := make([]mqgov.ACLBinding, 0, len(permissions)*3)
+	for _, permission := range permissions {
+		out = append(out, rabbitMQACLBindings(permission, filter)...)
+	}
+	sort.Slice(out, func(i, j int) bool { return aclSortKey(out[i]) < aclSortKey(out[j]) })
+	return out, nil
+}
+
+func (b *Broker) GrantACL(ctx context.Context, binding mqgov.ACLBinding) error {
+	if err := validateRabbitMQACLBinding(binding); err != nil {
+		return err
+	}
+	permission, err := b.getRabbitMQPermission(ctx, binding.Vhost, binding.Principal)
+	if err != nil {
+		return err
+	}
+	rabbitMQSetPermissionScope(&permission, binding.Operation, binding.ResourceName)
+	return b.putRabbitMQPermission(ctx, permission)
+}
+
+func (b *Broker) RevokeACL(ctx context.Context, binding mqgov.ACLBinding) error {
+	if err := validateRabbitMQACLBinding(binding); err != nil {
+		return err
+	}
+	permission, err := b.getRabbitMQPermission(ctx, binding.Vhost, binding.Principal)
+	if err != nil {
+		return err
+	}
+	rabbitMQSetPermissionScope(&permission, binding.Operation, "")
+	if permission.Configure == "" && permission.Write == "" && permission.Read == "" {
+		return b.deleteRabbitMQPermission(ctx, permission.Vhost, permission.User)
+	}
+	return b.putRabbitMQPermission(ctx, permission)
+}
+
+func (b *Broker) getRabbitMQPermission(ctx context.Context, vhost, user string) (rabbitMQPermission, error) {
+	permission := rabbitMQPermission{User: strings.TrimSpace(user), Vhost: rabbitMQVhost(vhost)}
+	endpoint := b.rabbitMQPermissionEndpoint(permission.Vhost, permission.User)
+	resp, err := b.managementRequest(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return permission, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	switch resp.StatusCode {
+	case http.StatusOK:
+		if err := json.NewDecoder(resp.Body).Decode(&permission); err != nil {
+			return permission, backendErr(err)
+		}
+		if permission.Vhost == "" {
+			permission.Vhost = rabbitMQVhost(vhost)
+		}
+		if permission.User == "" {
+			permission.User = strings.TrimSpace(user)
+		}
+		return permission, nil
+	case http.StatusNotFound:
+		return permission, nil
+	case http.StatusUnauthorized, http.StatusForbidden:
+		return permission, apperrors.New(apperrors.CodeAuthFailed, "RabbitMQ management authentication failed", nil)
+	default:
+		return permission, backendErr(fmt.Errorf("rabbitmq management status %d", resp.StatusCode))
+	}
+}
+
+func (b *Broker) putRabbitMQPermission(ctx context.Context, permission rabbitMQPermission) error {
+	body, err := json.Marshal(struct {
+		Configure string `json:"configure"`
+		Write     string `json:"write"`
+		Read      string `json:"read"`
+	}{Configure: permission.Configure, Write: permission.Write, Read: permission.Read})
+	if err != nil {
+		return backendErr(err)
+	}
+	resp, err := b.managementRequest(ctx, http.MethodPut, b.rabbitMQPermissionEndpoint(permission.Vhost, permission.User), bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	return rabbitMQManagementStatus(resp, http.StatusNoContent, http.StatusCreated)
+}
+
+func (b *Broker) deleteRabbitMQPermission(ctx context.Context, vhost, user string) error {
+	resp, err := b.managementRequest(ctx, http.MethodDelete, b.rabbitMQPermissionEndpoint(vhost, user), nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	return rabbitMQManagementStatus(resp, http.StatusNoContent, http.StatusNotFound)
+}
+
+func (b *Broker) rabbitMQPermissionEndpoint(vhost, user string) string {
+	return strings.TrimRight(b.manageURL, "/") + "/api/permissions/" + url.PathEscape(rabbitMQVhost(vhost)) + "/" + url.PathEscape(strings.TrimSpace(user))
+}
+
+func (b *Broker) managementRequest(ctx context.Context, method, endpoint string, body io.Reader) (*http.Response, error) {
+	req, err := http.NewRequestWithContext(ctx, method, endpoint, body)
+	if err != nil {
+		return nil, apperrors.New(apperrors.CodeUsageError, "invalid RabbitMQ management URL", err)
+	}
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	req.SetBasicAuth(b.opts.Username, b.opts.Password)
+	resp, err := b.httpClient.Do(req)
+	if err != nil {
+		return nil, unreachable(err)
+	}
+	return resp, nil
+}
+
+func rabbitMQManagementStatus(resp *http.Response, wantA, wantB int) error {
+	if resp.StatusCode == wantA || resp.StatusCode == wantB {
+		return nil
+	}
+	switch resp.StatusCode {
+	case http.StatusUnauthorized, http.StatusForbidden:
+		return apperrors.New(apperrors.CodeAuthFailed, "RabbitMQ management authentication failed", nil)
+	default:
+		return backendErr(fmt.Errorf("rabbitmq management status %d", resp.StatusCode))
+	}
+}
+
+func rabbitMQACLBindings(permission rabbitMQPermission, filter mqgov.ACLFilter) []mqgov.ACLBinding {
+	scopes := []struct {
+		operation string
+		pattern   string
+	}{
+		{operation: "configure", pattern: permission.Configure},
+		{operation: "write", pattern: permission.Write},
+		{operation: "read", pattern: permission.Read},
+	}
+	out := make([]mqgov.ACLBinding, 0, 3)
+	for _, scope := range scopes {
+		if scope.pattern == "" {
+			continue
+		}
+		binding := mqgov.ACLBinding{
+			Principal:    permission.User,
+			Host:         "*",
+			Vhost:        permission.Vhost,
+			ResourceType: "vhost",
+			ResourceName: scope.pattern,
+			PatternType:  "regex",
+			Operation:    scope.operation,
+			Permission:   "allow",
+		}
+		if rabbitMQACLMatches(binding, filter) {
+			out = append(out, binding)
+		}
+	}
+	return out
+}
+
+func rabbitMQACLMatches(binding mqgov.ACLBinding, filter mqgov.ACLFilter) bool {
+	if filter.Principal != "" && binding.Principal != filter.Principal {
+		return false
+	}
+	if filter.Vhost != "" && binding.Vhost != filter.Vhost {
+		return false
+	}
+	if filter.ResourceType != "" && normalizeRabbitMQACLValue(filter.ResourceType) != "vhost" {
+		return false
+	}
+	if filter.ResourceName != "" && binding.ResourceName != filter.ResourceName {
+		return false
+	}
+	if filter.PatternType != "" && normalizeRabbitMQACLValue(filter.PatternType) != "regex" {
+		return false
+	}
+	if filter.Operation != "" && normalizeRabbitMQACLValue(binding.Operation) != normalizeRabbitMQACLValue(filter.Operation) {
+		return false
+	}
+	if filter.Permission != "" && strings.ToLower(strings.TrimSpace(filter.Permission)) != "allow" {
+		return false
+	}
+	return true
+}
+
+func validateRabbitMQACLFilter(filter mqgov.ACLFilter) error {
+	if filter.PatternType != "" && normalizeRabbitMQACLValue(filter.PatternType) != "regex" {
+		return apperrors.New(apperrors.CodeUsageError, "RabbitMQ uses regex permission patterns", nil)
+	}
+	if filter.ResourceType != "" && normalizeRabbitMQACLValue(filter.ResourceType) != "vhost" {
+		return apperrors.New(apperrors.CodeUsageError, "RabbitMQ ACL resource type must be vhost", nil)
+	}
+	if filter.Permission != "" && strings.ToLower(strings.TrimSpace(filter.Permission)) != "allow" {
+		return apperrors.New(apperrors.CodeUsageError, "RabbitMQ ACL permission must be allow", nil)
+	}
+	if filter.Operation != "" && !rabbitMQACLOperation(filter.Operation) {
+		return apperrors.New(apperrors.CodeUsageError, "RabbitMQ ACL operation must be configure, write, or read", nil)
+	}
+	return nil
+}
+
+func validateRabbitMQACLBinding(binding mqgov.ACLBinding) error {
+	if strings.TrimSpace(binding.Principal) == "" {
+		return apperrors.New(apperrors.CodeUsageError, "ACL principal is required", nil)
+	}
+	if strings.TrimSpace(binding.ResourceName) == "" {
+		return apperrors.New(apperrors.CodeUsageError, "ACL resource name is required", nil)
+	}
+	if normalizeRabbitMQACLValue(binding.PatternType) != "regex" {
+		return apperrors.New(apperrors.CodeUsageError, "RabbitMQ uses regex permission patterns", nil)
+	}
+	if binding.ResourceType != "" && normalizeRabbitMQACLValue(binding.ResourceType) != "vhost" {
+		return apperrors.New(apperrors.CodeUsageError, "RabbitMQ ACL resource type must be vhost", nil)
+	}
+	if !rabbitMQACLOperation(binding.Operation) {
+		return apperrors.New(apperrors.CodeUsageError, "RabbitMQ ACL operation must be configure, write, or read", nil)
+	}
+	if strings.ToLower(strings.TrimSpace(binding.Permission)) != "allow" {
+		return apperrors.New(apperrors.CodeUsageError, "RabbitMQ ACL permission must be allow", nil)
+	}
+	return nil
+}
+
+func rabbitMQSetPermissionScope(permission *rabbitMQPermission, operation, pattern string) {
+	switch normalizeRabbitMQACLValue(operation) {
+	case "configure":
+		permission.Configure = pattern
+	case "write":
+		permission.Write = pattern
+	case "read":
+		permission.Read = pattern
+	}
+}
+
+func rabbitMQACLOperation(operation string) bool {
+	switch normalizeRabbitMQACLValue(operation) {
+	case "configure", "write", "read":
+		return true
+	default:
+		return false
+	}
+}
+
+func rabbitMQVhost(vhost string) string {
+	if strings.TrimSpace(vhost) == "" {
+		return "/"
+	}
+	return strings.TrimSpace(vhost)
+}
+
+func aclSortKey(binding mqgov.ACLBinding) string {
+	return binding.Vhost + "\x00" + binding.Principal + "\x00" + binding.Operation + "\x00" + binding.ResourceName
+}
+
+func normalizeRabbitMQACLValue(value string) string {
+	return strings.ToLower(strings.NewReplacer("_", "", "-", "", ".", "").Replace(strings.TrimSpace(value)))
 }
 
 func (b *Broker) topicDescription(queue amqp.Queue) mqgov.TopicDescription {

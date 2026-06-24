@@ -177,8 +177,7 @@ func broadACLGrant(target ACLTarget) bool {
 	if !knownACLResourceType(resourceType) {
 		return true
 	}
-	resourceName := strings.TrimSpace(target.ResourceName)
-	if resourceName == "" || resourceName == "*" || hasPattern(resourceName) {
+	if broadACLResourceName(target.ResourceName, target.PatternType) {
 		return true
 	}
 	if broadACLOperation(target.Operation) {
@@ -190,7 +189,7 @@ func broadACLGrant(target ACLTarget) bool {
 
 func knownACLResourceType(resourceType string) bool {
 	switch normalizeACLToken(resourceType) {
-	case "any", "topic", "group", "cluster", "transactionalid", "delegationtoken", "user":
+	case "any", "topic", "group", "cluster", "transactionalid", "delegationtoken", "user", "vhost":
 		return true
 	default:
 		return false
@@ -198,7 +197,8 @@ func knownACLResourceType(resourceType string) bool {
 }
 
 func broadACLPatternType(patternType string) bool {
-	return normalizeACLToken(patternType) != "literal"
+	patternType = normalizeACLToken(patternType)
+	return patternType != "literal" && patternType != "regex"
 }
 
 func broadACLOperation(operation string) bool {
@@ -211,13 +211,40 @@ func broadACLOperation(operation string) bool {
 	}
 }
 
+func broadACLResourceName(resourceName, patternType string) bool {
+	resourceName = strings.TrimSpace(resourceName)
+	if normalizeACLToken(patternType) == "regex" {
+		return broadACLRegex(resourceName)
+	}
+	return resourceName == "" || resourceName == "*" || hasPattern(resourceName)
+}
+
+func broadACLRegex(pattern string) bool {
+	pattern = strings.TrimSpace(pattern)
+	switch pattern {
+	case "", ".", ".*", ".+":
+		return true
+	}
+	if strings.Contains(pattern, ".*") || strings.Contains(pattern, ".+") {
+		return true
+	}
+	if strings.HasPrefix(pattern, "^") && strings.HasSuffix(pattern, "$") {
+		return aclRegexHasMeta(pattern[1 : len(pattern)-1])
+	}
+	return aclRegexHasMeta(pattern)
+}
+
+func aclRegexHasMeta(pattern string) bool {
+	return strings.ContainsAny(pattern, `\.+*?()|[]{}^$`)
+}
+
 func normalizeACLToken(value string) string {
 	return strings.ToLower(strings.NewReplacer("_", "", "-", "", ".", "").Replace(strings.TrimSpace(value)))
 }
 
 func knownACLOperation(operation string) bool {
 	switch operation {
-	case "any", "all", "read", "write", "create", "delete", "alter", "describe", "clusteraction", "describeconfigs", "alterconfigs", "idempotentwrite", "createtokens", "describetokens":
+	case "any", "all", "read", "write", "configure", "create", "delete", "alter", "describe", "clusteraction", "describeconfigs", "alterconfigs", "idempotentwrite", "createtokens", "describetokens":
 		return true
 	default:
 		return false

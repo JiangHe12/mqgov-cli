@@ -58,7 +58,7 @@ It's built on the shared [`opskit-core`](https://github.com/JiangHe12/opskit-cor
 | **offset lag / reset** | ✅ | ✅ (cursor) | ❌ (no offsets) | ❌ |
 | alter partitions | ✅ | ✅ | ❌ | ❌ |
 | purge | ✅ | ✅ | ✅ | ❌ |
-| **ACL list / grant / revoke** | ✅ | ❌ `NOT_IMPLEMENTED` | ❌ `NOT_IMPLEMENTED` | ❌ `NOT_IMPLEMENTED` |
+| **ACL list / grant / revoke** | ✅ | ❌ `NOT_IMPLEMENTED` | ✅ user-vhost permissions | ❌ `NOT_IMPLEMENTED` |
 
 ¹ RocketMQ's Go v2 `PullConsumer` enters the consumer-group lifecycle and commits offsets, so it cannot guarantee non-destructive peek/tail — mqgov fails closed instead of silently advancing offsets. ² RabbitMQ has no forward non-destructive tail because reads are consume/requeue oriented. Unsupported operations always return `NOT_IMPLEMENTED` (exit 12), never a fake success.
 
@@ -199,15 +199,24 @@ mqgov message produce <topic> [--key <k>] [--body <text>] --yes                 
 ```bash
 mqgov acl list [--principal <P>] [--resource-type <T>] [--resource-name <N>] -o json
 
+# Kafka broker ACLs
 mqgov acl grant --principal User:svc --resource-type topic --resource-name orders \
   --pattern literal --operation read --permission allow --yes --ticket <t>
 
 mqgov acl revoke --principal User:svc --resource-type topic --resource-name orders \
   --pattern literal --operation read --permission allow \
   --yes --ticket <t> --allow-destructive-acl
+
+# RabbitMQ native user-vhost permissions
+mqgov acl grant --principal svc --vhost / --resource-type vhost --resource-name '^orders$' \
+  --pattern regex --operation read --permission allow --yes --ticket <t>
+
+mqgov acl revoke --principal svc --vhost / --resource-type vhost --resource-name '^orders$' \
+  --pattern regex --operation read --permission allow \
+  --yes --ticket <t> --allow-destructive-acl
 ```
 
-`acl list` is R0 and audited. Normal `acl grant` is R2. Broad grants (prefixed pattern, wildcard principal, wildcard resource, cluster resource, `all`, `alter`, or cluster-action style operations) and every `acl revoke` are R3 and require `--allow-destructive-acl`. Kafka implements broker ACLs; RabbitMQ, Pulsar, and RocketMQ fail closed with `NOT_IMPLEMENTED`.
+`acl list` is R0 and audited. Normal `acl grant` is R2. Broad grants (Kafka prefixed pattern, wildcard principal, wildcard resource, cluster resource, `all`, `alter`, cluster-action style operations, or broad RabbitMQ regexes such as `.*`, `.+`, `.`, and `orders.*`) and every `acl revoke` are R3 and require `--allow-destructive-acl`. Kafka implements broker ACLs with `literal`/`prefixed` patterns. RabbitMQ maps ACLs to native per-user, per-vhost permission regexes (`configure`, `write`, `read`) and only supports `--permission allow` with `--pattern regex`. Pulsar and RocketMQ fail closed with `NOT_IMPLEMENTED`.
 </details>
 
 <details>
@@ -241,7 +250,7 @@ mqgov version
 
 mqgov-cli is designed to be driven by autonomous agents safely:
 
-- Run `mqgov capabilities -o json` first to discover what the bound backend supports — brokers differ, don't assume (e.g. only Kafka currently supports `acl`; RabbitMQ/RocketMQ have no offsets; RabbitMQ/RocketMQ have no tail; RocketMQ has no peek).
+- Run `mqgov capabilities -o json` first to discover what the bound backend supports — brokers differ, don't assume (e.g. Kafka and RabbitMQ support `acl` with different pattern models; RabbitMQ/RocketMQ have no offsets; RabbitMQ/RocketMQ have no tail; RocketMQ has no peek).
 - Use `-o json` everywhere; every command returns a stable, versioned envelope.
 - Get blast radius from `--dry-run` / `--plan`, never from your own reasoning.
 - **Never self-fill `--ticket`, `--allow-*`, or a high-risk `--yes`.** Surface the required human approval and stop.

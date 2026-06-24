@@ -50,13 +50,15 @@ mqgov topic purge <topic> --yes --ticket <ticket> --allow-topic-purge -o json
 mqgov topic delete <topic> --yes --ticket <ticket> --allow-topic-delete -o json
 mqgov acl grant --principal User:svc --resource-type topic --resource-name <topic> --pattern literal --operation read --permission allow --yes --ticket <ticket> -o json
 mqgov acl revoke --principal User:svc --resource-type topic --resource-name <topic> --pattern literal --operation read --permission allow --yes --ticket <ticket> --allow-destructive-acl -o json
+mqgov acl grant --principal svc --vhost / --resource-type vhost --resource-name '^orders$' --pattern regex --operation read --permission allow --yes --ticket <ticket> -o json
+mqgov acl revoke --principal svc --vhost / --resource-type vhost --resource-name '^orders$' --pattern regex --operation read --permission allow --yes --ticket <ticket> --allow-destructive-acl -o json
 ```
 
 ACL governance:
 
-- Kafka supports `acl list|grant|revoke`; RabbitMQ, Pulsar, and RocketMQ fail closed with `NOT_IMPLEMENTED`.
-- `acl list` is R0. Normal `acl grant` is R2. Broad grants, including prefixed patterns, and every `acl revoke` are R3 and require `--allow-destructive-acl`.
-- Broad grant means wildcard principal, wildcard resource, cluster resource, `all`, `alter`, or cluster-action style operations.
+- Kafka and RabbitMQ support `acl list|grant|revoke`; Pulsar and RocketMQ fail closed with `NOT_IMPLEMENTED`.
+- Kafka uses broker ACLs with `literal`/`prefixed` patterns. RabbitMQ uses native user-vhost permission regexes with operations `configure`, `write`, and `read`; RabbitMQ rejects deny and non-regex patterns.
+- `acl list` is R0. Normal `acl grant` is R2. Broad grants, including Kafka prefixed patterns and broad RabbitMQ regexes such as `.*`, `.+`, `.`, or `orders.*`, and every `acl revoke` are R3 and require `--allow-destructive-acl`.
 
 Audit:
 

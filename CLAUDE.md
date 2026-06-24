@@ -11,7 +11,7 @@ mqgov-cli is the governed message-broker operations CLI for AI agents: one entry
 point for **Kafka**, **RabbitMQ**, **Pulsar**, and **RocketMQ**. It provides
 backend-bound contexts, a fail-closed message-operation risk classifier
 (`mqclass`), R0-R3 authorization with protected-context escalation,
-non-destructive peek/tail where the backend can guarantee it, real per-partition blast-radius previews, tamper-evident
+native broker ACL management where the backend supports it, non-destructive peek/tail where the backend can guarantee it, real per-partition blast-radius previews, tamper-evident
 fingerprint-only audit, and redaction. It is built on the shared `opskit-core`
 governance engine.
 
@@ -84,10 +84,14 @@ go mod tidy                             # must be a no-op
   `OffsetManager` / `PartitionManager` / `ACLManager` / `Tailer` interfaces, type-asserted
   and gated by `Supports*`. Unsupported capabilities fail closed with
   `NotImplemented` — never faked. Capabilities must reflect what the client
-  actually supports (e.g. RabbitMQ/RocketMQ `SupportsOffsets=false`; RabbitMQ/RocketMQ do not support non-destructive tail).
+  actually supports (e.g. RabbitMQ/RocketMQ `SupportsOffsets=false`; RabbitMQ/RocketMQ do not support non-destructive tail; Kafka and RabbitMQ support ACL, Pulsar/RocketMQ do not).
 - **Backends are dumb**: they only execute broker operations. All R0-R3
   authorization stays in `cmd/` + `mqclass`; a backend must never make an
   authorization decision.
+- ACL mappings must stay backend-native and honest: Kafka uses broker ACLs with
+  literal/prefixed patterns; RabbitMQ uses user-vhost permission regexes
+  (`configure`, `write`, `read`) and allow-only grants. Do not emulate unsupported
+  ACL models or silently translate deny into allow.
 - All broker clients must be cgo-free (Kafka franz-go, RabbitMQ amqp091-go,
   Pulsar pulsar-client-go, RocketMQ rocketmq-client-go/v2). Never the legacy/cgo
   variants — they break the multi-platform release matrix.

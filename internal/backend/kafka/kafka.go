@@ -1065,6 +1065,8 @@ func applyACLPattern(builder *kadm.ACLBuilder, pattern string, filter bool) erro
 		builder.ResourcePatternType(kadm.ACLPatternAny)
 	case "match":
 		builder.ResourcePatternType(kadm.ACLPatternMatch)
+	case "regex":
+		return apperrors.New(apperrors.CodeUsageError, "Kafka ACL pattern type must be literal or prefixed", nil)
 	default:
 		return apperrors.New(apperrors.CodeUsageError, "invalid ACL pattern type", nil)
 	}

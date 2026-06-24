@@ -58,7 +58,7 @@
 | **offset lag / reset** | ✅ | ✅(游标) | ❌(无 offset) | ❌ |
 | alter 分区 | ✅ | ✅ | ❌ | ❌ |
 | purge | ✅ | ✅ | ✅ | ❌ |
-| **ACL list / grant / revoke** | ✅ | ❌ `NOT_IMPLEMENTED` | ❌ `NOT_IMPLEMENTED` | ❌ `NOT_IMPLEMENTED` |
+| **ACL list / grant / revoke** | ✅ | ❌ `NOT_IMPLEMENTED` | ✅ user-vhost permissions | ❌ `NOT_IMPLEMENTED` |
 
 ¹ RocketMQ 的 Go v2 `PullConsumer` 会进入消费组生命周期并提交 offset,无法保证非破坏性 peek/tail —— mqgov 选择失败关闭,而非静默推进 offset。² RabbitMQ 没有向前的非破坏性 tail,读取语义是 consume/requeue。不支持的操作一律返回 `NOT_IMPLEMENTED`(exit 12),绝不假装成功。
 
@@ -199,15 +199,24 @@ mqgov message produce <topic> [--key <k>] [--body <text>] --yes                 
 ```bash
 mqgov acl list [--principal <P>] [--resource-type <T>] [--resource-name <N>] -o json
 
+# Kafka broker ACL
 mqgov acl grant --principal User:svc --resource-type topic --resource-name orders \
   --pattern literal --operation read --permission allow --yes --ticket <t>
 
 mqgov acl revoke --principal User:svc --resource-type topic --resource-name orders \
   --pattern literal --operation read --permission allow \
   --yes --ticket <t> --allow-destructive-acl
+
+# RabbitMQ 原生 user-vhost 权限
+mqgov acl grant --principal svc --vhost / --resource-type vhost --resource-name '^orders$' \
+  --pattern regex --operation read --permission allow --yes --ticket <t>
+
+mqgov acl revoke --principal svc --vhost / --resource-type vhost --resource-name '^orders$' \
+  --pattern regex --operation read --permission allow \
+  --yes --ticket <t> --allow-destructive-acl
 ```
 
-`acl list` 是 R0 且会审计。普通 `acl grant` 是 R2。宽泛授权(prefixed pattern、通配 principal、通配 resource、cluster 资源、`all`、`alter` 或 cluster-action 类操作)以及所有 `acl revoke` 都是 R3,需要 `--allow-destructive-acl`。Kafka 实现 broker ACL;RabbitMQ、Pulsar、RocketMQ 失败关闭为 `NOT_IMPLEMENTED`。
+`acl list` 是 R0 且会审计。普通 `acl grant` 是 R2。宽泛授权(Kafka prefixed pattern、通配 principal、通配 resource、cluster 资源、`all`、`alter`、cluster-action 类操作,或 `.*`、`.+`、`.`、`orders.*` 这类宽泛 RabbitMQ regex)以及所有 `acl revoke` 都是 R3,需要 `--allow-destructive-acl`。Kafka 使用 `literal`/`prefixed` broker ACL。RabbitMQ 映射到原生按 user/vhost 的权限 regex(`configure`、`write`、`read`),只支持 `--permission allow` 和 `--pattern regex`。Pulsar、RocketMQ 失败关闭为 `NOT_IMPLEMENTED`。
 </details>
 
 <details>
@@ -241,7 +250,7 @@ mqgov version
 
 mqgov-cli 设计为可被自治 agent 安全驱动:
 
-- 先跑 `mqgov capabilities -o json` 发现绑定后端支持什么 —— broker 各异,别假设(例如目前只有 Kafka 支持 `acl`;RabbitMQ/RocketMQ 无 offset;RabbitMQ/RocketMQ 无 tail;RocketMQ 无 peek)。
+- 先跑 `mqgov capabilities -o json` 发现绑定后端支持什么 —— broker 各异,别假设(例如 Kafka 与 RabbitMQ 都支持 `acl`,但 pattern 模型不同;RabbitMQ/RocketMQ 无 offset;RabbitMQ/RocketMQ 无 tail;RocketMQ 无 peek)。
 - 处处用 `-o json`;每个命令返回稳定、带版本的信封。
 - 爆炸半径来自 `--dry-run` / `--plan`,绝不来自你自己的推理。
 - **绝不自填 `--ticket`、`--allow-*` 或高危 `--yes`。** 把所需人工审批上报并停下。

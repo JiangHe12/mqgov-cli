@@ -181,6 +181,7 @@ type Capabilities struct {
 type ACLBinding struct {
 	Principal    string `json:"principal"`
 	Host         string `json:"host"`
+	Vhost        string `json:"vhost,omitempty"`
 	ResourceType string `json:"resourceType"`
 	ResourceName string `json:"resourceName"`
 	PatternType  string `json:"patternType"`
@@ -191,6 +192,7 @@ type ACLBinding struct {
 type ACLFilter struct {
 	Principal    string `json:"principal,omitempty"`
 	Host         string `json:"host,omitempty"`
+	Vhost        string `json:"vhost,omitempty"`
 	ResourceType string `json:"resourceType,omitempty"`
 	ResourceName string `json:"resourceName,omitempty"`
 	PatternType  string `json:"patternType,omitempty"`

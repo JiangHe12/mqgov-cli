@@ -16,6 +16,7 @@ import (
 type aclFlags struct {
 	principal    string
 	host         string
+	vhost        string
 	resourceType string
 	resourceName string
 	patternType  string
@@ -47,7 +48,7 @@ func newACLListCmd(f *cliFlags) *cobra.Command {
 			if err := classifyAndAuthorize(f, meta, mqclass.OperationListACL, mqclass.Target{ACL: aclClassTarget(flags)}, ""); err != nil {
 				return err
 			}
-			filter := mqgov.ACLFilter{Principal: flags.principal, ResourceType: flags.resourceType, ResourceName: flags.resourceName}
+			filter := mqgov.ACLFilter{Principal: flags.principal, Vhost: flags.vhost, ResourceType: flags.resourceType, ResourceName: flags.resourceName}
 			items, err := manager.ListACLs(cmd.Context(), filter)
 			if err != nil {
 				appendAuditWarn(f, auditEventACL, meta, audit.EventTarget{ResourceType: "acl"}, audit.StatusFailed, aclFilterDiff(filter), err)
@@ -59,13 +60,14 @@ func newACLListCmd(f *cliFlags) *cobra.Command {
 			}
 			rows := make([][]string, 0, len(items))
 			for _, item := range items {
-				rows = append(rows, []string{item.Principal, item.Host, item.ResourceType, item.ResourceName, item.PatternType, item.Operation, item.Permission})
+				rows = append(rows, []string{item.Principal, item.Host, item.Vhost, item.ResourceType, item.ResourceName, item.PatternType, item.Operation, item.Permission})
 			}
-			newPrinter(f).Table([]string{"PRINCIPAL", "HOST", "RESOURCE TYPE", "RESOURCE NAME", "PATTERN", "OPERATION", "PERMISSION"}, rows)
+			newPrinter(f).Table([]string{"PRINCIPAL", "HOST", "VHOST", "RESOURCE TYPE", "RESOURCE NAME", "PATTERN", "OPERATION", "PERMISSION"}, rows)
 			return nil
 		},
 	}
 	cmd.Flags().StringVar(&flags.principal, "principal", "", "ACL principal filter")
+	cmd.Flags().StringVar(&flags.vhost, "vhost", "/", "RabbitMQ vhost filter")
 	cmd.Flags().StringVar(&flags.resourceType, "resource-type", "", "ACL resource type filter")
 	cmd.Flags().StringVar(&flags.resourceName, "resource-name", "", "ACL resource name filter")
 	return cmd
@@ -141,9 +143,10 @@ func newACLRevokeCmd(f *cliFlags) *cobra.Command {
 func addACLBindingFlags(cmd *cobra.Command, flags *aclFlags) {
 	cmd.Flags().StringVar(&flags.principal, "principal", "", "ACL principal")
 	cmd.Flags().StringVar(&flags.host, "host", "*", "ACL host")
+	cmd.Flags().StringVar(&flags.vhost, "vhost", "/", "RabbitMQ vhost")
 	cmd.Flags().StringVar(&flags.resourceType, "resource-type", "", "ACL resource type")
 	cmd.Flags().StringVar(&flags.resourceName, "resource-name", "", "ACL resource name")
-	cmd.Flags().StringVar(&flags.patternType, "pattern", "literal", "ACL resource pattern: literal | prefixed")
+	cmd.Flags().StringVar(&flags.patternType, "pattern", "literal", "ACL resource pattern: literal | prefixed | regex")
 	cmd.Flags().StringVar(&flags.operation, "operation", "", "ACL operation")
 	cmd.Flags().StringVar(&flags.permission, "permission", "", "ACL permission: allow | deny")
 }
@@ -152,6 +155,7 @@ func aclBinding(flags aclFlags) mqgov.ACLBinding {
 	return mqgov.ACLBinding{
 		Principal:    flags.principal,
 		Host:         flags.host,
+		Vhost:        flags.vhost,
 		ResourceType: flags.resourceType,
 		ResourceName: flags.resourceName,
 		PatternType:  flags.patternType,
@@ -178,6 +182,7 @@ func aclAuditTarget(binding mqgov.ACLBinding) audit.EventTarget {
 func aclBindingDiff(binding mqgov.ACLBinding) string {
 	return "principal=" + binding.Principal +
 		" host=" + binding.Host +
+		" vhost=" + binding.Vhost +
 		" resourceType=" + binding.ResourceType +
 		" resourceName=" + binding.ResourceName +
 		" patternType=" + binding.PatternType +
@@ -187,6 +192,7 @@ func aclBindingDiff(binding mqgov.ACLBinding) string {
 
 func aclFilterDiff(filter mqgov.ACLFilter) string {
 	return "principal=" + filter.Principal +
+		" vhost=" + filter.Vhost +
 		" resourceType=" + filter.ResourceType +
 		" resourceName=" + filter.ResourceName
 }

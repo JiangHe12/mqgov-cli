@@ -93,8 +93,39 @@ func TestRabbitMQIntegration(t *testing.T) {
 	if _, ok := mqgov.SupportsTail(backend); ok {
 		t.Fatalf("SupportsTail() = true, want false")
 	}
-	if _, ok := mqgov.SupportsACL(backend); ok {
-		t.Fatalf("SupportsACL() = true, want false")
+	aclManager, ok := mqgov.SupportsACL(backend)
+	if !ok {
+		t.Fatalf("SupportsACL() = false, want true")
+	}
+	aclPrincipal := getenvDefault("RABBITMQ_ACL_USER", getenvDefault("RABBITMQ_USERNAME", "guest"))
+	aclBinding := mqgov.ACLBinding{
+		Principal:    aclPrincipal,
+		Vhost:        backend.vhost(),
+		ResourceType: "vhost",
+		ResourceName: "^" + queue + "$",
+		PatternType:  "regex",
+		Operation:    "read",
+		Permission:   "allow",
+	}
+	if err := aclManager.GrantACL(ctx, aclBinding); err != nil {
+		t.Fatalf("GrantACL() error = %v", err)
+	}
+	acls, err := aclManager.ListACLs(ctx, mqgov.ACLFilter{Principal: aclPrincipal, Vhost: backend.vhost(), ResourceName: aclBinding.ResourceName, Operation: "read"})
+	if err != nil {
+		t.Fatalf("ListACLs(after grant) error = %v", err)
+	}
+	if len(acls) != 1 {
+		t.Fatalf("ListACLs(after grant) = %+v, want one read binding", acls)
+	}
+	if err := aclManager.RevokeACL(ctx, aclBinding); err != nil {
+		t.Fatalf("RevokeACL() error = %v", err)
+	}
+	acls, err = aclManager.ListACLs(ctx, mqgov.ACLFilter{Principal: aclPrincipal, Vhost: backend.vhost(), ResourceName: aclBinding.ResourceName, Operation: "read"})
+	if err != nil {
+		t.Fatalf("ListACLs(after revoke) error = %v", err)
+	}
+	if len(acls) != 0 {
+		t.Fatalf("ListACLs(after revoke) = %+v, want none", acls)
 	}
 
 	plan, err := backend.PurgeTopic(ctx, mqgov.TopicPurgeRequest{Coordinate: coord, DryRun: true})
