@@ -99,7 +99,7 @@ jobs:
           KAFKA_ACL_PASSWORD: admin-secret
           KAFKA_ACL_SASL_MECHANISM: SCRAM-SHA-256
           KAFKA_ACL_TLS: "true"
-          KAFKA_ACL_CA_CERT_FILE: testdata/redpanda-certs/ca.crt
+          KAFKA_ACL_CA_CERT_FILE: ${{ github.workspace }}/testdata/redpanda-certs/ca.crt
         run: go test -tags=integration -count=1 -run TestKafkaACLIntegration -v ./internal/backend/kafka/
       - name: Tear down
         if: always()
