@@ -76,21 +76,28 @@ jobs:
             -CAcreateserial \
             -out testdata/redpanda-certs/server.crt \
             -copy_extensions copy
+          chmod a+r testdata/redpanda-certs/*
       - name: Start Redpanda
         run: docker compose -f docker-compose.kafka-acl.yml up -d
       - name: Enable SASL and authorization
         shell: bash
         run: |
-          set +e
-          ok=0
-          for i in $(seq 1 30); do
-            if (echo > /dev/tcp/127.0.0.1/9092) 2>/dev/null; then ok=1; break; fi
-            sleep 2
+          set -euo pipefail
+          rpk() { docker compose -f docker-compose.kafka-acl.yml exec -T redpanda rpk -X brokers=127.0.0.1:9092 -X tls.enabled=true -X tls.ca=/certs/ca.crt "$@"; }
+          ready=0
+          for i in $(seq 1 40); do
+            if rpk cluster info >/dev/null 2>&1; then ready=1; break; fi
+            sleep 3
           done
-          [ "$ok" = 1 ] || { echo "kafka acl broker not ready"; docker compose -f docker-compose.kafka-acl.yml logs; exit 1; }
-          docker compose -f docker-compose.kafka-acl.yml exec -T redpanda rpk -X brokers=127.0.0.1:9092 -X tls.enabled=true -X tls.ca=/certs/ca.crt acl user create admin -p admin-secret --mechanism SCRAM-SHA-256
-          docker compose -f docker-compose.kafka-acl.yml exec -T redpanda rpk -X brokers=127.0.0.1:9092 -X tls.enabled=true -X tls.ca=/certs/ca.crt cluster config set superusers '["admin"]'
-          docker compose -f docker-compose.kafka-acl.yml exec -T redpanda rpk -X brokers=127.0.0.1:9092 -X tls.enabled=true -X tls.ca=/certs/ca.crt cluster config set enable_sasl true
+          if [ "$ready" != 1 ]; then
+            echo "redpanda TLS broker not ready"
+            docker compose -f docker-compose.kafka-acl.yml ps
+            docker compose -f docker-compose.kafka-acl.yml logs redpanda
+            exit 1
+          fi
+          rpk acl user create admin -p admin-secret --mechanism SCRAM-SHA-256
+          rpk cluster config set superusers '["admin"]'
+          rpk cluster config set enable_sasl true
           sleep 5
       - name: Run ACL integration tests
         env:
@@ -101,6 +108,9 @@ jobs:
           KAFKA_ACL_TLS: "true"
           KAFKA_ACL_CA_CERT_FILE: ${{ github.workspace }}/testdata/redpanda-certs/ca.crt
         run: go test -tags=integration -count=1 -run TestKafkaACLIntegration -v ./internal/backend/kafka/
+      - name: Dump broker logs on failure
+        if: failure()
+        run: docker compose -f docker-compose.kafka-acl.yml logs redpanda || true
       - name: Tear down
         if: always()
         run: docker compose -f docker-compose.kafka-acl.yml down -v || true
