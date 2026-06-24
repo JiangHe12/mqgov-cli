@@ -32,6 +32,7 @@ type capBackend struct {
 	SupportsDLQPeek    bool     `json:"supportsDlqPeek"`
 	SupportsDLQRedrive bool     `json:"supportsDlqRedrive"`
 	SupportsDLQPurge   bool     `json:"supportsDlqPurge"`
+	SupportsSchema     bool     `json:"supportsSchema"`
 }
 
 type capSupported struct {
@@ -90,6 +91,7 @@ func buildCapabilities(backendCaps mqgov.Capabilities) capabilitiesData {
 			SupportsDLQPeek:    backendCaps.SupportsDLQPeek,
 			SupportsDLQRedrive: backendCaps.SupportsDLQRedrive,
 			SupportsDLQPurge:   backendCaps.SupportsDLQPurge,
+			SupportsSchema:     backendCaps.SupportsSchema,
 		},
 		Supported: capSupported{
 			Commands: []capCommand{
@@ -111,6 +113,7 @@ func buildCapabilities(backendCaps mqgov.Capabilities) capabilitiesData {
 				{Noun: "acl", Verb: "list", Risk: "R0"},
 				{Noun: "acl", Verb: "grant", Risk: "R2/R3 broad", AllowFlag: "allow-destructive-acl for R3"},
 				{Noun: "acl", Verb: "revoke", Risk: "R3", AllowFlag: "allow-destructive-acl"},
+				{Noun: "schema", Verb: "list/describe/check", Risk: "R0"},
 			},
 			ContextAPIVersions: []string{"mqgov-cli.io/context/v1"},
 			AuditAPIVersions:   []string{auditAPIVersion},

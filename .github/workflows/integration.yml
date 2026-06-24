@@ -37,10 +37,18 @@ jobs:
             sleep 2
           done
           [ "$ok" = 1 ] || { echo "kafka not ready"; docker compose -f docker-compose.kafka.yml logs; exit 1; }
+          ok=0
+          for i in $(seq 1 40); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8081/subjects)
+            if [ "$code" = "200" ]; then ok=1; break; fi
+            sleep 3
+          done
+          [ "$ok" = 1 ] || { echo "schema registry not ready"; docker compose -f docker-compose.kafka.yml logs; exit 1; }
           sleep 5
       - name: Run integration tests
         env:
           KAFKA_BROKERS: 127.0.0.1:9092
+          KAFKA_SCHEMA_REGISTRY_URL: http://127.0.0.1:8081
         run: go test -tags=integration -count=1 -v ./internal/backend/kafka/
       - name: Tear down
         if: always()

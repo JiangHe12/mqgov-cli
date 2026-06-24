@@ -9,28 +9,31 @@ import (
 type Operation string
 
 const (
-	OperationList        Operation = "list"
-	OperationDescribe    Operation = "describe"
-	OperationLag         Operation = "lag"
-	OperationPeek        Operation = "peek"
-	OperationTail        Operation = "tail"
-	OperationListDLQ     Operation = "list-dlq"
-	OperationPeekDLQ     Operation = "peek-dlq"
-	OperationRedriveDLQ  Operation = "redrive-dlq"
-	OperationClusterInfo Operation = "cluster-info"
-	OperationProduce     Operation = "produce"
-	OperationCreateTopic Operation = "create-topic"
-	OperationAlterTopic  Operation = "alter-topic"
-	OperationCreateGroup Operation = "create-group"
-	OperationDeleteGroup Operation = "delete-group"
-	OperationResetOffset Operation = "reset-offset"
-	OperationSeekOffset  Operation = "seek-offset"
-	OperationPurgeTopic  Operation = "purge-topic"
-	OperationPurgeDLQ    Operation = "purge-dlq"
-	OperationDeleteTopic Operation = "delete-topic"
-	OperationListACL     Operation = "list-acl"
-	OperationGrantACL    Operation = "grant-acl"
-	OperationRevokeACL   Operation = "revoke-acl"
+	OperationList           Operation = "list"
+	OperationDescribe       Operation = "describe"
+	OperationLag            Operation = "lag"
+	OperationPeek           Operation = "peek"
+	OperationTail           Operation = "tail"
+	OperationListDLQ        Operation = "list-dlq"
+	OperationPeekDLQ        Operation = "peek-dlq"
+	OperationRedriveDLQ     Operation = "redrive-dlq"
+	OperationClusterInfo    Operation = "cluster-info"
+	OperationProduce        Operation = "produce"
+	OperationCreateTopic    Operation = "create-topic"
+	OperationAlterTopic     Operation = "alter-topic"
+	OperationCreateGroup    Operation = "create-group"
+	OperationDeleteGroup    Operation = "delete-group"
+	OperationResetOffset    Operation = "reset-offset"
+	OperationSeekOffset     Operation = "seek-offset"
+	OperationPurgeTopic     Operation = "purge-topic"
+	OperationPurgeDLQ       Operation = "purge-dlq"
+	OperationDeleteTopic    Operation = "delete-topic"
+	OperationListACL        Operation = "list-acl"
+	OperationGrantACL       Operation = "grant-acl"
+	OperationRevokeACL      Operation = "revoke-acl"
+	OperationListSchema     Operation = "list-schema"
+	OperationDescribeSchema Operation = "describe-schema"
+	OperationCheckSchema    Operation = "check-schema"
 )
 
 type Target struct {
@@ -113,7 +116,7 @@ func applyRedrivePins(result Result, op Operation, target Target) Result {
 
 func classifyBase(op Operation) Result {
 	switch op {
-	case OperationList, OperationDescribe, OperationLag, OperationPeek, OperationTail, OperationListDLQ, OperationPeekDLQ, OperationClusterInfo, OperationListACL:
+	case OperationList, OperationDescribe, OperationLag, OperationPeek, OperationTail, OperationListDLQ, OperationPeekDLQ, OperationClusterInfo, OperationListACL, OperationListSchema, OperationDescribeSchema, OperationCheckSchema:
 		return Result{Risk: safety.R0, Reason: "read-only broker operation"}
 	case OperationProduce, OperationCreateTopic:
 		return Result{Risk: safety.R1, Reason: "non-protected topic write"}

@@ -14,3 +14,13 @@ services:
       - --advertise-kafka-addr=PLAINTEXT://127.0.0.1:9092
     ports:
       - "9092:9092"
+  schema-registry:
+    image: confluentinc/cp-schema-registry:latest
+    depends_on:
+      - redpanda
+    environment:
+      SCHEMA_REGISTRY_HOST_NAME: schema-registry
+      SCHEMA_REGISTRY_LISTENERS: http://0.0.0.0:8081
+      SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS: PLAINTEXT://redpanda:9092
+    ports:
+      - "8081:8081"

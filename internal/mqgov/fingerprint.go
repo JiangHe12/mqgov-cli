@@ -28,6 +28,10 @@ func Fingerprints(key, body []byte, count int64) ResourceFingerprints {
 	return ResourceFingerprints{KeySHA256: sha256Hex(key), BodySHA256: sha256Hex(body), Count: count, Size: len(body)}
 }
 
+func SHA256Hex(data []byte) string {
+	return sha256Hex(data)
+}
+
 func sha256Hex(data []byte) string {
 	sum := sha256.Sum256(data)
 	return hex.EncodeToString(sum[:])

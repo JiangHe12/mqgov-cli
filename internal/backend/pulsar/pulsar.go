@@ -68,6 +68,20 @@ type partitionedTopicMetadata struct {
 	Partitions int `json:"partitions"`
 }
 
+type pulsarSchemaInfo struct {
+	Version    any               `json:"version"`
+	Type       string            `json:"type"`
+	Timestamp  any               `json:"timestamp"`
+	Data       string            `json:"data"`
+	Properties map[string]string `json:"properties"`
+}
+
+type pulsarSchemaPayload struct {
+	Type       string            `json:"type"`
+	Schema     string            `json:"schema"`
+	Properties map[string]string `json:"properties,omitempty"`
+}
+
 func New(opts Options) (*Broker, error) {
 	opts.Tenant = firstNonEmpty(opts.Tenant, "public")
 	opts.Namespace = firstNonEmpty(opts.Namespace, "default")
@@ -121,8 +135,8 @@ func (b *Broker) Describe() mqgov.Description {
 func (b *Broker) Capabilities() mqgov.Capabilities {
 	return mqgov.Capabilities{
 		Backend:            "pulsar",
-		ResourceTypes:      []string{"topic", "group", "message", "offset", "acl", "dlq"},
-		Verbs:              []string{"list", "describe", "lag", "peek", "tail", "produce", "create", "alter", "delete", "purge", "reset-offset", "grant-acl", "revoke-acl", "redrive"},
+		ResourceTypes:      []string{"topic", "group", "message", "offset", "acl", "dlq", "schema"},
+		Verbs:              []string{"list", "describe", "lag", "peek", "tail", "produce", "create", "alter", "delete", "purge", "reset-offset", "grant-acl", "revoke-acl", "redrive", "check-schema"},
 		SupportsOffsets:    true,
 		SupportsPartitions: true,
 		SupportsACL:        true,
@@ -130,6 +144,7 @@ func (b *Broker) Capabilities() mqgov.Capabilities {
 		SupportsDLQPeek:    true,
 		SupportsDLQRedrive: true,
 		SupportsDLQPurge:   true,
+		SupportsSchema:     true,
 	}
 }
 
@@ -520,6 +535,79 @@ func (b *Broker) RevokeACL(ctx context.Context, binding mqgov.ACLBinding) error 
 		return err
 	}
 	return b.postPulsarPermissions(ctx, target, binding.Principal, actions)
+}
+
+func (b *Broker) ListSchemas(ctx context.Context, opts mqgov.SchemaListOptions) ([]mqgov.SchemaSubject, error) {
+	topics, err := b.listTopicNames(ctx, b.topicNamespacePath())
+	if err != nil {
+		return nil, err
+	}
+	partitioned, err := b.listTopicNames(ctx, b.topicNamespacePath()+"/partitioned")
+	if err != nil {
+		return nil, err
+	}
+	topics = append(topics, partitioned...)
+	items := make([]mqgov.SchemaSubject, 0, len(topics))
+	for _, fqn := range topics {
+		subject := shortTopicName(fqn)
+		if opts.Subject != "" && opts.Subject != subject {
+			continue
+		}
+		if opts.Pattern != "" && opts.Pattern != subject {
+			continue
+		}
+		if _, err := b.pulsarSchema(ctx, subject, "latest"); err == nil {
+			items = append(items, mqgov.SchemaSubject{Subject: subject})
+		} else if apperrors.AsAppError(err).Code != apperrors.CodeResourceNotFound {
+			return nil, err
+		}
+	}
+	sort.Slice(items, func(i, j int) bool { return items[i].Subject < items[j].Subject })
+	if opts.Limit > 0 && len(items) > opts.Limit {
+		items = items[:opts.Limit]
+	}
+	return items, nil
+}
+
+func (b *Broker) DescribeSchema(ctx context.Context, req mqgov.SchemaDescribeRequest) (mqgov.SchemaDescription, error) {
+	if strings.TrimSpace(req.Subject) == "" {
+		return mqgov.SchemaDescription{}, apperrors.New(apperrors.CodeUsageError, "schema subject is required", nil)
+	}
+	info, err := b.pulsarSchema(ctx, req.Subject, req.Version)
+	if err != nil {
+		return mqgov.SchemaDescription{}, err
+	}
+	versions, _ := b.pulsarSchemaVersions(ctx, req.Subject)
+	version := pulsarSchemaVersionString(info.Version)
+	return mqgov.SchemaDescription{
+		Subject:    shortTopicName(req.Subject),
+		Version:    version,
+		Type:       info.Type,
+		Schema:     info.Data,
+		SchemaHash: mqgov.SHA256Hex([]byte(info.Data)),
+		Versions:   versions,
+		Properties: info.Properties,
+	}, nil
+}
+
+func (b *Broker) CheckCompatibility(ctx context.Context, req mqgov.SchemaCheckRequest) (mqgov.SchemaCheckResult, error) {
+	if strings.TrimSpace(req.Subject) == "" {
+		return mqgov.SchemaCheckResult{}, apperrors.New(apperrors.CodeUsageError, "schema subject is required", nil)
+	}
+	if strings.TrimSpace(req.Schema) == "" {
+		return mqgov.SchemaCheckResult{}, apperrors.New(apperrors.CodeUsageError, "schema text is required", nil)
+	}
+	payload := pulsarSchemaPayload{Type: firstNonEmpty(strings.ToUpper(strings.TrimSpace(req.Type)), "AVRO"), Schema: req.Schema}
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return mqgov.SchemaCheckResult{}, backendErr(err)
+	}
+	body, err := b.adminJSON(ctx, http.MethodPost, b.schemaPath(req.Subject)+"/compatibility", data)
+	if err != nil {
+		return mqgov.SchemaCheckResult{}, err
+	}
+	compatible, message := pulsarCompatibility(body)
+	return mqgov.SchemaCheckResult{Subject: shortTopicName(req.Subject), Version: firstNonEmpty(req.Version, "latest"), Compatible: compatible, SchemaHash: mqgov.SHA256Hex([]byte(req.Schema)), Message: message}, nil
 }
 
 func (b *Broker) Lag(ctx context.Context, group mqgov.GroupCoordinate, topic mqgov.TopicCoordinate) (mqgov.OffsetPlan, error) {
@@ -966,6 +1054,85 @@ func normalizePulsarACLValue(value string) string {
 	return strings.ToLower(strings.NewReplacer("_", "", "-", "", ".", "").Replace(strings.TrimSpace(value)))
 }
 
+func (b *Broker) pulsarSchema(ctx context.Context, subject, version string) (pulsarSchemaInfo, error) {
+	path := b.schemaPath(subject) + "/schema"
+	if version != "" && version != "latest" {
+		path += "/" + pathEscape(version)
+	}
+	body, err := b.adminJSON(ctx, http.MethodGet, path, nil)
+	if err != nil {
+		return pulsarSchemaInfo{}, err
+	}
+	var info pulsarSchemaInfo
+	if err := json.Unmarshal(body, &info); err != nil {
+		return pulsarSchemaInfo{}, backendErr(fmt.Errorf("decode Pulsar schema: %w", err))
+	}
+	return info, nil
+}
+
+func (b *Broker) pulsarSchemaVersions(ctx context.Context, subject string) ([]string, error) {
+	body, err := b.adminJSON(ctx, http.MethodGet, b.schemaPath(subject)+"/versions", nil)
+	if err != nil {
+		return nil, err
+	}
+	var raw []any
+	if err := json.Unmarshal(body, &raw); err != nil {
+		var ints []int
+		if intErr := json.Unmarshal(body, &ints); intErr != nil {
+			return nil, backendErr(fmt.Errorf("decode Pulsar schema versions: %w", err))
+		}
+		out := make([]string, 0, len(ints))
+		for _, version := range ints {
+			out = append(out, strconv.Itoa(version))
+		}
+		return out, nil
+	}
+	out := make([]string, 0, len(raw))
+	for _, version := range raw {
+		out = append(out, pulsarSchemaVersionString(version))
+	}
+	return out, nil
+}
+
+func pulsarCompatibility(body []byte) (bool, string) {
+	trimmed := strings.TrimSpace(string(body))
+	if trimmed == "" {
+		return true, ""
+	}
+	var result struct {
+		Compatible   *bool    `json:"compatible"`
+		IsCompatible *bool    `json:"is_compatible"`
+		Message      string   `json:"message"`
+		Messages     []string `json:"messages"`
+	}
+	if err := json.Unmarshal(body, &result); err != nil {
+		return true, trimmed
+	}
+	compatible := true
+	if result.Compatible != nil {
+		compatible = *result.Compatible
+	}
+	if result.IsCompatible != nil {
+		compatible = *result.IsCompatible
+	}
+	return compatible, firstNonEmpty(result.Message, strings.Join(result.Messages, "; "))
+}
+
+func pulsarSchemaVersionString(version any) string {
+	switch v := version.(type) {
+	case string:
+		return v
+	case float64:
+		return strconv.FormatInt(int64(v), 10)
+	case int:
+		return strconv.Itoa(v)
+	case int64:
+		return strconv.FormatInt(v, 10)
+	default:
+		return fmt.Sprint(v)
+	}
+}
+
 func (b *Broker) adminJSON(ctx context.Context, method, path string, payload []byte) ([]byte, error) {
 	return b.adminJSONWithContentType(ctx, method, path, payload, "application/json")
 }
@@ -1017,6 +1184,10 @@ func (b *Broker) topicNamespacePath() string {
 
 func (b *Broker) topicPath(topic string) string {
 	return b.topicNamespacePath() + "/" + pathEscape(shortTopicName(topic))
+}
+
+func (b *Broker) schemaPath(subject string) string {
+	return "/admin/v2/schemas/" + pathEscape(b.opts.Tenant) + "/" + pathEscape(b.opts.Namespace) + "/" + pathEscape(shortTopicName(subject))
 }
 
 func fingerprint(msg pulsarclient.Message) mqgov.MessageFingerprint {

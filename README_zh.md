@@ -4,7 +4,7 @@
 
 **面向人类_和_ AI agent 的受治理消息中间件操作工具。**
 
-一条安全的命令行,统一管理 **Kafka**、**RabbitMQ**、**Pulsar**、**RocketMQ** —— 列出、查看、peek、tail、生产、治理 DLQ、重置 offset、查看/变更 ACL、清空、删除 topic,绝不手滑搞挂生产、也绝不静默清空一个队列。
+一条安全的命令行,统一管理 **Kafka**、**RabbitMQ**、**Pulsar**、**RocketMQ** —— 列出、查看、peek、tail、生产、治理 DLQ、重置 offset、查看/变更 ACL、检视 schema、清空、删除 topic,绝不手滑搞挂生产、也绝不静默清空一个队列。
 
 [![npm version](https://img.shields.io/npm/v/mqgov-cli.svg)](https://www.npmjs.com/package/mqgov-cli)
 [![CI](https://github.com/JiangHe12/mqgov-cli/actions/workflows/ci.yml/badge.svg)](https://github.com/JiangHe12/mqgov-cli/actions/workflows/ci.yml)
@@ -38,7 +38,7 @@
 | | |
 |---|---|
 | 📨 **四个 broker** | **Kafka**(franz-go)、**RabbitMQ**(AMQP + 管理 API)、**Pulsar**(客户端 + admin REST)、**RocketMQ**(rocketmq-client-go/v2)。一套与后端无关的治理模型;按 context 选择或按命令覆盖。 |
-| 🧱 **topic / group / message / dlq / acl** | topic:list · describe · create · alter · delete · purge。消费组:list · lag · reset-offset。消息:非破坏性 peek · tail · produce。DLQ:list · peek · redrive · purge,映射各 broker 原生模型。ACL:list · grant · revoke(按后端能力开放)。 |
+| 🧱 **topic / group / message / dlq / acl / schema** | topic:list · describe · create · alter · delete · purge。消费组:list · lag · reset-offset。消息:非破坏性 peek · tail · produce。DLQ:list · peek · redrive · purge,映射各 broker 原生模型。ACL:list · grant · revoke(按后端能力开放)。Schema:list · describe · check(按原生 schema registry 能力开放)。 |
 | 🔐 **R0–R3 治理** | 每个操作由 fail-closed 的 `mqclass` 引擎分级;保护上下文与内部/系统 topic 升一档;AI 调用方永远无法自我授权。 |
 | 🎯 **真实爆炸半径预览** | `reset-offset --dry-run` 和 `purge --dry-run` 从实时 broker 计算真实的每分区消息 delta —— 不靠猜。预览只读,绝不变更。 |
 | 👀 **非破坏性 peek/tail** | 把消息以指纹形式查看或流式读取,不消费、不移动游标(Kafka 直接分区读取、Pulsar Reader、RabbitMQ 仅 peek 使用 get+requeue)。无法保证非破坏的 broker 上,操作 **失败关闭**而非静默消费。 |
@@ -60,6 +60,7 @@
 | purge | ✅ | ✅ | ✅ | ❌ |
 | **DLQ list / peek / redrive / purge** | list ❌;显式 topic peek/redrive/purge ✅ | ✅ `{topic}-{subscription}-DLQ` | ✅ DLX 队列 | list ✅ `%DLQ%group`;其他 ❌ |
 | **ACL list / grant / revoke** | ✅ | ✅ namespace/topic permissions | ✅ user-vhost permissions | ❌ `NOT_IMPLEMENTED`³ |
+| **schema list / describe / check** | ✅ Confluent Schema Registry | ✅ 内建 admin schema API | ❌ `NOT_IMPLEMENTED` | ❌ `NOT_IMPLEMENTED` |
 
 ¹ RocketMQ 的 Go v2 `PullConsumer` 会进入消费组生命周期并提交 offset,无法保证非破坏性 peek/tail —— mqgov 选择失败关闭,而非静默推进 offset。² RabbitMQ 没有向前的非破坏性 tail,读取语义是 consume/requeue。不支持的操作一律返回 `NOT_IMPLEMENTED`(exit 12),绝不假装成功。
 
@@ -127,7 +128,7 @@ mqgov audit query --since 1h -o json
 
 | 档 | 涵盖 | 你必须提供 |
 |:---:|---|---|
-| **R0** | 读与预览(`topic list/describe`、`group list/lag`、`message peek`、`message tail`、`dlq list/peek`、`acl list`、`*-dry-run`、`audit query/verify`、`doctor`) | 无 —— 但仍会审计 |
+| **R0** | 读与预览(`topic list/describe`、`group list/lag`、`message peek`、`message tail`、`dlq list/peek`、`acl list`、`schema list/describe/check`、`*-dry-run`、`audit query/verify`、`doctor`) | 无 —— 但仍会审计 |
 | **R1** | 普通写(`message produce`、`topic create`) | `--yes`(或交互确认) |
 | **R2** | 升级变更(`topic alter`、`group create/delete`、`acl grant`、向**保护** topic 生产) | `--yes` **且**非空 `--ticket` |
 | **R3** | 破坏性 / 不可逆(`group reset-offset`、`topic purge`、`topic delete`、`dlq redrive`、`dlq purge`、宽泛 `acl grant`、`acl revoke`、向**内部/系统** topic 生产) | 以上 **再加**该操作专属的 `--allow-*` 标志 |
@@ -214,6 +215,18 @@ Redrive 按 internal-produce 治理:dry-run 是只读预览,真实执行需要 `
 </details>
 
 <details>
+<summary><b>schema</b> —— schema registry</summary>
+
+```bash
+mqgov schema list [--pattern <subject>] -o json
+mqgov schema describe <subject-or-topic> [--version latest|N] -o json
+mqgov schema check <subject-or-topic> --schema-file ./next.avsc --schema-type AVRO [--version latest] -o json
+```
+
+`schema list`、`schema describe`、`schema check` 都是 R0 且会审计。`check` 只调用只读兼容性校验端点,绝不注册、删除或演进 schema。Kafka 映射到 Confluent Schema Registry(`GET /subjects`、`GET /subjects/{subject}/versions`、`GET /subjects/{subject}/versions/{version|latest}`、`POST /compatibility/subjects/{subject}/versions/{version}`)。Pulsar 映射到 `/admin/v2/schemas/{tenant}/{namespace}/{topic}` 下的内建 admin schema 端点。RabbitMQ 与 RocketMQ 失败关闭为 `NOT_IMPLEMENTED`。审计只记录 subject/version 元数据和 schema hash,永不记录 schema 全文或 registry 凭据。
+</details>
+
+<details>
 <summary><b>acl</b> —— broker 访问控制</summary>
 
 ```bash
@@ -252,12 +265,12 @@ mqgov acl revoke --principal app-role --resource-type topic --resource-name orde
 
 ```bash
 # 后端绑定的上下文(凭据经 credstore,绝不明文)
-mqgov ctx set <name> --backend kafka    --brokers <h:p,h:p> [--sasl-mechanism PLAIN] [--tls --ca-cert <f>] [--protected]
+mqgov ctx set <name> --backend kafka    --brokers <h:p,h:p> [--sasl-mechanism PLAIN] [--tls --ca-cert <f>] [--schema-registry-url <url>] [--schema-registry-username <u>] [--schema-registry-password <p>] [--protected]
 mqgov ctx set <name> --backend rabbitmq (--amqp-url <url> | --host <h> --port <p> --vhost </>) --management-url <url>
 mqgov ctx set <name> --backend pulsar   --service-url pulsar://<h:p> --admin-url http://<h:p> [--tenant public] [--pulsar-namespace default]
 mqgov ctx set <name> --backend rocketmq --nameservers <h:p,h:p> [--broker-addr <h:p>]
 mqgov ctx use|list|current|delete|test
-#   密钥:--password <pw|token|secretKey> --credential-backend <encrypted-file|keychain|...>(必须用非 plain 后端)
+#   密钥:--password <pw|token|secretKey> 与 --schema-registry-password <pw> 都经 --credential-backend <encrypted-file|keychain|...>(必须用非 plain 后端)
 
 # 审计(防篡改,仅指纹)
 mqgov audit query  [--since 24h] [--type <t>] [--operator <o>] [--status <s>] [--limit 100] -o json
@@ -278,7 +291,7 @@ mqgov version
 
 mqgov-cli 设计为可被自治 agent 安全驱动:
 
-- 先跑 `mqgov capabilities -o json` 发现绑定后端支持什么 —— broker 各异,别假设(例如 Kafka、RabbitMQ、Pulsar 都支持 `acl`,但原生模型不同;RabbitMQ/RocketMQ 无 offset;RabbitMQ/RocketMQ 无 tail;RocketMQ 无 peek)。
+- 先跑 `mqgov capabilities -o json` 发现绑定后端支持什么 —— broker 各异,别假设(例如 Kafka、RabbitMQ、Pulsar 都支持 `acl`,但原生模型不同;Kafka 与 Pulsar 支持 `schema`;RabbitMQ/RocketMQ 无 offset、schema registry 或 tail;RocketMQ 无 peek)。
 - 处处用 `-o json`;每个命令返回稳定、带版本的信封。
 - 爆炸半径来自 `--dry-run` / `--plan`,绝不来自你自己的推理。
 - **绝不自填 `--ticket`、`--allow-*` 或高危 `--yes`。** 把所需人工审批上报并停下。

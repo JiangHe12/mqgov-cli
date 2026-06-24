@@ -128,6 +128,47 @@ type DLQPurgeResult struct {
 	Fingerprint ResourceFingerprints `json:"fingerprint"`
 }
 
+type SchemaListOptions struct {
+	Subject string `json:"subject,omitempty"`
+	Pattern string `json:"pattern,omitempty"`
+	Limit   int    `json:"limit,omitempty"`
+}
+
+type SchemaSubject struct {
+	Subject string `json:"subject"`
+}
+
+type SchemaDescription struct {
+	Subject    string            `json:"subject"`
+	Version    string            `json:"version"`
+	ID         int               `json:"id,omitempty"`
+	Type       string            `json:"type,omitempty"`
+	Schema     string            `json:"schema,omitempty"`
+	SchemaHash string            `json:"schemaSha256,omitempty"`
+	Versions   []string          `json:"versions,omitempty"`
+	Properties map[string]string `json:"properties,omitempty"`
+}
+
+type SchemaDescribeRequest struct {
+	Subject string
+	Version string
+}
+
+type SchemaCheckRequest struct {
+	Subject string
+	Version string
+	Type    string
+	Schema  string
+}
+
+type SchemaCheckResult struct {
+	Subject    string `json:"subject"`
+	Version    string `json:"version"`
+	Compatible bool   `json:"compatible"`
+	SchemaHash string `json:"schemaSha256,omitempty"`
+	Message    string `json:"message,omitempty"`
+}
+
 type GroupListOptions struct {
 	Namespace string `json:"namespace,omitempty"`
 	Pattern   string `json:"pattern,omitempty"`
@@ -246,6 +287,7 @@ type Capabilities struct {
 	SupportsDLQPeek    bool     `json:"supportsDlqPeek"`
 	SupportsDLQRedrive bool     `json:"supportsDlqRedrive"`
 	SupportsDLQPurge   bool     `json:"supportsDlqPurge"`
+	SupportsSchema     bool     `json:"supportsSchema"`
 }
 
 type ACLBinding struct {
@@ -313,6 +355,12 @@ type DLQManager interface {
 	PurgeDLQ(ctx context.Context, req DLQPurgeRequest) (DLQPurgeResult, error)
 }
 
+type SchemaManager interface {
+	ListSchemas(ctx context.Context, opts SchemaListOptions) ([]SchemaSubject, error)
+	DescribeSchema(ctx context.Context, req SchemaDescribeRequest) (SchemaDescription, error)
+	CheckCompatibility(ctx context.Context, req SchemaCheckRequest) (SchemaCheckResult, error)
+}
+
 func SupportsOffsets(b Broker) (OffsetManager, bool) {
 	manager, ok := b.(OffsetManager)
 	return manager, ok
@@ -335,5 +383,10 @@ func SupportsTail(b Broker) (Tailer, bool) {
 
 func SupportsDLQ(b Broker) (DLQManager, bool) {
 	manager, ok := b.(DLQManager)
+	return manager, ok
+}
+
+func SupportsSchema(b Broker) (SchemaManager, bool) {
+	manager, ok := b.(SchemaManager)
 	return manager, ok
 }

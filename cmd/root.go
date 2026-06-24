@@ -51,6 +51,7 @@ const (
 	auditEventDLQ         = audit.EventType("mq.dlq")
 	auditEventOffset      = audit.EventType("mq.offset")
 	auditEventACL         = audit.EventType("mq.acl")
+	auditEventSchema      = audit.EventType("mq.schema")
 	auditEventDiagnostic  = audit.EventType("mq.diagnostic")
 	defaultFakeBackend    = "fake"
 	defaultCommandTimeout = 30 * time.Second
@@ -183,7 +184,7 @@ func newRootCmdWith(f *cliFlags) *cobra.Command {
 	cmd.PersistentFlags().StringVar(&f.OTLPEnd, "otel-endpoint", "", "OTLP trace endpoint")
 	cmd.PersistentFlags().StringVar(&f.OTLPMetrics, "otel-metrics-endpoint", "", "OTLP metrics endpoint")
 	cmd.PersistentFlags().BoolVar(&f.OTLPInsec, "otel-insecure", false, "Disable TLS for OTLP exporter")
-	cmd.AddCommand(newTopicCmd(f), newGroupCmd(f), newMessageCmd(f), newDLQCmd(f), newACLCmd(f), newContextCmd(f), newAuditCmd(f), newInstallCmd(f), newCapabilitiesCmd(f), newDoctorCmd(f), newVersionCmd(f))
+	cmd.AddCommand(newTopicCmd(f), newGroupCmd(f), newMessageCmd(f), newDLQCmd(f), newACLCmd(f), newSchemaCmd(f), newContextCmd(f), newAuditCmd(f), newInstallCmd(f), newCapabilitiesCmd(f), newDoctorCmd(f), newVersionCmd(f))
 	return cmd
 }
 
@@ -341,18 +342,25 @@ func buildKafkaBackend(f *cliFlags, item mqgovctx.Context, contextName string) (
 	if err != nil {
 		return nil, err
 	}
+	srPassword, err := mqgovctx.ResolveKafkaSchemaRegistryPassword(context.Background(), contextName, item)
+	if err != nil {
+		return nil, err
+	}
 	return kafkabackend.New(kafkabackend.Options{
-		Brokers:        firstNonEmptyList(item.KafkaBrokers, os.Getenv("KAFKA_BROKERS")),
-		Cluster:        firstNonEmpty(f.Cluster, item.Cluster, "kafka"),
-		Namespace:      firstNonEmpty(f.Namespace, item.Namespace),
-		Username:       firstNonEmpty(item.Username, os.Getenv("KAFKA_USERNAME")),
-		Password:       firstNonEmpty(os.Getenv("KAFKA_PASSWORD"), password),
-		SASLMechanism:  firstNonEmpty(item.KafkaSASLMechanism, os.Getenv("KAFKA_SASL_MECHANISM")),
-		TLS:            item.KafkaTLS || os.Getenv("KAFKA_TLS") == "true",
-		CACertFile:     firstNonEmpty(item.KafkaCACertFile, os.Getenv("KAFKA_CA_CERT_FILE")),
-		ClientCertFile: firstNonEmpty(item.KafkaClientCertFile, os.Getenv("KAFKA_CLIENT_CERT_FILE")),
-		ClientKeyFile:  firstNonEmpty(item.KafkaClientKeyFile, os.Getenv("KAFKA_CLIENT_KEY_FILE")),
-		Timeout:        f.Timeout,
+		Brokers:                firstNonEmptyList(item.KafkaBrokers, os.Getenv("KAFKA_BROKERS")),
+		Cluster:                firstNonEmpty(f.Cluster, item.Cluster, "kafka"),
+		Namespace:              firstNonEmpty(f.Namespace, item.Namespace),
+		Username:               firstNonEmpty(item.Username, os.Getenv("KAFKA_USERNAME")),
+		Password:               firstNonEmpty(os.Getenv("KAFKA_PASSWORD"), password),
+		SASLMechanism:          firstNonEmpty(item.KafkaSASLMechanism, os.Getenv("KAFKA_SASL_MECHANISM")),
+		TLS:                    item.KafkaTLS || os.Getenv("KAFKA_TLS") == "true",
+		CACertFile:             firstNonEmpty(item.KafkaCACertFile, os.Getenv("KAFKA_CA_CERT_FILE")),
+		ClientCertFile:         firstNonEmpty(item.KafkaClientCertFile, os.Getenv("KAFKA_CLIENT_CERT_FILE")),
+		ClientKeyFile:          firstNonEmpty(item.KafkaClientKeyFile, os.Getenv("KAFKA_CLIENT_KEY_FILE")),
+		SchemaRegistryURL:      firstNonEmpty(item.KafkaSchemaRegistryURL, os.Getenv("KAFKA_SCHEMA_REGISTRY_URL")),
+		SchemaRegistryUsername: firstNonEmpty(item.KafkaSchemaRegistryUsername, os.Getenv("KAFKA_SCHEMA_REGISTRY_USERNAME")),
+		SchemaRegistryPassword: firstNonEmpty(os.Getenv("KAFKA_SCHEMA_REGISTRY_PASSWORD"), srPassword),
+		Timeout:                f.Timeout,
 	})
 }
 

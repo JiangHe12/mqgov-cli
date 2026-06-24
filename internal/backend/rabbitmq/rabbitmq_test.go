@@ -22,6 +22,16 @@ func TestSupportsACLTrue(t *testing.T) {
 	}
 }
 
+func TestSupportsSchemaFalse(t *testing.T) {
+	backend := &Broker{opts: Options{Cluster: "test"}}
+	if backend.Capabilities().SupportsSchema {
+		t.Fatalf("SupportsSchema = true, want false")
+	}
+	if _, ok := mqgov.SupportsSchema(backend); ok {
+		t.Fatalf("SupportsSchema capability assertion = true, want false")
+	}
+}
+
 func TestRabbitMQACLGrantListRevoke(t *testing.T) {
 	permissions := map[string]rabbitMQPermission{}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

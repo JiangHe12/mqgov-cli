@@ -34,6 +34,55 @@ func TestSupportsACLTrue(t *testing.T) {
 	}
 }
 
+func TestSupportsSchemaTrue(t *testing.T) {
+	backend := &Broker{opts: Options{Cluster: "test"}}
+	if !backend.Capabilities().SupportsSchema {
+		t.Fatalf("SupportsSchema = false, want true")
+	}
+	if _, ok := mqgov.SupportsSchema(backend); !ok {
+		t.Fatalf("SupportsSchema capability assertion = false, want true")
+	}
+}
+
+func TestPulsarSchemaDescribeAndCheck(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/admin/v2/schemas/public/default/orders/schema":
+			_ = json.NewEncoder(w).Encode(pulsarSchemaInfo{Version: float64(0), Type: "AVRO", Data: `{"type":"record","name":"Order"}`})
+		case r.Method == http.MethodGet && r.URL.Path == "/admin/v2/schemas/public/default/orders/versions":
+			_ = json.NewEncoder(w).Encode([]int{0})
+		case r.Method == http.MethodPost && r.URL.Path == "/admin/v2/schemas/public/default/orders/compatibility":
+			var payload pulsarSchemaPayload
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				t.Fatalf("Decode(schema check) error = %v", err)
+			}
+			if payload.Type != "AVRO" || payload.Schema == "" {
+				t.Fatalf("schema check payload = %+v, want AVRO schema", payload)
+			}
+			_ = json.NewEncoder(w).Encode(map[string]bool{"compatible": true})
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	t.Cleanup(server.Close)
+
+	backend := &Broker{opts: Options{AdminURL: server.URL, Tenant: "public", Namespace: "default"}, httpClient: server.Client()}
+	desc, err := backend.DescribeSchema(context.Background(), mqgov.SchemaDescribeRequest{Subject: "orders", Version: "latest"})
+	if err != nil {
+		t.Fatalf("DescribeSchema() error = %v", err)
+	}
+	if desc.Subject != "orders" || desc.Version != "0" || desc.SchemaHash == "" || len(desc.Versions) != 1 {
+		t.Fatalf("DescribeSchema() = %+v, want schema metadata", desc)
+	}
+	check, err := backend.CheckCompatibility(context.Background(), mqgov.SchemaCheckRequest{Subject: "orders", Type: "AVRO", Schema: `{"type":"record","name":"Order"}`})
+	if err != nil {
+		t.Fatalf("CheckCompatibility() error = %v", err)
+	}
+	if !check.Compatible || check.SchemaHash == "" {
+		t.Fatalf("CheckCompatibility() = %+v, want compatible with hash", check)
+	}
+}
+
 func TestPulsarACLGrantListRevoke(t *testing.T) {
 	permissions := map[string][]string{}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

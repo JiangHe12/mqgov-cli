@@ -93,6 +93,7 @@ func (b *Broker) Capabilities() mqgov.Capabilities {
 		SupportsDLQPeek:    true,
 		SupportsDLQRedrive: true,
 		SupportsDLQPurge:   true,
+		SupportsSchema:     false,
 	}
 }
 

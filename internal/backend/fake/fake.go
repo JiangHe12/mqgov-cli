@@ -17,6 +17,7 @@ type Broker struct {
 	topics    map[string]*topicState
 	groups    map[string]mqgov.GroupDescription
 	lag       map[string]map[int]int64
+	schemas   map[string]mqgov.SchemaDescription
 }
 
 type topicState struct {
@@ -34,6 +35,7 @@ func New(cluster, namespace string) *Broker {
 		topics:    make(map[string]*topicState),
 		groups:    make(map[string]mqgov.GroupDescription),
 		lag:       make(map[string]map[int]int64),
+		schemas:   make(map[string]mqgov.SchemaDescription),
 	}
 	b.topics["orders"] = &topicState{desc: mqgov.TopicDescription{
 		Coordinate: mqgov.TopicCoordinate{Cluster: cluster, Namespace: namespace, Topic: "orders"},
@@ -64,6 +66,8 @@ func New(cluster, namespace string) *Broker {
 	}}
 	b.groups["billing"] = mqgov.GroupDescription{Coordinate: mqgov.GroupCoordinate{Cluster: cluster, Namespace: namespace, Group: "billing"}, Members: 1, State: "stable"}
 	b.lag["billing:orders"] = map[int]int64{0: 12, 1: 0, 2: 7}
+	schema := `{"type":"record","name":"Order","fields":[{"name":"id","type":"string"}]}`
+	b.schemas["orders-value"] = mqgov.SchemaDescription{Subject: "orders-value", Version: "1", ID: 1, Type: "AVRO", Schema: schema, SchemaHash: mqgov.SHA256Hex([]byte(schema)), Versions: []string{"1"}}
 	return b
 }
 
@@ -76,8 +80,8 @@ func (b *Broker) Describe() mqgov.Description {
 func (b *Broker) Capabilities() mqgov.Capabilities {
 	return mqgov.Capabilities{
 		Backend:            "fake",
-		ResourceTypes:      []string{"topic", "group", "message", "offset", "dlq"},
-		Verbs:              []string{"list", "describe", "lag", "peek", "produce", "create", "alter", "delete", "purge", "reset-offset", "redrive"},
+		ResourceTypes:      []string{"topic", "group", "message", "offset", "dlq", "schema"},
+		Verbs:              []string{"list", "describe", "lag", "peek", "produce", "create", "alter", "delete", "purge", "reset-offset", "redrive", "check-schema"},
 		SupportsOffsets:    true,
 		SupportsPartitions: true,
 		SupportsACL:        false,
@@ -85,7 +89,50 @@ func (b *Broker) Capabilities() mqgov.Capabilities {
 		SupportsDLQPeek:    true,
 		SupportsDLQRedrive: true,
 		SupportsDLQPurge:   true,
+		SupportsSchema:     true,
 	}
+}
+
+func (b *Broker) ListSchemas(_ context.Context, opts mqgov.SchemaListOptions) ([]mqgov.SchemaSubject, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	items := make([]mqgov.SchemaSubject, 0, len(b.schemas))
+	for subject := range b.schemas {
+		if opts.Subject != "" && opts.Subject != subject {
+			continue
+		}
+		if opts.Pattern != "" && opts.Pattern != subject {
+			continue
+		}
+		items = append(items, mqgov.SchemaSubject{Subject: subject})
+	}
+	sort.Slice(items, func(i, j int) bool { return items[i].Subject < items[j].Subject })
+	if opts.Limit > 0 && len(items) > opts.Limit {
+		items = items[:opts.Limit]
+	}
+	return items, nil
+}
+
+func (b *Broker) DescribeSchema(_ context.Context, req mqgov.SchemaDescribeRequest) (mqgov.SchemaDescription, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	desc, ok := b.schemas[req.Subject]
+	if !ok {
+		return mqgov.SchemaDescription{}, apperrors.New(apperrors.CodeResourceNotFound, "schema subject not found", nil)
+	}
+	if req.Version != "" && req.Version != "latest" && req.Version != desc.Version {
+		return mqgov.SchemaDescription{}, apperrors.New(apperrors.CodeResourceNotFound, "schema version not found", nil)
+	}
+	return desc, nil
+}
+
+func (b *Broker) CheckCompatibility(_ context.Context, req mqgov.SchemaCheckRequest) (mqgov.SchemaCheckResult, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if _, ok := b.schemas[req.Subject]; !ok {
+		return mqgov.SchemaCheckResult{}, apperrors.New(apperrors.CodeResourceNotFound, "schema subject not found", nil)
+	}
+	return mqgov.SchemaCheckResult{Subject: req.Subject, Version: firstNonEmpty(req.Version, "latest"), Compatible: true, SchemaHash: mqgov.SHA256Hex([]byte(req.Schema))}, nil
 }
 
 func (b *Broker) ListTopics(_ context.Context, opts mqgov.TopicListOptions) ([]mqgov.TopicDescription, error) {
@@ -380,4 +427,13 @@ func (b *Broker) offsetPlan(req mqgov.OffsetPlanRequest, dryRun bool) mqgov.Offs
 	}
 	sort.Slice(impact, func(i, j int) bool { return impact[i].Partition < impact[j].Partition })
 	return mqgov.OffsetPlan{Group: req.Group, Topic: req.Topic, To: req.To, DryRun: dryRun, Impact: impact, Total: total}
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if value != "" {
+			return value
+		}
+	}
+	return ""
 }

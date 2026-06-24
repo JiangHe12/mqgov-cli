@@ -4,7 +4,9 @@ package pulsar
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"net/http"
 	"os"
 	"strings"
 	"testing"
@@ -60,6 +62,34 @@ func TestPulsarIntegration(t *testing.T) {
 
 	if _, err := backend.CreateTopic(ctx, mqgov.TopicCreateRequest{Coordinate: coord, Partitions: 1}); err != nil {
 		t.Fatalf("CreateTopic() error = %v", err)
+	}
+	schemaManager, ok := mqgov.SupportsSchema(backend)
+	if !ok || !backend.Capabilities().SupportsSchema {
+		t.Fatalf("SupportsSchema() = %v caps=%+v, want true", ok, backend.Capabilities())
+	}
+	baseSchema := `{"type":"record","name":"Order","fields":[{"name":"id","type":"string"}]}`
+	nextSchema := `{"type":"record","name":"Order","fields":[{"name":"id","type":"string"},{"name":"note","type":["null","string"],"default":null}]}`
+	registerPulsarSchema(t, ctx, backend, topic, "AVRO", baseSchema)
+	schemas, err := schemaManager.ListSchemas(ctx, mqgov.SchemaListOptions{Subject: topic})
+	if err != nil {
+		t.Fatalf("ListSchemas() error = %v", err)
+	}
+	if len(schemas) != 1 || schemas[0].Subject != topic {
+		t.Fatalf("ListSchemas() = %+v, want %q", schemas, topic)
+	}
+	schemaDesc, err := schemaManager.DescribeSchema(ctx, mqgov.SchemaDescribeRequest{Subject: topic, Version: "latest"})
+	if err != nil {
+		t.Fatalf("DescribeSchema() error = %v", err)
+	}
+	if schemaDesc.Subject != topic || schemaDesc.SchemaHash == "" || schemaDesc.Schema == "" {
+		t.Fatalf("DescribeSchema() = %+v, want schema metadata", schemaDesc)
+	}
+	schemaCheck, err := schemaManager.CheckCompatibility(ctx, mqgov.SchemaCheckRequest{Subject: topic, Type: "AVRO", Schema: nextSchema})
+	if err != nil {
+		t.Fatalf("CheckCompatibility() error = %v", err)
+	}
+	if !schemaCheck.Compatible || schemaCheck.SchemaHash == "" {
+		t.Fatalf("CheckCompatibility() = %+v, want compatible with hash", schemaCheck)
 	}
 	if _, err := backend.AlterTopic(ctx, mqgov.TopicAlterRequest{Coordinate: coord, Partitions: 3}); err == nil {
 		t.Fatalf("AlterTopic(non-partitioned) error = nil, want clear error")
@@ -271,4 +301,15 @@ func getenvDefault(name, fallback string) string {
 		return value
 	}
 	return fallback
+}
+
+func registerPulsarSchema(t *testing.T, ctx context.Context, backend *Broker, topic, schemaType, schema string) {
+	t.Helper()
+	payload, err := json.Marshal(pulsarSchemaPayload{Type: schemaType, Schema: schema})
+	if err != nil {
+		t.Fatalf("marshal Pulsar schema payload: %v", err)
+	}
+	if _, err := backend.adminJSON(ctx, http.MethodPost, backend.schemaPath(topic)+"/schema", payload); err != nil {
+		t.Fatalf("register Pulsar schema error = %v", err)
+	}
 }

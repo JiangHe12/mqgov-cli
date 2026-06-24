@@ -39,6 +39,24 @@ func TestACLCapabilityFailsClosed(t *testing.T) {
 	}
 }
 
+func TestSchemaCapabilityFailsClosed(t *testing.T) {
+	backend := &Broker{opts: Options{Cluster: "test"}}
+
+	caps := backend.Capabilities()
+	if caps.SupportsSchema {
+		t.Fatalf("SupportsSchema = true, want false")
+	}
+	if contains(caps.ResourceTypes, "schema") {
+		t.Fatalf("ResourceTypes = %v, want no schema resource", caps.ResourceTypes)
+	}
+	if contains(caps.Verbs, "check-schema") {
+		t.Fatalf("Verbs = %v, want no schema verbs", caps.Verbs)
+	}
+	if _, ok := mqgov.SupportsSchema(backend); ok {
+		t.Fatalf("RocketMQ implements SchemaManager; want fail-closed SupportsSchema gate")
+	}
+}
+
 func TestUnsupportedGroupOperationsFailClosed(t *testing.T) {
 	backend := &Broker{}
 

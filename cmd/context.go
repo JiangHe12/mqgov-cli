@@ -16,29 +16,32 @@ import (
 )
 
 type ctxSetOptions struct {
-	credentialBackend string
-	protected         bool
-	password          string
-	cluster           string
-	namespace         string
-	kafkaBrokers      string
-	kafkaSASL         string
-	rabbitAMQPURL     string
-	rabbitManagement  string
-	rabbitHost        string
-	rabbitPort        int
-	rabbitVHost       string
-	pulsarServiceURL  string
-	pulsarAdminURL    string
-	pulsarTenant      string
-	pulsarNamespace   string
-	rocketNameServers string
-	rocketBrokerAddr  string
-	rocketAccessKey   string
-	tls               bool
-	caCert            string
-	clientCert        string
-	clientKey         string
+	credentialBackend           string
+	protected                   bool
+	password                    string
+	cluster                     string
+	namespace                   string
+	kafkaBrokers                string
+	kafkaSASL                   string
+	kafkaSchemaRegistryURL      string
+	kafkaSchemaRegistryUsername string
+	kafkaSchemaRegistryPassword string
+	rabbitAMQPURL               string
+	rabbitManagement            string
+	rabbitHost                  string
+	rabbitPort                  int
+	rabbitVHost                 string
+	pulsarServiceURL            string
+	pulsarAdminURL              string
+	pulsarTenant                string
+	pulsarNamespace             string
+	rocketNameServers           string
+	rocketBrokerAddr            string
+	rocketAccessKey             string
+	tls                         bool
+	caCert                      string
+	clientCert                  string
+	clientKey                   string
 }
 
 func newContextCmd(f *cliFlags) *cobra.Command {
@@ -60,7 +63,7 @@ func ctxSetCmd(f *cliFlags) *cobra.Command { //nolint:gocyclo // Backend-specifi
 			if !supportedContextBackend(f.Backend) {
 				return apperrors.New(apperrors.CodeNotImplemented, "backend is not supported", nil)
 			}
-			if opts.password != "" && (opts.credentialBackend == "" || opts.credentialBackend == "plain-yaml") {
+			if (opts.password != "" || opts.kafkaSchemaRegistryPassword != "") && (opts.credentialBackend == "" || opts.credentialBackend == "plain-yaml") {
 				return apperrors.New(apperrors.CodeUsageError, "credentials must use a non-plain credential backend", nil)
 			}
 			item := mqgovctx.Context{
@@ -76,9 +79,15 @@ func ctxSetCmd(f *cliFlags) *cobra.Command { //nolint:gocyclo // Backend-specifi
 			}
 			applyBackendContextOptions(&item, opts)
 			var err error
-			item, err = mqgovctx.StoreCredential(cmd.Context(), args[0], opts.credentialBackend, opts.password, item)
+			if opts.password != "" {
+				item, err = mqgovctx.StoreCredential(cmd.Context(), args[0], opts.credentialBackend, opts.password, item)
+				if err != nil {
+					return apperrors.New(apperrors.CodeCredentialStoreError, "failed to store credential", err)
+				}
+			}
+			item, err = mqgovctx.StoreKafkaSchemaRegistryCredential(cmd.Context(), args[0], opts.credentialBackend, opts.kafkaSchemaRegistryPassword, item)
 			if err != nil {
-				return apperrors.New(apperrors.CodeCredentialStoreError, "failed to store credential", err)
+				return apperrors.New(apperrors.CodeCredentialStoreError, "failed to store schema registry credential", err)
 			}
 			if err := mqgovctx.Set(args[0], item); err != nil {
 				return err
@@ -94,6 +103,9 @@ func ctxSetCmd(f *cliFlags) *cobra.Command { //nolint:gocyclo // Backend-specifi
 	cmd.Flags().StringVarP(&opts.namespace, "namespace", "n", "", "Broker namespace")
 	cmd.Flags().StringVar(&opts.kafkaBrokers, "brokers", "", "Kafka brokers, comma-separated")
 	cmd.Flags().StringVar(&opts.kafkaSASL, "sasl-mechanism", "", "Kafka SASL mechanism")
+	cmd.Flags().StringVar(&opts.kafkaSchemaRegistryURL, "schema-registry-url", "", "Kafka Schema Registry URL")
+	cmd.Flags().StringVar(&opts.kafkaSchemaRegistryUsername, "schema-registry-username", "", "Kafka Schema Registry username")
+	cmd.Flags().StringVar(&opts.kafkaSchemaRegistryPassword, "schema-registry-password", "", "Kafka Schema Registry password to store in credstore")
 	cmd.Flags().StringVar(&opts.rabbitAMQPURL, "amqp-url", "", "RabbitMQ AMQP URL")
 	cmd.Flags().StringVar(&opts.rabbitManagement, "management-url", "", "RabbitMQ management URL")
 	cmd.Flags().StringVar(&opts.rabbitHost, "host", "", "RabbitMQ host")
@@ -131,6 +143,8 @@ func applyBackendContextOptions(item *mqgovctx.Context, opts ctxSetOptions) {
 		item.KafkaCACertFile = opts.caCert
 		item.KafkaClientCertFile = opts.clientCert
 		item.KafkaClientKeyFile = opts.clientKey
+		item.KafkaSchemaRegistryURL = opts.kafkaSchemaRegistryURL
+		item.KafkaSchemaRegistryUsername = opts.kafkaSchemaRegistryUsername
 	case "rabbitmq":
 		item.RabbitMQAMQPURL = opts.rabbitAMQPURL
 		item.RabbitMQManagementURL = opts.rabbitManagement
@@ -281,36 +295,39 @@ func contextView(name string, item mqgovctx.Context, current, showSecrets bool) 
 		password = item.Password
 	}
 	return map[string]any{
-		"name":                  name,
-		"current":               current,
-		"backend":               item.Backend,
-		"cluster":               item.Cluster,
-		"namespace":             item.Namespace,
-		"username":              item.Username,
-		"password":              password,
-		"passwordSet":           item.Password != "",
-		"protected":             item.Protected,
-		"credentialBackend":     item.CredentialBackend,
-		"kafkaBrokers":          item.KafkaBrokers,
-		"kafkaSaslMechanism":    item.KafkaSASLMechanism,
-		"kafkaTls":              item.KafkaTLS,
-		"rabbitmqAmqpUrl":       item.RabbitMQAMQPURL,
-		"rabbitmqManagementUrl": item.RabbitMQManagementURL,
-		"rabbitmqHost":          item.RabbitMQHost,
-		"rabbitmqPort":          item.RabbitMQPort,
-		"rabbitmqVhost":         item.RabbitMQVHost,
-		"rabbitmqTls":           item.RabbitMQTLS,
-		"pulsarServiceUrl":      item.PulsarServiceURL,
-		"pulsarAdminUrl":        item.PulsarAdminURL,
-		"pulsarTenant":          item.PulsarTenant,
-		"pulsarNamespace":       item.PulsarNamespace,
-		"pulsarTls":             item.PulsarTLS,
-		"rocketmqNameServers":   item.RocketMQNameServers,
-		"rocketmqBrokerAddr":    item.RocketMQBrokerAddr,
-		"rocketmqAccessKey":     item.RocketMQAccessKey,
-		"rocketmqTls":           item.RocketMQTLS,
-		"caCertFilesConfigured": tlsCAConfigured(item),
-		"clientCertsConfigured": tlsClientConfigured(item),
+		"name":                           name,
+		"current":                        current,
+		"backend":                        item.Backend,
+		"cluster":                        item.Cluster,
+		"namespace":                      item.Namespace,
+		"username":                       item.Username,
+		"password":                       password,
+		"passwordSet":                    item.Password != "",
+		"protected":                      item.Protected,
+		"credentialBackend":              item.CredentialBackend,
+		"kafkaBrokers":                   item.KafkaBrokers,
+		"kafkaSaslMechanism":             item.KafkaSASLMechanism,
+		"kafkaTls":                       item.KafkaTLS,
+		"kafkaSchemaRegistryUrl":         item.KafkaSchemaRegistryURL,
+		"kafkaSchemaRegistryUsername":    item.KafkaSchemaRegistryUsername,
+		"kafkaSchemaRegistryPasswordSet": item.KafkaSchemaRegistryPassword != "",
+		"rabbitmqAmqpUrl":                item.RabbitMQAMQPURL,
+		"rabbitmqManagementUrl":          item.RabbitMQManagementURL,
+		"rabbitmqHost":                   item.RabbitMQHost,
+		"rabbitmqPort":                   item.RabbitMQPort,
+		"rabbitmqVhost":                  item.RabbitMQVHost,
+		"rabbitmqTls":                    item.RabbitMQTLS,
+		"pulsarServiceUrl":               item.PulsarServiceURL,
+		"pulsarAdminUrl":                 item.PulsarAdminURL,
+		"pulsarTenant":                   item.PulsarTenant,
+		"pulsarNamespace":                item.PulsarNamespace,
+		"pulsarTls":                      item.PulsarTLS,
+		"rocketmqNameServers":            item.RocketMQNameServers,
+		"rocketmqBrokerAddr":             item.RocketMQBrokerAddr,
+		"rocketmqAccessKey":              item.RocketMQAccessKey,
+		"rocketmqTls":                    item.RocketMQTLS,
+		"caCertFilesConfigured":          tlsCAConfigured(item),
+		"clientCertsConfigured":          tlsClientConfigured(item),
 	}
 }
 

@@ -27,6 +27,10 @@ func TestContractJSONEnvelopeAndExitCodes(t *testing.T) {
 		{name: "R1 produce with yes", args: []string{"-o", "json", "--yes", "message", "produce", "orders", "--key", "secret-key", "--body", "secret-body"}, wantExit: 0, wantKind: "MessageProduceResult"},
 		{name: "tail unsupported backend fails closed", args: []string{"-o", "json", "message", "tail", "orders", "--max-messages", "1"}, wantExit: 12},
 		{name: "acl unsupported backend fails closed", args: []string{"-o", "json", "acl", "list"}, wantExit: 12},
+		{name: "schema list is R0", args: []string{"-o", "json", "schema", "list"}, wantExit: 0, wantKind: "SchemaList"},
+		{name: "schema describe is R0", args: []string{"-o", "json", "schema", "describe", "orders-value"}, wantExit: 0, wantKind: "SchemaDescription"},
+		{name: "schema check is R0", args: []string{"-o", "json", "schema", "check", "orders-value", "--schema", `{"type":"record","name":"Order"}`}, wantExit: 0, wantKind: "SchemaCheckResult"},
+		{name: "schema unsupported backend fails closed", args: []string{"-o", "json", "--backend", "rabbitmq", "schema", "list"}, wantExit: 12},
 		{name: "dlq list is R0", args: []string{"-o", "json", "dlq", "list"}, wantExit: 0, wantKind: "DLQList"},
 		{name: "dlq peek is R0", args: []string{"-o", "json", "dlq", "peek", "orders.dlq", "--count", "1"}, wantExit: 0, wantKind: "DLQPeekResult"},
 		{name: "dlq redrive dry-run previews without high-risk authorization", args: []string{"-o", "json", "dlq", "redrive", "orders.dlq", "--target", "orders", "--dry-run"}, wantExit: 0, wantKind: "DLQRedriveResult"},
@@ -84,6 +88,28 @@ func TestAuditDoesNotPersistMessagePlaintext(t *testing.T) {
 	}
 	if !strings.Contains(text, "key-sha256") || !strings.Contains(text, "body-sha256") {
 		t.Fatalf("audit log missing fingerprints: %s", text)
+	}
+}
+
+func TestAuditDoesNotPersistSchemaPlaintext(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	schema := `{"type":"record","name":"SecretSchema"}`
+	_, err := runCommandForTest(t, "-o", "json", "schema", "check", "orders-value", "--schema", schema)
+	if err != nil {
+		t.Fatalf("schema check error = %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(os.Getenv("HOME"), ".mqgov-cli", "audit.log"))
+	if err != nil {
+		t.Fatalf("ReadFile(audit.log) error = %v", err)
+	}
+	text := string(data)
+	if strings.Contains(text, "SecretSchema") || strings.Contains(text, schema) {
+		t.Fatalf("audit log contains schema plaintext: %s", text)
+	}
+	if !strings.Contains(text, "schemaSha256") {
+		t.Fatalf("audit log missing schema hash: %s", text)
 	}
 }
 

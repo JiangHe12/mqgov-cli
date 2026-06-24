@@ -19,6 +19,7 @@ Common setup:
 
 ```bash
 mqgov ctx set dev --backend kafka --brokers localhost:9092 --cluster dev
+mqgov ctx set dev-sr --backend kafka --brokers localhost:9092 --schema-registry-url https://schema-registry.example --schema-registry-username <user> --schema-registry-password <password> --credential-backend encrypted-file
 mqgov ctx set dev-rabbit --backend rabbitmq --amqp-url amqp://guest:guest@localhost:5672/ --management-url http://localhost:15672
 mqgov ctx set dev-pulsar --backend pulsar --service-url pulsar://localhost:6650 --admin-url http://localhost:8080 --tenant public --pulsar-namespace default
 mqgov ctx set dev-rocket --backend rocketmq --nameservers localhost:9876 --broker-addr localhost:10911
@@ -38,6 +39,9 @@ mqgov message tail <topic> --from earliest --max-messages 10 --timeout 30s -o js
 mqgov dlq list --topic <topic> --group <group-or-sub> -o json
 mqgov dlq peek <dlq> --count 1 -o json
 mqgov acl list --principal User:svc -o json
+mqgov schema list -o json
+mqgov schema describe <subject-or-topic> --version latest -o json
+mqgov schema check <subject-or-topic> --schema-file ./next.avsc --schema-type AVRO -o json
 ```
 
 Writes require human authorization according to risk:
@@ -68,6 +72,12 @@ ACL governance:
 - Kafka uses broker ACLs with `literal`/`prefixed` patterns. RabbitMQ uses native user-vhost permission regexes with operations `configure`, `write`, and `read`; RabbitMQ rejects deny and non-regex patterns.
 - Pulsar uses native role permissions on namespaces or topics with actions `produce`, `consume`, `functions`, `sources`, `sinks`, and `packages`; Pulsar rejects deny and non-literal patterns.
 - `acl list` is R0. Normal `acl grant` is R2. Broad grants, including Kafka prefixed patterns, broad RabbitMQ regexes such as `.*`, `.+`, `.`, or `orders.*`, and Pulsar `functions`/`sources`/`sinks`/`packages`, and every `acl revoke` are R3 and require `--allow-destructive-acl`.
+
+Schema governance:
+
+- Schema verbs are `schema list|describe|check`; all are R0 and audited. `check` is a read-only compatibility check and must never register, delete, or evolve a schema.
+- Kafka uses Confluent Schema Registry when the Kafka context has `--schema-registry-url`; optional `--schema-registry-username` and `--schema-registry-password` use credstore. Pulsar uses its built-in admin REST schema endpoints and existing token/TLS settings.
+- RabbitMQ and RocketMQ return `NOT_IMPLEMENTED` for schema verbs. Audit may include subject, version, compatibility, and schema hashes, but never schema text or registry credentials.
 
 DLQ governance:
 

@@ -1,11 +1,16 @@
 package kafka
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
+	"net/url"
 	"os"
 	"sort"
 	"strconv"
@@ -25,23 +30,40 @@ import (
 )
 
 type Options struct {
-	Brokers        []string
-	Cluster        string
-	Namespace      string
-	Username       string
-	Password       string
-	SASLMechanism  string
-	TLS            bool
-	CACertFile     string
-	ClientCertFile string
-	ClientKeyFile  string
-	Timeout        time.Duration
+	Brokers                []string
+	Cluster                string
+	Namespace              string
+	Username               string
+	Password               string
+	SASLMechanism          string
+	TLS                    bool
+	CACertFile             string
+	ClientCertFile         string
+	ClientKeyFile          string
+	SchemaRegistryURL      string
+	SchemaRegistryUsername string
+	SchemaRegistryPassword string
+	Timeout                time.Duration
 }
 
 type Broker struct {
 	opts   Options
 	client *kgo.Client
 	admin  *kadm.Client
+	srHTTP *http.Client
+}
+
+type schemaRegistryVersion struct {
+	Subject    string `json:"subject"`
+	ID         int    `json:"id"`
+	Version    int    `json:"version"`
+	Schema     string `json:"schema"`
+	SchemaType string `json:"schemaType"`
+}
+
+type schemaRegistryCompatibility struct {
+	Compatible bool     `json:"is_compatible"`
+	Messages   []string `json:"messages"`
 }
 
 func New(opts Options) (*Broker, error) {
@@ -53,7 +75,12 @@ func New(opts Options) (*Broker, error) {
 	if err != nil {
 		return nil, unreachable(err)
 	}
-	return &Broker{opts: opts, client: client, admin: kadm.NewClient(client)}, nil
+	httpClient, err := schemaRegistryHTTPClient(opts)
+	if err != nil {
+		client.Close()
+		return nil, err
+	}
+	return &Broker{opts: opts, client: client, admin: kadm.NewClient(client), srHTTP: httpClient}, nil
 }
 
 func (b *Broker) Ping(ctx context.Context) error {
@@ -70,8 +97,8 @@ func (b *Broker) Describe() mqgov.Description {
 func (b *Broker) Capabilities() mqgov.Capabilities {
 	return mqgov.Capabilities{
 		Backend:            "kafka",
-		ResourceTypes:      []string{"topic", "group", "message", "offset", "acl", "dlq"},
-		Verbs:              []string{"list", "describe", "lag", "peek", "tail", "produce", "create", "alter", "delete", "purge", "reset-offset", "grant-acl", "revoke-acl", "redrive"},
+		ResourceTypes:      []string{"topic", "group", "message", "offset", "acl", "dlq", "schema"},
+		Verbs:              []string{"list", "describe", "lag", "peek", "tail", "produce", "create", "alter", "delete", "purge", "reset-offset", "grant-acl", "revoke-acl", "redrive", "check-schema"},
 		SupportsOffsets:    true,
 		SupportsPartitions: true,
 		SupportsACL:        true,
@@ -79,6 +106,7 @@ func (b *Broker) Capabilities() mqgov.Capabilities {
 		SupportsDLQPeek:    true,
 		SupportsDLQRedrive: true,
 		SupportsDLQPurge:   true,
+		SupportsSchema:     b.opts.SchemaRegistryURL != "",
 	}
 }
 
@@ -473,6 +501,90 @@ func (b *Broker) PurgeDLQ(ctx context.Context, req mqgov.DLQPurgeRequest) (mqgov
 		return mqgov.DLQPurgeResult{}, err
 	}
 	return mqgov.DLQPurgeResult{DLQ: req.DLQ, DryRun: result.DryRun, Impact: result.Impact, Total: result.Total, Fingerprint: result.Fingerprint}, nil
+}
+
+func (b *Broker) ListSchemas(ctx context.Context, opts mqgov.SchemaListOptions) ([]mqgov.SchemaSubject, error) {
+	if b.opts.SchemaRegistryURL == "" {
+		return nil, apperrors.New(apperrors.CodeNotImplemented, "Kafka Schema Registry URL is not configured", nil)
+	}
+	body, err := b.schemaRegistryJSON(ctx, http.MethodGet, "/subjects", nil)
+	if err != nil {
+		return nil, err
+	}
+	var subjects []string
+	if err := json.Unmarshal(body, &subjects); err != nil {
+		return nil, backendErr(fmt.Errorf("decode schema registry subjects: %w", err))
+	}
+	items := make([]mqgov.SchemaSubject, 0, len(subjects))
+	for _, subject := range subjects {
+		if opts.Subject != "" && opts.Subject != subject {
+			continue
+		}
+		if opts.Pattern != "" && opts.Pattern != subject {
+			continue
+		}
+		items = append(items, mqgov.SchemaSubject{Subject: subject})
+	}
+	sort.Slice(items, func(i, j int) bool { return items[i].Subject < items[j].Subject })
+	if opts.Limit > 0 && len(items) > opts.Limit {
+		items = items[:opts.Limit]
+	}
+	return items, nil
+}
+
+func (b *Broker) DescribeSchema(ctx context.Context, req mqgov.SchemaDescribeRequest) (mqgov.SchemaDescription, error) {
+	if strings.TrimSpace(req.Subject) == "" {
+		return mqgov.SchemaDescription{}, apperrors.New(apperrors.CodeUsageError, "schema subject is required", nil)
+	}
+	version := firstNonEmpty(req.Version, "latest")
+	versions, err := b.schemaVersions(ctx, req.Subject)
+	if err != nil {
+		return mqgov.SchemaDescription{}, err
+	}
+	body, err := b.schemaRegistryJSON(ctx, http.MethodGet, "/subjects/"+url.PathEscape(req.Subject)+"/versions/"+url.PathEscape(version), nil)
+	if err != nil {
+		return mqgov.SchemaDescription{}, err
+	}
+	var sr schemaRegistryVersion
+	if err := json.Unmarshal(body, &sr); err != nil {
+		return mqgov.SchemaDescription{}, backendErr(fmt.Errorf("decode schema registry version: %w", err))
+	}
+	return mqgov.SchemaDescription{
+		Subject:    sr.Subject,
+		Version:    strconv.Itoa(sr.Version),
+		ID:         sr.ID,
+		Type:       firstNonEmpty(sr.SchemaType, "AVRO"),
+		Schema:     sr.Schema,
+		SchemaHash: mqgov.SHA256Hex([]byte(sr.Schema)),
+		Versions:   versions,
+	}, nil
+}
+
+func (b *Broker) CheckCompatibility(ctx context.Context, req mqgov.SchemaCheckRequest) (mqgov.SchemaCheckResult, error) {
+	if strings.TrimSpace(req.Subject) == "" {
+		return mqgov.SchemaCheckResult{}, apperrors.New(apperrors.CodeUsageError, "schema subject is required", nil)
+	}
+	if strings.TrimSpace(req.Schema) == "" {
+		return mqgov.SchemaCheckResult{}, apperrors.New(apperrors.CodeUsageError, "schema text is required", nil)
+	}
+	version := firstNonEmpty(req.Version, "latest")
+	payload := map[string]string{"schema": req.Schema}
+	if req.Type != "" {
+		payload["schemaType"] = strings.ToUpper(strings.TrimSpace(req.Type))
+	}
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return mqgov.SchemaCheckResult{}, backendErr(err)
+	}
+	body, err := b.schemaRegistryJSON(ctx, http.MethodPost, "/compatibility/subjects/"+url.PathEscape(req.Subject)+"/versions/"+url.PathEscape(version), data)
+	if err != nil {
+		return mqgov.SchemaCheckResult{}, err
+	}
+	var compat schemaRegistryCompatibility
+	if err := json.Unmarshal(body, &compat); err != nil {
+		return mqgov.SchemaCheckResult{}, backendErr(fmt.Errorf("decode schema registry compatibility: %w", err))
+	}
+	return mqgov.SchemaCheckResult{Subject: req.Subject, Version: version, Compatible: compat.Compatible, SchemaHash: mqgov.SHA256Hex([]byte(req.Schema)), Message: strings.Join(compat.Messages, "; ")}, nil
 }
 
 func (b *Broker) Lag(ctx context.Context, group mqgov.GroupCoordinate, topic mqgov.TopicCoordinate) (mqgov.OffsetPlan, error) {
@@ -985,6 +1097,104 @@ func kgoOptions(opts Options) ([]kgo.Opt, error) {
 	return kopts, nil
 }
 
+func schemaRegistryHTTPClient(opts Options) (*http.Client, error) {
+	if opts.SchemaRegistryURL == "" {
+		return &http.Client{Timeout: timeout(opts)}, nil
+	}
+	parsed, err := url.Parse(opts.SchemaRegistryURL)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return nil, apperrors.New(apperrors.CodeUsageError, "invalid Kafka Schema Registry URL", err)
+	}
+	if schemaRegistryCredentialsConfigured(opts) && parsed.Scheme != "https" {
+		return nil, apperrors.New(apperrors.CodeUsageError, "Kafka Schema Registry credentials require https", nil)
+	}
+	client := &http.Client{Timeout: timeout(opts)}
+	if parsed.Scheme == "https" {
+		tlsConfig, err := buildTLSConfig(opts)
+		if err != nil {
+			return nil, err
+		}
+		if tlsConfig == nil {
+			tlsConfig = &tls.Config{MinVersion: tls.VersionTLS12}
+		}
+		client.Transport = &http.Transport{TLSClientConfig: tlsConfig}
+	}
+	return client, nil
+}
+
+func (b *Broker) schemaVersions(ctx context.Context, subject string) ([]string, error) {
+	body, err := b.schemaRegistryJSON(ctx, http.MethodGet, "/subjects/"+url.PathEscape(subject)+"/versions", nil)
+	if err != nil {
+		return nil, err
+	}
+	var versions []int
+	if err := json.Unmarshal(body, &versions); err != nil {
+		return nil, backendErr(fmt.Errorf("decode schema registry versions: %w", err))
+	}
+	out := make([]string, 0, len(versions))
+	for _, version := range versions {
+		out = append(out, strconv.Itoa(version))
+	}
+	return out, nil
+}
+
+func (b *Broker) schemaRegistryJSON(ctx context.Context, method, path string, payload []byte) ([]byte, error) {
+	endpoint, err := schemaRegistryEndpoint(b.opts, path)
+	if err != nil {
+		return nil, err
+	}
+	var body io.Reader
+	if payload != nil {
+		body = bytes.NewReader(payload)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, endpoint, body)
+	if err != nil {
+		return nil, apperrors.New(apperrors.CodeUsageError, "invalid Kafka Schema Registry request", err)
+	}
+	req.Header.Set("Accept", "application/vnd.schemaregistry.v1+json, application/json")
+	if payload != nil {
+		req.Header.Set("Content-Type", "application/vnd.schemaregistry.v1+json")
+	}
+	if b.opts.SchemaRegistryUsername != "" || b.opts.SchemaRegistryPassword != "" {
+		if b.opts.SchemaRegistryUsername == "" || b.opts.SchemaRegistryPassword == "" {
+			return nil, apperrors.New(apperrors.CodeUsageError, "Kafka Schema Registry basic auth requires username and password", nil)
+		}
+		req.SetBasicAuth(b.opts.SchemaRegistryUsername, b.opts.SchemaRegistryPassword)
+	}
+	resp, err := b.srHTTP.Do(req)
+	if err != nil {
+		return nil, unreachable(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	data, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	switch {
+	case resp.StatusCode >= 200 && resp.StatusCode < 300:
+		return data, nil
+	case resp.StatusCode == http.StatusNotFound:
+		return nil, apperrors.New(apperrors.CodeResourceNotFound, "schema subject or version not found", fmt.Errorf("schema registry status %d", resp.StatusCode))
+	default:
+		return nil, backendErr(fmt.Errorf("schema registry status %d: %s", resp.StatusCode, string(data)))
+	}
+}
+
+func schemaRegistryEndpoint(opts Options, path string) (string, error) {
+	if opts.SchemaRegistryURL == "" {
+		return "", apperrors.New(apperrors.CodeNotImplemented, "Kafka Schema Registry URL is not configured", nil)
+	}
+	parsed, err := url.Parse(opts.SchemaRegistryURL)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return "", apperrors.New(apperrors.CodeUsageError, "invalid Kafka Schema Registry URL", err)
+	}
+	if schemaRegistryCredentialsConfigured(opts) && parsed.Scheme != "https" {
+		return "", apperrors.New(apperrors.CodeUsageError, "Kafka Schema Registry credentials require https", nil)
+	}
+	return strings.TrimRight(opts.SchemaRegistryURL, "/") + path, nil
+}
+
+func schemaRegistryCredentialsConfigured(opts Options) bool {
+	return opts.SchemaRegistryUsername != "" || opts.SchemaRegistryPassword != ""
+}
+
 func buildTLSConfig(opts Options) (*tls.Config, error) {
 	if !opts.TLS && opts.CACertFile == "" && opts.ClientCertFile == "" && opts.ClientKeyFile == "" {
 		return nil, nil
@@ -1101,6 +1311,22 @@ func abs64(v int64) int64 {
 		return -v
 	}
 	return v
+}
+
+func timeout(opts Options) time.Duration {
+	if opts.Timeout > 0 {
+		return opts.Timeout
+	}
+	return 30 * time.Second
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func safeInt32(value int, field string) (int32, error) {

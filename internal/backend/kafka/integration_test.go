@@ -3,8 +3,11 @@
 package kafka
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
+	"net/http"
 	"os"
 	"strings"
 	"testing"
@@ -23,16 +26,17 @@ func TestKafkaIntegration(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	backend, err := New(Options{
-		Brokers:        []string{brokers},
-		Cluster:        "integration",
-		Username:       os.Getenv("KAFKA_USERNAME"),
-		Password:       os.Getenv("KAFKA_PASSWORD"),
-		SASLMechanism:  os.Getenv("KAFKA_SASL_MECHANISM"),
-		TLS:            os.Getenv("KAFKA_TLS") == "true",
-		CACertFile:     os.Getenv("KAFKA_CA_CERT_FILE"),
-		ClientCertFile: os.Getenv("KAFKA_CLIENT_CERT_FILE"),
-		ClientKeyFile:  os.Getenv("KAFKA_CLIENT_KEY_FILE"),
-		Timeout:        10 * time.Second,
+		Brokers:           []string{brokers},
+		Cluster:           "integration",
+		Username:          os.Getenv("KAFKA_USERNAME"),
+		Password:          os.Getenv("KAFKA_PASSWORD"),
+		SASLMechanism:     os.Getenv("KAFKA_SASL_MECHANISM"),
+		TLS:               os.Getenv("KAFKA_TLS") == "true",
+		CACertFile:        os.Getenv("KAFKA_CA_CERT_FILE"),
+		ClientCertFile:    os.Getenv("KAFKA_CLIENT_CERT_FILE"),
+		ClientKeyFile:     os.Getenv("KAFKA_CLIENT_KEY_FILE"),
+		SchemaRegistryURL: os.Getenv("KAFKA_SCHEMA_REGISTRY_URL"),
+		Timeout:           10 * time.Second,
 	})
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
@@ -180,6 +184,74 @@ func TestKafkaIntegration(t *testing.T) {
 	}
 	if err := backend.DeleteTopic(ctx, coord); err != nil {
 		t.Fatalf("DeleteTopic() error = %v", err)
+	}
+}
+
+func TestKafkaSchemaRegistryIntegration(t *testing.T) {
+	brokers := os.Getenv("KAFKA_BROKERS")
+	srURL := os.Getenv("KAFKA_SCHEMA_REGISTRY_URL")
+	if strings.TrimSpace(brokers) == "" || strings.TrimSpace(srURL) == "" {
+		t.Skip("KAFKA_BROKERS and KAFKA_SCHEMA_REGISTRY_URL not set")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	backend, err := New(Options{
+		Brokers:           []string{brokers},
+		Cluster:           "integration",
+		SchemaRegistryURL: srURL,
+		Timeout:           10 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	defer backend.client.Close()
+	manager, ok := mqgov.SupportsSchema(backend)
+	if !ok || !backend.Capabilities().SupportsSchema {
+		t.Fatalf("SupportsSchema() = %v caps=%+v, want true", ok, backend.Capabilities())
+	}
+	subject := fmt.Sprintf("mqgov-it-schema-%d-value", time.Now().UnixNano())
+	baseSchema := `{"type":"record","name":"Order","fields":[{"name":"id","type":"string"}]}`
+	nextSchema := `{"type":"record","name":"Order","fields":[{"name":"id","type":"string"},{"name":"note","type":["null","string"],"default":null}]}`
+	registerKafkaSchema(t, ctx, srURL, subject, baseSchema)
+
+	subjects, err := manager.ListSchemas(ctx, mqgov.SchemaListOptions{Subject: subject})
+	if err != nil {
+		t.Fatalf("ListSchemas() error = %v", err)
+	}
+	if len(subjects) != 1 || subjects[0].Subject != subject {
+		t.Fatalf("ListSchemas() = %+v, want %q", subjects, subject)
+	}
+	desc, err := manager.DescribeSchema(ctx, mqgov.SchemaDescribeRequest{Subject: subject, Version: "latest"})
+	if err != nil {
+		t.Fatalf("DescribeSchema() error = %v", err)
+	}
+	if desc.Subject != subject || desc.Version != "1" || desc.SchemaHash == "" || desc.Schema == "" {
+		t.Fatalf("DescribeSchema() = %+v, want registered schema metadata", desc)
+	}
+	check, err := manager.CheckCompatibility(ctx, mqgov.SchemaCheckRequest{Subject: subject, Version: "latest", Type: "AVRO", Schema: nextSchema})
+	if err != nil {
+		t.Fatalf("CheckCompatibility() error = %v", err)
+	}
+	if !check.Compatible || check.SchemaHash == "" {
+		t.Fatalf("CheckCompatibility() = %+v, want compatible with hash", check)
+	}
+}
+
+func registerKafkaSchema(t *testing.T, ctx context.Context, srURL, subject, schema string) {
+	t.Helper()
+	payload, _ := json.Marshal(map[string]string{"schema": schema, "schemaType": "AVRO"})
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(srURL, "/")+"/subjects/"+subject+"/versions", bytes.NewReader(payload))
+	if err != nil {
+		t.Fatalf("NewRequest(register schema) error = %v", err)
+	}
+	req.Header.Set("Content-Type", "application/vnd.schemaregistry.v1+json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("register schema request error = %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		t.Fatalf("register schema status = %d", resp.StatusCode)
 	}
 }
 

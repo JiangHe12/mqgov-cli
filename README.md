@@ -4,7 +4,7 @@
 
 **Governed message-broker operations for humans _and_ AI agents.**
 
-One safe command line for **Kafka**, **RabbitMQ**, **Pulsar**, and **RocketMQ** — list, describe, peek, tail, produce, govern DLQs, reset offsets, inspect ACLs, purge, and delete topics without ever fat-fingering production or silently draining a queue.
+One safe command line for **Kafka**, **RabbitMQ**, **Pulsar**, and **RocketMQ** — list, describe, peek, tail, produce, govern DLQs, reset offsets, inspect ACLs and schemas, purge, and delete topics without ever fat-fingering production or silently draining a queue.
 
 [![npm version](https://img.shields.io/npm/v/mqgov-cli.svg)](https://www.npmjs.com/package/mqgov-cli)
 [![CI](https://github.com/JiangHe12/mqgov-cli/actions/workflows/ci.yml/badge.svg)](https://github.com/JiangHe12/mqgov-cli/actions/workflows/ci.yml)
@@ -38,7 +38,7 @@ It's built on the shared [`opskit-core`](https://github.com/JiangHe12/opskit-cor
 | | |
 |---|---|
 | 📨 **Four brokers** | **Kafka** (franz-go), **RabbitMQ** (AMQP + management API), **Pulsar** (client + admin REST), **RocketMQ** (rocketmq-client-go/v2). One backend-agnostic governance model; pick per context or override per command. |
-| 🧱 **topic / group / message / dlq / acl** | topics: list · describe · create · alter · delete · purge. consumer groups: list · lag · reset-offset. messages: non-destructive peek · tail · produce. DLQs: list · peek · redrive · purge through native broker models. ACLs: list · grant · revoke where supported. |
+| 🧱 **topic / group / message / dlq / acl / schema** | topics: list · describe · create · alter · delete · purge. consumer groups: list · lag · reset-offset. messages: non-destructive peek · tail · produce. DLQs: list · peek · redrive · purge through native broker models. ACLs: list · grant · revoke where supported. Schemas: list · describe · check where native schema registry support exists. |
 | 🔐 **R0–R3 governance** | every operation is risk-classified by the fail-closed `mqclass` engine; protected contexts and internal/system topics escalate one tier; AI callers can never self-authorize. |
 | 🎯 **Real blast-radius preview** | `reset-offset --dry-run` and `purge --dry-run` compute the actual per-partition message delta from the live broker — no guessing. The preview is read-only and never mutates. |
 | 👀 **Non-destructive peek/tail** | inspect or stream messages as fingerprints without consuming them or moving any cursor (Kafka direct partition reads, Pulsar Reader, RabbitMQ get+requeue for peek only). Where a broker can't guarantee this, the operation fails closed rather than silently consuming. |
@@ -60,6 +60,7 @@ It's built on the shared [`opskit-core`](https://github.com/JiangHe12/opskit-cor
 | purge | ✅ | ✅ | ✅ | ❌ |
 | **DLQ list / peek / redrive / purge** | list ❌; explicit topic peek/redrive/purge ✅ | ✅ `{topic}-{subscription}-DLQ` | ✅ DLX queues | list ✅ `%DLQ%group`; others ❌ |
 | **ACL list / grant / revoke** | ✅ | ✅ namespace/topic permissions | ✅ user-vhost permissions | ❌ `NOT_IMPLEMENTED`³ |
+| **schema list / describe / check** | ✅ Confluent Schema Registry | ✅ built-in admin schema API | ❌ `NOT_IMPLEMENTED` | ❌ `NOT_IMPLEMENTED` |
 
 ¹ RocketMQ's Go v2 `PullConsumer` enters the consumer-group lifecycle and commits offsets, so it cannot guarantee non-destructive peek/tail — mqgov fails closed instead of silently advancing offsets. ² RabbitMQ has no forward non-destructive tail because reads are consume/requeue oriented. Unsupported operations always return `NOT_IMPLEMENTED` (exit 12), never a fake success.
 
@@ -127,7 +128,7 @@ Every command is sorted into one of four **risk tiers** by the fail-closed `mqcl
 
 | Tier | What it covers | What you must provide |
 |:---:|---|---|
-| **R0** | Reads & previews (`topic list/describe`, `group list/lag`, `message peek`, `message tail`, `dlq list/peek`, `acl list`, `*-dry-run`, `audit query/verify`, `doctor`) | Nothing — but it's still audited |
+| **R0** | Reads & previews (`topic list/describe`, `group list/lag`, `message peek`, `message tail`, `dlq list/peek`, `acl list`, `schema list/describe/check`, `*-dry-run`, `audit query/verify`, `doctor`) | Nothing — but it's still audited |
 | **R1** | Ordinary writes (`message produce`, `topic create`) | `--yes` (or an interactive confirmation) |
 | **R2** | Elevated mutations (`topic alter`, `group create/delete`, `acl grant`, produce to a **protected** topic) | `--yes` **and** a non-empty `--ticket` |
 | **R3** | Destructive / irreversible (`group reset-offset`, `topic purge`, `topic delete`, `dlq redrive`, `dlq purge`, broad `acl grant`, `acl revoke`, produce to an **internal/system** topic) | The above **plus** the exact `--allow-*` flag |
@@ -214,6 +215,18 @@ Redrive is governed as internal produce: dry-run is a read-only preview and real
 </details>
 
 <details>
+<summary><b>schema</b> — schema registry</summary>
+
+```bash
+mqgov schema list [--pattern <subject>] -o json
+mqgov schema describe <subject-or-topic> [--version latest|N] -o json
+mqgov schema check <subject-or-topic> --schema-file ./next.avsc --schema-type AVRO [--version latest] -o json
+```
+
+`schema list`, `schema describe`, and `schema check` are R0 and audited. `check` uses read-only compatibility endpoints and never registers, deletes, or evolves a schema. Kafka maps to Confluent Schema Registry (`GET /subjects`, `GET /subjects/{subject}/versions`, `GET /subjects/{subject}/versions/{version|latest}`, and `POST /compatibility/subjects/{subject}/versions/{version}`). Pulsar maps to its built-in admin schema endpoints under `/admin/v2/schemas/{tenant}/{namespace}/{topic}`. RabbitMQ and RocketMQ fail closed with `NOT_IMPLEMENTED`. Audit stores only subject/version metadata and schema hashes, never schema text or registry credentials.
+</details>
+
+<details>
 <summary><b>acl</b> — broker access control</summary>
 
 ```bash
@@ -252,12 +265,12 @@ mqgov acl revoke --principal app-role --resource-type topic --resource-name orde
 
 ```bash
 # Backend-bound contexts (credentials go through credstore, never plaintext)
-mqgov ctx set <name> --backend kafka    --brokers <h:p,h:p> [--sasl-mechanism PLAIN] [--tls --ca-cert <f>] [--protected]
+mqgov ctx set <name> --backend kafka    --brokers <h:p,h:p> [--sasl-mechanism PLAIN] [--tls --ca-cert <f>] [--schema-registry-url <url>] [--schema-registry-username <u>] [--schema-registry-password <p>] [--protected]
 mqgov ctx set <name> --backend rabbitmq (--amqp-url <url> | --host <h> --port <p> --vhost </>) --management-url <url>
 mqgov ctx set <name> --backend pulsar   --service-url pulsar://<h:p> --admin-url http://<h:p> [--tenant public] [--pulsar-namespace default]
 mqgov ctx set <name> --backend rocketmq --nameservers <h:p,h:p> [--broker-addr <h:p>]
 mqgov ctx use|list|current|delete|test
-#   secrets: --password <pw|token|secretKey> --credential-backend <encrypted-file|keychain|...>  (a non-plain backend is required)
+#   secrets: --password <pw|token|secretKey> and --schema-registry-password <pw> go through --credential-backend <encrypted-file|keychain|...>  (a non-plain backend is required)
 
 # Audit (tamper-evident, fingerprint-only)
 mqgov audit query  [--since 24h] [--type <t>] [--operator <o>] [--status <s>] [--limit 100] -o json
@@ -278,7 +291,7 @@ mqgov version
 
 mqgov-cli is designed to be driven by autonomous agents safely:
 
-- Run `mqgov capabilities -o json` first to discover what the bound backend supports — brokers differ, don't assume (e.g. Kafka, RabbitMQ, and Pulsar support `acl` with different native models; RabbitMQ/RocketMQ have no offsets; RabbitMQ/RocketMQ have no tail; RocketMQ has no peek).
+- Run `mqgov capabilities -o json` first to discover what the bound backend supports — brokers differ, don't assume (e.g. Kafka, RabbitMQ, and Pulsar support `acl` with different native models; Kafka and Pulsar support `schema`; RabbitMQ/RocketMQ have no offsets, schema registry, or tail; RocketMQ has no peek).
 - Use `-o json` everywhere; every command returns a stable, versioned envelope.
 - Get blast radius from `--dry-run` / `--plan`, never from your own reasoning.
 - **Never self-fill `--ticket`, `--allow-*`, or a high-risk `--yes`.** Surface the required human approval and stop.
