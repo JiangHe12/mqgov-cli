@@ -3,8 +3,12 @@
 package rabbitmq
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -97,7 +101,10 @@ func TestRabbitMQIntegration(t *testing.T) {
 	if !ok {
 		t.Fatalf("SupportsACL() = false, want true")
 	}
-	aclPrincipal := getenvDefault("RABBITMQ_ACL_USER", getenvDefault("RABBITMQ_USERNAME", "guest"))
+	aclPrincipal := fmt.Sprintf("mqgov_acl_it_%d", time.Now().UnixNano())
+	aclPassword := fmt.Sprintf("mqgov_acl_pw_%d", time.Now().UnixNano())
+	createRabbitMQIntegrationUser(t, ctx, backend, aclPrincipal, aclPassword)
+	defer deleteRabbitMQIntegrationUser(t, backend, aclPrincipal)
 	aclBinding := mqgov.ACLBinding{
 		Principal:    aclPrincipal,
 		Vhost:        backend.vhost(),
@@ -164,6 +171,42 @@ func messageCount(t *testing.T, desc mqgov.TopicDescription) int {
 		t.Fatalf("invalid messages count in %+v: %v", desc, err)
 	}
 	return value
+}
+
+func createRabbitMQIntegrationUser(t *testing.T, ctx context.Context, backend *Broker, username, password string) {
+	t.Helper()
+	body, err := json.Marshal(struct {
+		Password string `json:"password"`
+		Tags     string `json:"tags"`
+	}{Password: password, Tags: ""})
+	if err != nil {
+		t.Fatalf("Marshal(user) error = %v", err)
+	}
+	endpoint := strings.TrimRight(backend.manageURL, "/") + "/api/users/" + url.PathEscape(username)
+	resp, err := backend.managementRequest(ctx, http.MethodPut, endpoint, bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("create RabbitMQ ACL user request error = %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("create RabbitMQ ACL user status = %d, want 201 or 204", resp.StatusCode)
+	}
+}
+
+func deleteRabbitMQIntegrationUser(t *testing.T, backend *Broker, username string) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	endpoint := strings.TrimRight(backend.manageURL, "/") + "/api/users/" + url.PathEscape(username)
+	resp, err := backend.managementRequest(ctx, http.MethodDelete, endpoint, nil)
+	if err != nil {
+		t.Logf("delete RabbitMQ ACL user request error: %v", err)
+		return
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusNotFound {
+		t.Logf("delete RabbitMQ ACL user status = %d, want 204 or 404", resp.StatusCode)
+	}
 }
 
 func getenvDefault(name, fallback string) string {
