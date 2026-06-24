@@ -420,14 +420,11 @@ func (b *Broker) RedriveDLQ(ctx context.Context, req mqgov.DLQRedriveRequest) (m
 	dlq := b.resolvePulsarDLQ(req.DLQ.Topic, req.Topic, req.Group)
 	dlqCoord := mqgov.TopicCoordinate{Cluster: req.DLQ.Cluster, Namespace: req.DLQ.Namespace, Topic: dlq}
 	if req.DryRun {
-		desc, err := b.DescribeTopic(ctx, dlqCoord)
+		messages, err := b.readPulsarMessages(ctx, dlq, count)
 		if err != nil {
 			return mqgov.DLQRedriveResult{}, err
 		}
-		total := pulsarTopicMessages(desc)
-		if total > int64(count) {
-			total = int64(count)
-		}
+		total := int64(len(messages))
 		return mqgov.DLQRedriveResult{DLQ: dlqCoord, Target: req.Target, DryRun: true, Impact: []mqgov.PartitionImpact{{Partition: 0, Count: total}}, Total: total, Fingerprint: mqgov.ResourceFingerprints{Count: total}}, nil
 	}
 	messages, err := b.readPulsarMessages(ctx, dlq, count)
@@ -445,6 +442,14 @@ func (b *Broker) RedriveDLQ(ctx context.Context, req mqgov.DLQRedriveRequest) (m
 
 func (b *Broker) PurgeDLQ(ctx context.Context, req mqgov.DLQPurgeRequest) (mqgov.DLQPurgeResult, error) {
 	dlq := b.resolvePulsarDLQ(req.DLQ.Topic, req.Topic, req.Group)
+	dlqCoord := mqgov.TopicCoordinate{Cluster: req.DLQ.Cluster, Namespace: req.DLQ.Namespace, Topic: dlq}
+	if req.DryRun {
+		total, err := b.countPulsarMessages(ctx, dlq)
+		if err != nil {
+			return mqgov.DLQPurgeResult{}, err
+		}
+		return mqgov.DLQPurgeResult{DLQ: dlqCoord, DryRun: true, Impact: []mqgov.PartitionImpact{{Partition: 0, Count: total}}, Total: total, Fingerprint: mqgov.ResourceFingerprints{Count: total}}, nil
+	}
 	result, err := b.PurgeTopic(ctx, mqgov.TopicPurgeRequest{Coordinate: mqgov.TopicCoordinate{Cluster: req.DLQ.Cluster, Namespace: req.DLQ.Namespace, Topic: dlq}, DLQ: true, DryRun: req.DryRun})
 	if err != nil {
 		return mqgov.DLQPurgeResult{}, err
@@ -621,6 +626,27 @@ func (b *Broker) readPulsarMessages(ctx context.Context, topic string, count int
 		})
 	}
 	return out, nil
+}
+
+func (b *Broker) countPulsarMessages(ctx context.Context, topic string) (int64, error) {
+	reader, err := b.client.CreateReader(pulsarclient.ReaderOptions{
+		Topic:                   b.fqn(topic),
+		StartMessageID:          pulsarclient.EarliestMessageID(),
+		StartMessageIDInclusive: true,
+		ReceiverQueueSize:       1,
+	})
+	if err != nil {
+		return 0, backendErr(err)
+	}
+	defer reader.Close()
+	var total int64
+	for reader.HasNext() {
+		if _, err := reader.Next(ctx); err != nil {
+			return 0, backendErr(err)
+		}
+		total++
+	}
+	return total, nil
 }
 
 func (b *Broker) stats(ctx context.Context, topic string) (topicStats, error) {
