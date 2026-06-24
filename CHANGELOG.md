@@ -2,6 +2,46 @@
 
 All notable changes to this project are documented in this file.
 
+## v0.2.0
+
+_Continuous non-destructive tail, and native broker ACL management across Kafka, RabbitMQ, and Pulsar._
+
+### Added
+
+- `message tail` — a continuous, non-destructive, fingerprint-only message stream (the
+  broker analogue of `tail -f`), bounded by `--max-messages`/`--timeout`/`--follow` and
+  starting from `--from earliest|latest|offset:N`. Supported on **Kafka** (groupless
+  direct-partition read) and **Pulsar** (Reader); RabbitMQ and RocketMQ fail closed with
+  `NOT_IMPLEMENTED`.
+- `acl list|grant|revoke` — governed broker ACL management, mapped to each backend's
+  native authorization model:
+  - **Kafka** — broker ACLs (principal, resource type/name, `literal`/`prefixed` pattern,
+    operation, allow/deny) via kadm.
+  - **RabbitMQ** — per-user, per-vhost permission regexes (`configure`/`write`/`read`),
+    allow-only, via the management API (`--vhost`, `--pattern regex`).
+  - **Pulsar** — namespace/topic role permissions (`produce`/`consume`/`functions`/
+    `sources`/`sinks`/`packages`), allow-only, via the admin REST API.
+
+  RocketMQ fails closed with `NOT_IMPLEMENTED`.
+
+### Governance
+
+- `message tail` is R0 (free, audited) and classified identically to `peek` under target
+  escalation; it can never reach a destructive tier and never commits an offset or advances
+  a cursor. A single aggregate, fingerprint-only audit event covers the whole stream.
+- `mqclass` ACL classification is fail-closed and structure-aware: `acl list` is R0,
+  `acl grant` is R2 escalating to R3 (`--allow-destructive-acl`) for broad grants — wildcard
+  or empty principal/resource, cluster/`all`/`alter` operations, Kafka `prefixed` patterns,
+  broad RabbitMQ regexes (`.*`, `.+`, `.`, `orders.*`), and Pulsar
+  `functions`/`sources`/`sinks`/`packages` — and every `acl revoke` is R3.
+- ACL mappings stay backend-native and honest: `deny` and unsupported pattern types are
+  rejected rather than silently translated, and ACL support is reported per backend.
+
+### Security
+
+- New `--allow-destructive-acl` flag gates R3 ACL operations; AI callers must never
+  self-fill it. ACL changes are audited with the full binding — never credentials.
+
 ## v0.1.0
 
 _First public release. The governed message-broker operations CLI of the opskit family._
