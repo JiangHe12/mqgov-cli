@@ -25,7 +25,9 @@ const (
 	OperationPurgeTopic  Operation = "purge-topic"
 	OperationPurgeDLQ    Operation = "purge-dlq"
 	OperationDeleteTopic Operation = "delete-topic"
-	OperationDeleteACL   Operation = "delete-acl"
+	OperationListACL     Operation = "list-acl"
+	OperationGrantACL    Operation = "grant-acl"
+	OperationRevokeACL   Operation = "revoke-acl"
 )
 
 type Target struct {
@@ -33,8 +35,18 @@ type Target struct {
 	Group          string
 	ProtectedTopic bool
 	InternalTopic  bool
-	DestructiveACL bool
+	ACL            ACLTarget
 	Plan           bool
+}
+
+type ACLTarget struct {
+	Principal    string
+	ResourceType string
+	ResourceName string
+	PatternType  string
+	Operation    string
+	Permission   string
+	Unknown      bool
 }
 
 type Result struct {
@@ -76,21 +88,24 @@ func applyDestructivePins(result Result, op Operation, target Target) Result {
 	if op == OperationProduce && (target.InternalTopic || isInternalTopic(target.Topic)) {
 		result = pinR3(result, "produce to internal/system topic is destructive")
 	}
-	if op == OperationDeleteACL && target.DestructiveACL {
-		result = pinR3(result, "destructive ACL change")
+	if op == OperationRevokeACL {
+		result = pinR3(result, "ACL revoke is destructive")
+	}
+	if op == OperationGrantACL && broadACLGrant(target.ACL) {
+		result = pinR3(result, "broad ACL grant")
 	}
 	return result
 }
 
 func classifyBase(op Operation) Result {
 	switch op {
-	case OperationList, OperationDescribe, OperationLag, OperationPeek, OperationTail, OperationClusterInfo:
+	case OperationList, OperationDescribe, OperationLag, OperationPeek, OperationTail, OperationClusterInfo, OperationListACL:
 		return Result{Risk: safety.R0, Reason: "read-only broker operation"}
 	case OperationProduce, OperationCreateTopic:
 		return Result{Risk: safety.R1, Reason: "non-protected topic write"}
-	case OperationAlterTopic, OperationCreateGroup, OperationDeleteGroup:
+	case OperationAlterTopic, OperationCreateGroup, OperationDeleteGroup, OperationGrantACL:
 		return Result{Risk: safety.R2, Reason: "elevated topic/group mutation"}
-	case OperationResetOffset, OperationSeekOffset, OperationPurgeTopic, OperationPurgeDLQ, OperationDeleteTopic, OperationDeleteACL:
+	case OperationResetOffset, OperationSeekOffset, OperationPurgeTopic, OperationPurgeDLQ, OperationDeleteTopic, OperationRevokeACL:
 		return Result{Risk: safety.R3, Reason: "destructive broker operation"}
 	default:
 		return Result{Risk: safety.R3, Reason: "unknown broker operation"}
@@ -142,4 +157,69 @@ func hasPattern(value string) bool {
 func isInternalTopic(topic string) bool {
 	name := strings.ToLower(strings.TrimSpace(topic))
 	return strings.HasPrefix(name, "__") || strings.HasPrefix(name, "_system") || strings.Contains(name, "consumer_offsets")
+}
+
+func broadACLGrant(target ACLTarget) bool {
+	if target.Unknown {
+		return true
+	}
+	if broadACLPatternType(target.PatternType) {
+		return true
+	}
+	principal := strings.ToLower(strings.TrimSpace(target.Principal))
+	if principal == "" || principal == "*" || principal == "user:*" {
+		return true
+	}
+	resourceType := strings.ToLower(strings.TrimSpace(target.ResourceType))
+	if resourceType == "" || resourceType == "cluster" {
+		return true
+	}
+	if !knownACLResourceType(resourceType) {
+		return true
+	}
+	resourceName := strings.TrimSpace(target.ResourceName)
+	if resourceName == "" || resourceName == "*" || hasPattern(resourceName) {
+		return true
+	}
+	if broadACLOperation(target.Operation) {
+		return true
+	}
+	permission := strings.ToLower(strings.TrimSpace(target.Permission))
+	return permission == "" || (permission != "allow" && permission != "deny")
+}
+
+func knownACLResourceType(resourceType string) bool {
+	switch normalizeACLToken(resourceType) {
+	case "any", "topic", "group", "cluster", "transactionalid", "delegationtoken", "user":
+		return true
+	default:
+		return false
+	}
+}
+
+func broadACLPatternType(patternType string) bool {
+	return normalizeACLToken(patternType) != "literal"
+}
+
+func broadACLOperation(operation string) bool {
+	normalized := normalizeACLToken(operation)
+	switch normalized {
+	case "", "all", "alter", "clusteraction", "alterconfigs", "idempotentwrite":
+		return true
+	default:
+		return !knownACLOperation(normalized)
+	}
+}
+
+func normalizeACLToken(value string) string {
+	return strings.ToLower(strings.NewReplacer("_", "", "-", "", ".", "").Replace(strings.TrimSpace(value)))
+}
+
+func knownACLOperation(operation string) bool {
+	switch operation {
+	case "any", "all", "read", "write", "create", "delete", "alter", "describe", "clusteraction", "describeconfigs", "alterconfigs", "idempotentwrite", "createtokens", "describetokens":
+		return true
+	default:
+		return false
+	}
 }

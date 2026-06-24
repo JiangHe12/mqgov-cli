@@ -4,7 +4,7 @@
 
 **Governed message-broker operations for humans _and_ AI agents.**
 
-One safe command line for **Kafka**, **RabbitMQ**, **Pulsar**, and **RocketMQ** — list, describe, peek, tail, produce, reset offsets, purge, and delete topics without ever fat-fingering production or silently draining a queue.
+One safe command line for **Kafka**, **RabbitMQ**, **Pulsar**, and **RocketMQ** — list, describe, peek, tail, produce, reset offsets, inspect ACLs, purge, and delete topics without ever fat-fingering production or silently draining a queue.
 
 [![npm version](https://img.shields.io/npm/v/mqgov-cli.svg)](https://www.npmjs.com/package/mqgov-cli)
 [![CI](https://github.com/JiangHe12/mqgov-cli/actions/workflows/ci.yml/badge.svg)](https://github.com/JiangHe12/mqgov-cli/actions/workflows/ci.yml)
@@ -38,7 +38,7 @@ It's built on the shared [`opskit-core`](https://github.com/JiangHe12/opskit-cor
 | | |
 |---|---|
 | 📨 **Four brokers** | **Kafka** (franz-go), **RabbitMQ** (AMQP + management API), **Pulsar** (client + admin REST), **RocketMQ** (rocketmq-client-go/v2). One backend-agnostic governance model; pick per context or override per command. |
-| 🧱 **topic / group / message** | topics: list · describe · create · alter · delete · purge. consumer groups: list · lag · reset-offset. messages: non-destructive peek · tail · produce. |
+| 🧱 **topic / group / message / acl** | topics: list · describe · create · alter · delete · purge. consumer groups: list · lag · reset-offset. messages: non-destructive peek · tail · produce. ACLs: list · grant · revoke where supported. |
 | 🔐 **R0–R3 governance** | every operation is risk-classified by the fail-closed `mqclass` engine; protected contexts and internal/system topics escalate one tier; AI callers can never self-authorize. |
 | 🎯 **Real blast-radius preview** | `reset-offset --dry-run` and `purge --dry-run` compute the actual per-partition message delta from the live broker — no guessing. The preview is read-only and never mutates. |
 | 👀 **Non-destructive peek/tail** | inspect or stream messages as fingerprints without consuming them or moving any cursor (Kafka direct partition reads, Pulsar Reader, RabbitMQ get+requeue for peek only). Where a broker can't guarantee this, the operation fails closed rather than silently consuming. |
@@ -58,6 +58,7 @@ It's built on the shared [`opskit-core`](https://github.com/JiangHe12/opskit-cor
 | **offset lag / reset** | ✅ | ✅ (cursor) | ❌ (no offsets) | ❌ |
 | alter partitions | ✅ | ✅ | ❌ | ❌ |
 | purge | ✅ | ✅ | ✅ | ❌ |
+| **ACL list / grant / revoke** | ✅ | ❌ `NOT_IMPLEMENTED` | ❌ `NOT_IMPLEMENTED` | ❌ `NOT_IMPLEMENTED` |
 
 ¹ RocketMQ's Go v2 `PullConsumer` enters the consumer-group lifecycle and commits offsets, so it cannot guarantee non-destructive peek/tail — mqgov fails closed instead of silently advancing offsets. ² RabbitMQ has no forward non-destructive tail because reads are consume/requeue oriented. Unsupported operations always return `NOT_IMPLEMENTED` (exit 12), never a fake success.
 
@@ -123,19 +124,19 @@ Every command is sorted into one of four **risk tiers** by the fail-closed `mqcl
 
 | Tier | What it covers | What you must provide |
 |:---:|---|---|
-| **R0** | Reads & previews (`topic list/describe`, `group list/lag`, `message peek`, `message tail`, `*-dry-run`, `audit query/verify`, `doctor`) | Nothing — but it's still audited |
+| **R0** | Reads & previews (`topic list/describe`, `group list/lag`, `message peek`, `message tail`, `acl list`, `*-dry-run`, `audit query/verify`, `doctor`) | Nothing — but it's still audited |
 | **R1** | Ordinary writes (`message produce`, `topic create`) | `--yes` (or an interactive confirmation) |
-| **R2** | Elevated mutations (`topic alter`, `group create/delete`, produce to a **protected** topic) | `--yes` **and** a non-empty `--ticket` |
-| **R3** | Destructive / irreversible (`group reset-offset`, `topic purge`, `topic delete`, produce to an **internal/system** topic) | The above **plus** the exact `--allow-*` flag |
+| **R2** | Elevated mutations (`topic alter`, `group create/delete`, `acl grant`, produce to a **protected** topic) | `--yes` **and** a non-empty `--ticket` |
+| **R3** | Destructive / irreversible (`group reset-offset`, `topic purge`, `topic delete`, broad `acl grant`, `acl revoke`, produce to an **internal/system** topic) | The above **plus** the exact `--allow-*` flag |
 
-The R3 allow flags: `--allow-offset-reset`, `--allow-topic-purge`, `--allow-topic-delete`, `--allow-internal-produce`.
+The R3 allow flags: `--allow-offset-reset`, `--allow-topic-purge`, `--allow-topic-delete`, `--allow-destructive-acl`, `--allow-internal-produce`.
 
 **Protected contexts, protected topics, and internal/system topics raise the tier by one.** For example, producing to `__consumer_offsets` is treated as a destructive R3 operation and needs `--allow-internal-produce`.
 
 Three rules keep this safe — especially for automation:
 
 1. **Blast radius comes from the tool, not a guess.** Use `--dry-run` / `--plan` to see the exact per-partition impact. Never estimate it by reasoning.
-2. **`mqclass` is fail-closed and structure-aware.** All offset changes, purge, and delete are pinned R3; wildcard/glob targets escalate; an unknown operation fails closed to the highest tier — it never falls to R0.
+2. **`mqclass` is fail-closed and structure-aware.** All offset changes, purge, topic delete, ACL revoke, and broad ACL grants are pinned R3; wildcard/glob targets escalate; an unknown operation fails closed to the highest tier — it never falls to R0.
 3. **🤖 AI agents must never invent `--ticket`, `--allow-*`, or a high-risk `--yes`.** Those are *human* authorization inputs. An agent should surface "this needs approval X" to its operator and stop.
 
 ---
@@ -193,6 +194,23 @@ mqgov message produce <topic> [--key <k>] [--body <text>] --yes                 
 </details>
 
 <details>
+<summary><b>acl</b> — broker access control</summary>
+
+```bash
+mqgov acl list [--principal <P>] [--resource-type <T>] [--resource-name <N>] -o json
+
+mqgov acl grant --principal User:svc --resource-type topic --resource-name orders \
+  --pattern literal --operation read --permission allow --yes --ticket <t>
+
+mqgov acl revoke --principal User:svc --resource-type topic --resource-name orders \
+  --pattern literal --operation read --permission allow \
+  --yes --ticket <t> --allow-destructive-acl
+```
+
+`acl list` is R0 and audited. Normal `acl grant` is R2. Broad grants (prefixed pattern, wildcard principal, wildcard resource, cluster resource, `all`, `alter`, or cluster-action style operations) and every `acl revoke` are R3 and require `--allow-destructive-acl`. Kafka implements broker ACLs; RabbitMQ, Pulsar, and RocketMQ fail closed with `NOT_IMPLEMENTED`.
+</details>
+
+<details>
 <summary><b>ctx</b>, <b>audit</b>, <b>doctor</b> & friends</summary>
 
 ```bash
@@ -223,7 +241,7 @@ mqgov version
 
 mqgov-cli is designed to be driven by autonomous agents safely:
 
-- Run `mqgov capabilities -o json` first to discover what the bound backend supports — brokers differ, don't assume (e.g. RabbitMQ/RocketMQ have no offsets; RabbitMQ/RocketMQ have no tail; RocketMQ has no peek).
+- Run `mqgov capabilities -o json` first to discover what the bound backend supports — brokers differ, don't assume (e.g. only Kafka currently supports `acl`; RabbitMQ/RocketMQ have no offsets; RabbitMQ/RocketMQ have no tail; RocketMQ has no peek).
 - Use `-o json` everywhere; every command returns a stable, versioned envelope.
 - Get blast radius from `--dry-run` / `--plan`, never from your own reasoning.
 - **Never self-fill `--ticket`, `--allow-*`, or a high-risk `--yes`.** Surface the required human approval and stop.

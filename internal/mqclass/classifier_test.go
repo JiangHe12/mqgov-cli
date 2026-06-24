@@ -32,7 +32,9 @@ func TestClassifyGovernanceInvariants(t *testing.T) {
 		{name: "purge R3", op: OperationPurgeTopic, target: Target{Topic: "orders"}, want: safety.R3},
 		{name: "purge plan R0", op: OperationPurgeTopic, target: Target{Topic: "orders", Plan: true}, want: safety.R0},
 		{name: "delete topic R3", op: OperationDeleteTopic, target: Target{Topic: "orders"}, want: safety.R3},
-		{name: "destructive ACL R3", op: OperationDeleteACL, target: Target{DestructiveACL: true}, want: safety.R3},
+		{name: "list ACL R0", op: OperationListACL, want: safety.R0},
+		{name: "grant ACL R2", op: OperationGrantACL, target: Target{ACL: ACLTarget{Principal: "User:svc", ResourceType: "topic", ResourceName: "orders", PatternType: "literal", Operation: "read", Permission: "allow"}}, want: safety.R2},
+		{name: "revoke ACL R3", op: OperationRevokeACL, target: Target{ACL: ACLTarget{Principal: "User:svc", ResourceType: "topic", ResourceName: "orders", Operation: "read", Permission: "allow"}}, want: safety.R3},
 		{name: "unknown R3", op: Operation("teleport"), want: safety.R3},
 	}
 	for _, tt := range tests {
@@ -40,6 +42,47 @@ func TestClassifyGovernanceInvariants(t *testing.T) {
 			t.Parallel()
 			if got := Classify(tt.op, tt.target); got.Risk != tt.want {
 				t.Fatalf("Classify() risk = %v, want %v (%s)", got.Risk, tt.want, got.Reason)
+			}
+		})
+	}
+}
+
+func TestClassifyACLGovernance(t *testing.T) {
+	t.Parallel()
+	base := ACLTarget{Principal: "User:svc", ResourceType: "topic", ResourceName: "orders", PatternType: "literal", Operation: "read", Permission: "allow"}
+	tests := []struct {
+		name   string
+		op     Operation
+		target ACLTarget
+		want   safety.Risk
+	}{
+		{name: "list is R0", op: OperationListACL, target: base, want: safety.R0},
+		{name: "normal allow grant is R2", op: OperationGrantACL, target: base, want: safety.R2},
+		{name: "normal deny grant is R2", op: OperationGrantACL, target: ACLTarget{Principal: "User:svc", ResourceType: "topic", ResourceName: "orders", PatternType: "literal", Operation: "read", Permission: "deny"}, want: safety.R2},
+		{name: "prefixed pattern grant is R3", op: OperationGrantACL, target: ACLTarget{Principal: "User:svc", ResourceType: "topic", ResourceName: "prod", PatternType: "prefixed", Operation: "read", Permission: "allow"}, want: safety.R3},
+		{name: "empty pattern type grant is R3", op: OperationGrantACL, target: ACLTarget{Principal: "User:svc", ResourceType: "topic", ResourceName: "orders", Operation: "read", Permission: "allow"}, want: safety.R3},
+		{name: "unknown pattern type grant is R3", op: OperationGrantACL, target: ACLTarget{Principal: "User:svc", ResourceType: "topic", ResourceName: "orders", PatternType: "weird", Operation: "read", Permission: "allow"}, want: safety.R3},
+		{name: "wildcard principal grant is R3", op: OperationGrantACL, target: ACLTarget{Principal: "*", ResourceType: "topic", ResourceName: "orders", Operation: "read", Permission: "allow"}, want: safety.R3},
+		{name: "User wildcard principal grant is R3", op: OperationGrantACL, target: ACLTarget{Principal: "User:*", ResourceType: "topic", ResourceName: "orders", Operation: "read", Permission: "allow"}, want: safety.R3},
+		{name: "wildcard resource grant is R3", op: OperationGrantACL, target: ACLTarget{Principal: "User:svc", ResourceType: "topic", ResourceName: "*", Operation: "read", Permission: "allow"}, want: safety.R3},
+		{name: "glob resource grant is R3", op: OperationGrantACL, target: ACLTarget{Principal: "User:svc", ResourceType: "topic", ResourceName: "prod-*", Operation: "read", Permission: "allow"}, want: safety.R3},
+		{name: "cluster resource grant is R3", op: OperationGrantACL, target: ACLTarget{Principal: "User:svc", ResourceType: "cluster", ResourceName: "kafka-cluster", Operation: "describe", Permission: "allow"}, want: safety.R3},
+		{name: "all operation grant is R3", op: OperationGrantACL, target: ACLTarget{Principal: "User:svc", ResourceType: "topic", ResourceName: "orders", Operation: "all", Permission: "allow"}, want: safety.R3},
+		{name: "alter operation grant is R3", op: OperationGrantACL, target: ACLTarget{Principal: "User:svc", ResourceType: "topic", ResourceName: "orders", Operation: "alter", Permission: "allow"}, want: safety.R3},
+		{name: "cluster action operation grant is R3", op: OperationGrantACL, target: ACLTarget{Principal: "User:svc", ResourceType: "topic", ResourceName: "orders", Operation: "cluster-action", Permission: "allow"}, want: safety.R3},
+		{name: "unknown resource type grant is R3", op: OperationGrantACL, target: ACLTarget{Principal: "User:svc", ResourceType: "wat", ResourceName: "orders", Operation: "read", Permission: "allow"}, want: safety.R3},
+		{name: "unknown operation grant is R3", op: OperationGrantACL, target: ACLTarget{Principal: "User:svc", ResourceType: "topic", ResourceName: "orders", Operation: "bogus", Permission: "allow"}, want: safety.R3},
+		{name: "unknown permission grant is R3", op: OperationGrantACL, target: ACLTarget{Principal: "User:svc", ResourceType: "topic", ResourceName: "orders", Operation: "read", Permission: "maybe"}, want: safety.R3},
+		{name: "unknown shape grant is R3", op: OperationGrantACL, target: ACLTarget{Unknown: true}, want: safety.R3},
+		{name: "revoke allow is R3", op: OperationRevokeACL, target: base, want: safety.R3},
+		{name: "revoke deny is R3", op: OperationRevokeACL, target: ACLTarget{Principal: "User:svc", ResourceType: "topic", ResourceName: "orders", Operation: "read", Permission: "deny"}, want: safety.R3},
+		{name: "unknown ACL op is R3", op: Operation("explode-acl"), target: base, want: safety.R3},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := Classify(tt.op, Target{ACL: tt.target}); got.Risk != tt.want {
+				t.Fatalf("Classify(%s) risk = %v, want %v (%s)", tt.op, got.Risk, tt.want, got.Reason)
 			}
 		})
 	}

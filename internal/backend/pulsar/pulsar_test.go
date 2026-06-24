@@ -23,6 +23,16 @@ func TestListGroupsNotSupportedWithoutTopic(t *testing.T) {
 	}
 }
 
+func TestSupportsACLFalse(t *testing.T) {
+	backend := &Broker{opts: Options{Cluster: "test"}}
+	if backend.Capabilities().SupportsACL {
+		t.Fatalf("SupportsACL = true, want false")
+	}
+	if _, ok := mqgov.SupportsACL(backend); ok {
+		t.Fatalf("SupportsACL capability assertion = true, want false")
+	}
+}
+
 func TestAlterNonPartitionedTopicReturnsClearError(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {

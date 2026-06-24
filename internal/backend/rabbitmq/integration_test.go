@@ -93,6 +93,9 @@ func TestRabbitMQIntegration(t *testing.T) {
 	if _, ok := mqgov.SupportsTail(backend); ok {
 		t.Fatalf("SupportsTail() = true, want false")
 	}
+	if _, ok := mqgov.SupportsACL(backend); ok {
+		t.Fatalf("SupportsACL() = true, want false")
+	}
 
 	plan, err := backend.PurgeTopic(ctx, mqgov.TopicPurgeRequest{Coordinate: coord, DryRun: true})
 	if err != nil {

@@ -178,6 +178,26 @@ type Capabilities struct {
 	SupportsACL        bool     `json:"supportsAcl"`
 }
 
+type ACLBinding struct {
+	Principal    string `json:"principal"`
+	Host         string `json:"host"`
+	ResourceType string `json:"resourceType"`
+	ResourceName string `json:"resourceName"`
+	PatternType  string `json:"patternType"`
+	Operation    string `json:"operation"`
+	Permission   string `json:"permission"`
+}
+
+type ACLFilter struct {
+	Principal    string `json:"principal,omitempty"`
+	Host         string `json:"host,omitempty"`
+	ResourceType string `json:"resourceType,omitempty"`
+	ResourceName string `json:"resourceName,omitempty"`
+	PatternType  string `json:"patternType,omitempty"`
+	Operation    string `json:"operation,omitempty"`
+	Permission   string `json:"permission,omitempty"`
+}
+
 type Broker interface {
 	Ping(ctx context.Context) error
 	Describe() Description
@@ -205,7 +225,9 @@ type PartitionManager interface {
 }
 
 type ACLManager interface {
-	DeleteACL(ctx context.Context, resource string) error
+	ListACLs(ctx context.Context, filter ACLFilter) ([]ACLBinding, error)
+	GrantACL(ctx context.Context, binding ACLBinding) error
+	RevokeACL(ctx context.Context, binding ACLBinding) error
 }
 
 type Tailer interface {

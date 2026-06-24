@@ -55,14 +55,14 @@ go mod tidy                             # must be a no-op
 - R0 reads are free but audited. R1 needs `--yes`. R2 also needs a non-empty
   `--ticket`. R3 also needs the exact command-specific `--allow-*` flag
   (`--allow-offset-reset`, `--allow-topic-purge`, `--allow-topic-delete`,
-  `--allow-internal-produce`).
+  `--allow-destructive-acl`, `--allow-internal-produce`).
 - Protected contexts, protected topics, and internal/system topics raise every
   operation one tier; authorization must go through `opskit-core/safety`
   (`EffectiveRisk` + `Authorize`).
 - `mqclass` is the only message-operation risk source and must stay fail-closed
-  and structure-aware: offset reset/seek, purge, delete, and produce-to-internal
-  are pinned R3; wildcard/glob targets escalate; unknown/uncertain inputs escalate,
-  never fall to R0.
+  and structure-aware: offset reset/seek, purge, topic delete, ACL revoke,
+  broad ACL grants, and produce-to-internal are pinned R3; wildcard/glob targets
+  escalate; unknown/uncertain inputs escalate, never fall to R0.
 - `--dry-run`/`--plan` is a read-only (R0) impact preview that must NEVER mutate.
   In a command, the SAME `dryRun` flag must drive both the R0 classification and
   the non-mutating execution path — they cannot be decoupled (no "R0-auth-but-mutate").
@@ -111,7 +111,7 @@ go mod tidy                             # must be a no-op
 
 ## Repository Layout
 
-- `cmd/` - Cobra commands (`topic`/`group`/`message`/`ctx`/`audit`/`install`/…) and `-o json` output contracts
+- `cmd/` - Cobra commands (`topic`/`group`/`message`/`acl`/`ctx`/`audit`/`install`/…) and `-o json` output contracts
 - `internal/backend/{kafka,rabbitmq,pulsar,rocketmq,fake}` - broker adapters
 - `internal/mqgov` - Broker abstraction + coordinate/fingerprint types + optional capability interfaces
 - `internal/mqclass` - fail-closed message-operation risk classifier

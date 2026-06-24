@@ -49,6 +49,7 @@ const (
 	auditEventGroup       = audit.EventType("mq.group")
 	auditEventMessage     = audit.EventType("mq.message")
 	auditEventOffset      = audit.EventType("mq.offset")
+	auditEventACL         = audit.EventType("mq.acl")
 	auditEventDiagnostic  = audit.EventType("mq.diagnostic")
 	defaultFakeBackend    = "fake"
 	defaultCommandTimeout = 30 * time.Second
@@ -181,7 +182,7 @@ func newRootCmdWith(f *cliFlags) *cobra.Command {
 	cmd.PersistentFlags().StringVar(&f.OTLPEnd, "otel-endpoint", "", "OTLP trace endpoint")
 	cmd.PersistentFlags().StringVar(&f.OTLPMetrics, "otel-metrics-endpoint", "", "OTLP metrics endpoint")
 	cmd.PersistentFlags().BoolVar(&f.OTLPInsec, "otel-insecure", false, "Disable TLS for OTLP exporter")
-	cmd.AddCommand(newTopicCmd(f), newGroupCmd(f), newMessageCmd(f), newContextCmd(f), newAuditCmd(f), newInstallCmd(f), newCapabilitiesCmd(f), newDoctorCmd(f), newVersionCmd(f))
+	cmd.AddCommand(newTopicCmd(f), newGroupCmd(f), newMessageCmd(f), newACLCmd(f), newContextCmd(f), newAuditCmd(f), newInstallCmd(f), newCapabilitiesCmd(f), newDoctorCmd(f), newVersionCmd(f))
 	return cmd
 }
 

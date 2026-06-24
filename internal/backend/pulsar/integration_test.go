@@ -106,6 +106,9 @@ func TestPulsarIntegration(t *testing.T) {
 	if !ok {
 		t.Fatalf("SupportsTail() = false, want true")
 	}
+	if _, ok := mqgov.SupportsACL(backend); ok {
+		t.Fatalf("SupportsACL() = true, want false")
+	}
 	tailReq := mqgov.MessageTailRequest{Coordinate: coord, From: "earliest", MaxMessages: 1}
 	firstTail := collectTail(t, ctx, tailer, tailReq)
 	secondTail := collectTail(t, ctx, tailer, tailReq)

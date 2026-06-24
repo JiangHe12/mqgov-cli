@@ -1,0 +1,192 @@
+package cmd
+
+import (
+	"fmt"
+
+	"github.com/spf13/cobra"
+
+	"github.com/JiangHe12/opskit-core/apperrors"
+	"github.com/JiangHe12/opskit-core/audit"
+	"github.com/JiangHe12/opskit-core/safety"
+
+	"github.com/JiangHe12/mqgov-cli/internal/mqclass"
+	"github.com/JiangHe12/mqgov-cli/internal/mqgov"
+)
+
+type aclFlags struct {
+	principal    string
+	host         string
+	resourceType string
+	resourceName string
+	patternType  string
+	operation    string
+	permission   string
+}
+
+func newACLCmd(f *cliFlags) *cobra.Command {
+	cmd := &cobra.Command{Use: "acl", Short: "Inspect and manage broker ACLs"}
+	cmd.AddCommand(newACLListCmd(f), newACLGrantCmd(f), newACLRevokeCmd(f))
+	return cmd
+}
+
+func newACLListCmd(f *cliFlags) *cobra.Command {
+	var flags aclFlags
+	cmd := &cobra.Command{
+		Use:   "list",
+		Short: "List broker ACLs",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			backend, meta, err := buildBroker(f)
+			if err != nil {
+				return err
+			}
+			manager, ok := mqgov.SupportsACL(backend)
+			if !ok {
+				return apperrors.New(apperrors.CodeNotImplemented, "backend does not support ACL management", nil)
+			}
+			if err := classifyAndAuthorize(f, meta, mqclass.OperationListACL, mqclass.Target{ACL: aclClassTarget(flags)}, ""); err != nil {
+				return err
+			}
+			filter := mqgov.ACLFilter{Principal: flags.principal, ResourceType: flags.resourceType, ResourceName: flags.resourceName}
+			items, err := manager.ListACLs(cmd.Context(), filter)
+			if err != nil {
+				appendAuditWarn(f, auditEventACL, meta, audit.EventTarget{ResourceType: "acl"}, audit.StatusFailed, aclFilterDiff(filter), err)
+				return err
+			}
+			appendAuditWarn(f, auditEventACL, meta, audit.EventTarget{ResourceType: "acl"}, audit.StatusSuccess, fmt.Sprintf("list count=%d filter=%s", len(items), aclFilterDiff(filter)), nil)
+			if f.Output == "json" {
+				return newPrinter(f).JSONList("ACLList", items, len(items), 1, len(items), false)
+			}
+			rows := make([][]string, 0, len(items))
+			for _, item := range items {
+				rows = append(rows, []string{item.Principal, item.Host, item.ResourceType, item.ResourceName, item.PatternType, item.Operation, item.Permission})
+			}
+			newPrinter(f).Table([]string{"PRINCIPAL", "HOST", "RESOURCE TYPE", "RESOURCE NAME", "PATTERN", "OPERATION", "PERMISSION"}, rows)
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&flags.principal, "principal", "", "ACL principal filter")
+	cmd.Flags().StringVar(&flags.resourceType, "resource-type", "", "ACL resource type filter")
+	cmd.Flags().StringVar(&flags.resourceName, "resource-name", "", "ACL resource name filter")
+	return cmd
+}
+
+func newACLGrantCmd(f *cliFlags) *cobra.Command {
+	var flags aclFlags
+	cmd := &cobra.Command{
+		Use:   "grant",
+		Short: "Grant a broker ACL",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			backend, meta, err := buildBroker(f)
+			if err != nil {
+				return err
+			}
+			manager, ok := mqgov.SupportsACL(backend)
+			if !ok {
+				return apperrors.New(apperrors.CodeNotImplemented, "backend does not support ACL management", nil)
+			}
+			binding := aclBinding(flags)
+			target := aclClassTarget(flags)
+			allow := safety.AllowFlag("")
+			if mqclass.Classify(mqclass.OperationGrantACL, mqclass.Target{ACL: target}).Risk == safety.R3 {
+				allow = allowDestructiveACL
+			}
+			if err := classifyAndAuthorize(f, meta, mqclass.OperationGrantACL, mqclass.Target{ACL: target}, allow); err != nil {
+				return err
+			}
+			if err := manager.GrantACL(cmd.Context(), binding); err != nil {
+				appendAuditWarn(f, auditEventACL, meta, aclAuditTarget(binding), audit.StatusFailed, aclBindingDiff(binding), err)
+				return err
+			}
+			appendAuditWarn(f, auditEventACL, meta, aclAuditTarget(binding), audit.StatusSuccess, aclBindingDiff(binding), nil)
+			return newPrinter(f).JSONData("ACLBinding", binding)
+		},
+	}
+	addACLBindingFlags(cmd, &flags)
+	return cmd
+}
+
+func newACLRevokeCmd(f *cliFlags) *cobra.Command {
+	var flags aclFlags
+	cmd := &cobra.Command{
+		Use:   "revoke",
+		Short: "Revoke a broker ACL",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			backend, meta, err := buildBroker(f)
+			if err != nil {
+				return err
+			}
+			manager, ok := mqgov.SupportsACL(backend)
+			if !ok {
+				return apperrors.New(apperrors.CodeNotImplemented, "backend does not support ACL management", nil)
+			}
+			binding := aclBinding(flags)
+			if err := classifyAndAuthorize(f, meta, mqclass.OperationRevokeACL, mqclass.Target{ACL: aclClassTarget(flags)}, allowDestructiveACL); err != nil {
+				return err
+			}
+			if err := manager.RevokeACL(cmd.Context(), binding); err != nil {
+				appendAuditWarn(f, auditEventACL, meta, aclAuditTarget(binding), audit.StatusFailed, aclBindingDiff(binding), err)
+				return err
+			}
+			appendAuditWarn(f, auditEventACL, meta, aclAuditTarget(binding), audit.StatusSuccess, aclBindingDiff(binding), nil)
+			return newPrinter(f).JSONData("ACLBinding", binding)
+		},
+	}
+	addACLBindingFlags(cmd, &flags)
+	return cmd
+}
+
+func addACLBindingFlags(cmd *cobra.Command, flags *aclFlags) {
+	cmd.Flags().StringVar(&flags.principal, "principal", "", "ACL principal")
+	cmd.Flags().StringVar(&flags.host, "host", "*", "ACL host")
+	cmd.Flags().StringVar(&flags.resourceType, "resource-type", "", "ACL resource type")
+	cmd.Flags().StringVar(&flags.resourceName, "resource-name", "", "ACL resource name")
+	cmd.Flags().StringVar(&flags.patternType, "pattern", "literal", "ACL resource pattern: literal | prefixed")
+	cmd.Flags().StringVar(&flags.operation, "operation", "", "ACL operation")
+	cmd.Flags().StringVar(&flags.permission, "permission", "", "ACL permission: allow | deny")
+}
+
+func aclBinding(flags aclFlags) mqgov.ACLBinding {
+	return mqgov.ACLBinding{
+		Principal:    flags.principal,
+		Host:         flags.host,
+		ResourceType: flags.resourceType,
+		ResourceName: flags.resourceName,
+		PatternType:  flags.patternType,
+		Operation:    flags.operation,
+		Permission:   flags.permission,
+	}
+}
+
+func aclClassTarget(flags aclFlags) mqclass.ACLTarget {
+	return mqclass.ACLTarget{
+		Principal:    flags.principal,
+		ResourceType: flags.resourceType,
+		ResourceName: flags.resourceName,
+		PatternType:  flags.patternType,
+		Operation:    flags.operation,
+		Permission:   flags.permission,
+	}
+}
+
+func aclAuditTarget(binding mqgov.ACLBinding) audit.EventTarget {
+	return audit.EventTarget{ResourceType: "acl", Resource: binding.ResourceType + "/" + binding.ResourceName}
+}
+
+func aclBindingDiff(binding mqgov.ACLBinding) string {
+	return "principal=" + binding.Principal +
+		" host=" + binding.Host +
+		" resourceType=" + binding.ResourceType +
+		" resourceName=" + binding.ResourceName +
+		" patternType=" + binding.PatternType +
+		" operation=" + binding.Operation +
+		" permission=" + binding.Permission
+}
+
+func aclFilterDiff(filter mqgov.ACLFilter) string {
+	return "principal=" + filter.Principal +
+		" resourceType=" + filter.ResourceType +
+		" resourceName=" + filter.ResourceName
+}

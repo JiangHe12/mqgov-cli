@@ -35,6 +35,7 @@ mqgov group list -o json
 mqgov group lag <group> <topic> -o json
 mqgov message peek <topic> --partition 0 --offset 0 --count 1 -o json
 mqgov message tail <topic> --from earliest --max-messages 10 --timeout 30s -o json
+mqgov acl list --principal User:svc -o json
 ```
 
 Writes require human authorization according to risk:
@@ -47,7 +48,15 @@ mqgov group reset-offset <group> <topic> --to latest --yes --ticket <ticket> --a
 mqgov topic purge <topic> --dry-run -o json
 mqgov topic purge <topic> --yes --ticket <ticket> --allow-topic-purge -o json
 mqgov topic delete <topic> --yes --ticket <ticket> --allow-topic-delete -o json
+mqgov acl grant --principal User:svc --resource-type topic --resource-name <topic> --pattern literal --operation read --permission allow --yes --ticket <ticket> -o json
+mqgov acl revoke --principal User:svc --resource-type topic --resource-name <topic> --pattern literal --operation read --permission allow --yes --ticket <ticket> --allow-destructive-acl -o json
 ```
+
+ACL governance:
+
+- Kafka supports `acl list|grant|revoke`; RabbitMQ, Pulsar, and RocketMQ fail closed with `NOT_IMPLEMENTED`.
+- `acl list` is R0. Normal `acl grant` is R2. Broad grants, including prefixed patterns, and every `acl revoke` are R3 and require `--allow-destructive-acl`.
+- Broad grant means wildcard principal, wildcard resource, cluster resource, `all`, `alter`, or cluster-action style operations.
 
 Audit:
 

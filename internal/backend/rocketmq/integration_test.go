@@ -69,6 +69,9 @@ func TestRocketMQIntegration(t *testing.T) {
 	if _, ok := mqgov.SupportsPartitions(backend); ok {
 		t.Fatalf("SupportsPartitions() = true, want false")
 	}
+	if _, ok := mqgov.SupportsACL(backend); ok {
+		t.Fatalf("SupportsACL() = true, want false")
+	}
 	if err := backend.DeleteTopic(ctx, coord); err != nil {
 		t.Fatalf("DeleteTopic() error = %v", err)
 	}

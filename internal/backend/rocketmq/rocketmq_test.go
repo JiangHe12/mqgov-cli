@@ -16,6 +16,9 @@ func TestCapabilitiesAreHonestPartialImplementation(t *testing.T) {
 	if caps.SupportsOffsets || caps.SupportsPartitions || caps.SupportsACL {
 		t.Fatalf("capabilities = %+v, want all optional capabilities false", caps)
 	}
+	if _, ok := mqgov.SupportsACL(backend); ok {
+		t.Fatalf("SupportsACL capability assertion = true, want false")
+	}
 }
 
 func TestUnsupportedGroupOperationsFailClosed(t *testing.T) {

@@ -4,7 +4,7 @@
 
 **面向人类_和_ AI agent 的受治理消息中间件操作工具。**
 
-一条安全的命令行,统一管理 **Kafka**、**RabbitMQ**、**Pulsar**、**RocketMQ** —— 列出、查看、peek、tail、生产、重置 offset、清空、删除 topic,绝不手滑搞挂生产、也绝不静默清空一个队列。
+一条安全的命令行,统一管理 **Kafka**、**RabbitMQ**、**Pulsar**、**RocketMQ** —— 列出、查看、peek、tail、生产、重置 offset、查看/变更 ACL、清空、删除 topic,绝不手滑搞挂生产、也绝不静默清空一个队列。
 
 [![npm version](https://img.shields.io/npm/v/mqgov-cli.svg)](https://www.npmjs.com/package/mqgov-cli)
 [![CI](https://github.com/JiangHe12/mqgov-cli/actions/workflows/ci.yml/badge.svg)](https://github.com/JiangHe12/mqgov-cli/actions/workflows/ci.yml)
@@ -38,7 +38,7 @@
 | | |
 |---|---|
 | 📨 **四个 broker** | **Kafka**(franz-go)、**RabbitMQ**(AMQP + 管理 API)、**Pulsar**(客户端 + admin REST)、**RocketMQ**(rocketmq-client-go/v2)。一套与后端无关的治理模型;按 context 选择或按命令覆盖。 |
-| 🧱 **topic / group / message** | topic:list · describe · create · alter · delete · purge。消费组:list · lag · reset-offset。消息:非破坏性 peek · tail · produce。 |
+| 🧱 **topic / group / message / acl** | topic:list · describe · create · alter · delete · purge。消费组:list · lag · reset-offset。消息:非破坏性 peek · tail · produce。ACL:list · grant · revoke(按后端能力开放)。 |
 | 🔐 **R0–R3 治理** | 每个操作由 fail-closed 的 `mqclass` 引擎分级;保护上下文与内部/系统 topic 升一档;AI 调用方永远无法自我授权。 |
 | 🎯 **真实爆炸半径预览** | `reset-offset --dry-run` 和 `purge --dry-run` 从实时 broker 计算真实的每分区消息 delta —— 不靠猜。预览只读,绝不变更。 |
 | 👀 **非破坏性 peek/tail** | 把消息以指纹形式查看或流式读取,不消费、不移动游标(Kafka 直接分区读取、Pulsar Reader、RabbitMQ 仅 peek 使用 get+requeue)。无法保证非破坏的 broker 上,操作 **失败关闭**而非静默消费。 |
@@ -58,6 +58,7 @@
 | **offset lag / reset** | ✅ | ✅(游标) | ❌(无 offset) | ❌ |
 | alter 分区 | ✅ | ✅ | ❌ | ❌ |
 | purge | ✅ | ✅ | ✅ | ❌ |
+| **ACL list / grant / revoke** | ✅ | ❌ `NOT_IMPLEMENTED` | ❌ `NOT_IMPLEMENTED` | ❌ `NOT_IMPLEMENTED` |
 
 ¹ RocketMQ 的 Go v2 `PullConsumer` 会进入消费组生命周期并提交 offset,无法保证非破坏性 peek/tail —— mqgov 选择失败关闭,而非静默推进 offset。² RabbitMQ 没有向前的非破坏性 tail,读取语义是 consume/requeue。不支持的操作一律返回 `NOT_IMPLEMENTED`(exit 12),绝不假装成功。
 
@@ -123,19 +124,19 @@ mqgov audit query --since 1h -o json
 
 | 档 | 涵盖 | 你必须提供 |
 |:---:|---|---|
-| **R0** | 读与预览(`topic list/describe`、`group list/lag`、`message peek`、`message tail`、`*-dry-run`、`audit query/verify`、`doctor`) | 无 —— 但仍会审计 |
+| **R0** | 读与预览(`topic list/describe`、`group list/lag`、`message peek`、`message tail`、`acl list`、`*-dry-run`、`audit query/verify`、`doctor`) | 无 —— 但仍会审计 |
 | **R1** | 普通写(`message produce`、`topic create`) | `--yes`(或交互确认) |
-| **R2** | 升级变更(`topic alter`、`group create/delete`、向**保护** topic 生产) | `--yes` **且**非空 `--ticket` |
-| **R3** | 破坏性 / 不可逆(`group reset-offset`、`topic purge`、`topic delete`、向**内部/系统** topic 生产) | 以上 **再加**该操作专属的 `--allow-*` 标志 |
+| **R2** | 升级变更(`topic alter`、`group create/delete`、`acl grant`、向**保护** topic 生产) | `--yes` **且**非空 `--ticket` |
+| **R3** | 破坏性 / 不可逆(`group reset-offset`、`topic purge`、`topic delete`、宽泛 `acl grant`、`acl revoke`、向**内部/系统** topic 生产) | 以上 **再加**该操作专属的 `--allow-*` 标志 |
 
-R3 的 allow 标志:`--allow-offset-reset`、`--allow-topic-purge`、`--allow-topic-delete`、`--allow-internal-produce`。
+R3 的 allow 标志:`--allow-offset-reset`、`--allow-topic-purge`、`--allow-topic-delete`、`--allow-destructive-acl`、`--allow-internal-produce`。
 
 **保护上下文、保护 topic、内部/系统 topic 都使档位升一级。** 例如向 `__consumer_offsets` 生产被当作破坏性 R3 操作,需要 `--allow-internal-produce`。
 
 三条规则保证安全 —— 尤其对自动化:
 
 1. **爆炸半径来自工具,不靠猜。** 用 `--dry-run` / `--plan` 看精确的每分区影响,绝不靠推理估算。
-2. **`mqclass` fail-closed 且结构感知。** 所有 offset 变更、purge、delete 钉死 R3;通配/glob 目标升级;未知操作失败关闭到最高档 —— 绝不掉到 R0。
+2. **`mqclass` fail-closed 且结构感知。** 所有 offset 变更、purge、topic delete、ACL revoke、宽泛 ACL grant 钉死 R3;通配/glob 目标升级;未知操作失败关闭到最高档 —— 绝不掉到 R0。
 3. **🤖 AI agent 绝不能伪造 `--ticket`、`--allow-*` 或高危 `--yes`。** 这些是*人类*授权输入。agent 应把"此操作需要审批 X"上报给操作者并停下。
 
 ---
@@ -193,6 +194,23 @@ mqgov message produce <topic> [--key <k>] [--body <text>] --yes                 
 </details>
 
 <details>
+<summary><b>acl</b> —— broker 访问控制</summary>
+
+```bash
+mqgov acl list [--principal <P>] [--resource-type <T>] [--resource-name <N>] -o json
+
+mqgov acl grant --principal User:svc --resource-type topic --resource-name orders \
+  --pattern literal --operation read --permission allow --yes --ticket <t>
+
+mqgov acl revoke --principal User:svc --resource-type topic --resource-name orders \
+  --pattern literal --operation read --permission allow \
+  --yes --ticket <t> --allow-destructive-acl
+```
+
+`acl list` 是 R0 且会审计。普通 `acl grant` 是 R2。宽泛授权(prefixed pattern、通配 principal、通配 resource、cluster 资源、`all`、`alter` 或 cluster-action 类操作)以及所有 `acl revoke` 都是 R3,需要 `--allow-destructive-acl`。Kafka 实现 broker ACL;RabbitMQ、Pulsar、RocketMQ 失败关闭为 `NOT_IMPLEMENTED`。
+</details>
+
+<details>
 <summary><b>ctx</b>、<b>audit</b>、<b>doctor</b> 等</summary>
 
 ```bash
@@ -223,7 +241,7 @@ mqgov version
 
 mqgov-cli 设计为可被自治 agent 安全驱动:
 
-- 先跑 `mqgov capabilities -o json` 发现绑定后端支持什么 —— broker 各异,别假设(如 RabbitMQ/RocketMQ 无 offset;RabbitMQ/RocketMQ 无 tail;RocketMQ 无 peek)。
+- 先跑 `mqgov capabilities -o json` 发现绑定后端支持什么 —— broker 各异,别假设(例如目前只有 Kafka 支持 `acl`;RabbitMQ/RocketMQ 无 offset;RabbitMQ/RocketMQ 无 tail;RocketMQ 无 peek)。
 - 处处用 `-o json`;每个命令返回稳定、带版本的信封。
 - 爆炸半径来自 `--dry-run` / `--plan`,绝不来自你自己的推理。
 - **绝不自填 `--ticket`、`--allow-*` 或高危 `--yes`。** 把所需人工审批上报并停下。

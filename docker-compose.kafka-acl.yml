@@ -1,0 +1,20 @@
+services:
+  redpanda:
+    image: docker.redpanda.com/redpandadata/redpanda:latest
+    command:
+      - redpanda
+      - start
+      - --overprovisioned
+      - --smp=1
+      - --memory=512M
+      - --reserve-memory=0M
+      - --node-id=0
+      - --check=false
+      - --kafka-addr=OUTSIDE://0.0.0.0:9092
+      - --advertise-kafka-addr=OUTSIDE://127.0.0.1:9092
+      - --set
+      - redpanda.kafka_api_tls=[{"name":"OUTSIDE","enabled":true,"cert_file":"/certs/server.crt","key_file":"/certs/server.key","truststore_file":"/certs/ca.crt","require_client_auth":false}]
+    volumes:
+      - ./testdata/redpanda-certs:/certs:ro
+    ports:
+      - "9092:9092"

@@ -70,11 +70,11 @@ func (b *Broker) Describe() mqgov.Description {
 func (b *Broker) Capabilities() mqgov.Capabilities {
 	return mqgov.Capabilities{
 		Backend:            "kafka",
-		ResourceTypes:      []string{"topic", "group", "message", "offset"},
-		Verbs:              []string{"list", "describe", "lag", "peek", "tail", "produce", "create", "alter", "delete", "purge", "reset-offset"},
+		ResourceTypes:      []string{"topic", "group", "message", "offset", "acl"},
+		Verbs:              []string{"list", "describe", "lag", "peek", "tail", "produce", "create", "alter", "delete", "purge", "reset-offset", "grant-acl", "revoke-acl"},
 		SupportsOffsets:    true,
 		SupportsPartitions: true,
-		SupportsACL:        false,
+		SupportsACL:        true,
 	}
 }
 
@@ -240,6 +240,75 @@ func (b *Broker) Produce(ctx context.Context, req mqgov.MessageProduceRequest) (
 		Coordinate:  mqgov.MessageCoordinate{TopicCoordinate: req.Coordinate, Partition: int(produced.Partition), Offset: produced.Offset},
 		Fingerprint: mqgov.Fingerprints(req.Key, req.Body, 1),
 	}, nil
+}
+
+func (b *Broker) ListACLs(ctx context.Context, filter mqgov.ACLFilter) ([]mqgov.ACLBinding, error) {
+	builder, err := aclFilterBuilder(filter)
+	if err != nil {
+		return nil, err
+	}
+	results, err := b.admin.DescribeACLs(ctx, builder)
+	if err != nil {
+		return nil, backendErr(err)
+	}
+	out := make([]mqgov.ACLBinding, 0)
+	for _, result := range results {
+		if result.Err != nil {
+			return nil, backendErr(result.Err)
+		}
+		for _, acl := range result.Described {
+			out = append(out, mqgov.ACLBinding{
+				Principal:    acl.Principal,
+				Host:         acl.Host,
+				ResourceType: strings.ToLower(acl.Type.String()),
+				ResourceName: acl.Name,
+				PatternType:  strings.ToLower(acl.Pattern.String()),
+				Operation:    strings.ToLower(acl.Operation.String()),
+				Permission:   strings.ToLower(acl.Permission.String()),
+			})
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return aclSortKey(out[i]) < aclSortKey(out[j]) })
+	return out, nil
+}
+
+func (b *Broker) GrantACL(ctx context.Context, binding mqgov.ACLBinding) error {
+	builder, err := aclBindingBuilder(binding, false)
+	if err != nil {
+		return err
+	}
+	results, err := b.admin.CreateACLs(ctx, builder)
+	if err != nil {
+		return backendErr(err)
+	}
+	for _, result := range results {
+		if result.Err != nil {
+			return backendErr(result.Err)
+		}
+	}
+	return nil
+}
+
+func (b *Broker) RevokeACL(ctx context.Context, binding mqgov.ACLBinding) error {
+	builder, err := aclBindingBuilder(binding, true)
+	if err != nil {
+		return err
+	}
+	results, err := b.admin.DeleteACLs(ctx, builder)
+	if err != nil {
+		return backendErr(err)
+	}
+	for _, result := range results {
+		if result.Err != nil {
+			return backendErr(result.Err)
+		}
+		for _, deleted := range result.Deleted {
+			if deleted.Err != nil {
+				return backendErr(deleted.Err)
+			}
+		}
+	}
+	return nil
 }
 
 func (b *Broker) Tail(ctx context.Context, req mqgov.MessageTailRequest, emit func(mqgov.MessageFingerprint) error) (mqgov.MessageTailResult, error) {
@@ -888,6 +957,209 @@ func committedOffset(committed kadm.OffsetResponses, topic string, partition int
 		return 0, nil
 	}
 	return response.At, nil
+}
+
+func aclFilterBuilder(filter mqgov.ACLFilter) (*kadm.ACLBuilder, error) {
+	builder := kadm.NewACLs()
+	if err := applyACLResource(builder, filter.ResourceType, filter.ResourceName); err != nil {
+		return nil, err
+	}
+	if err := applyACLPattern(builder, filter.PatternType, true); err != nil {
+		return nil, err
+	}
+	if err := applyACLOperation(builder, filter.Operation, true); err != nil {
+		return nil, err
+	}
+	applyACLPrincipal(builder, filter.Principal, filter.Host, filter.Permission, true)
+	return builder, nil
+}
+
+func aclBindingBuilder(binding mqgov.ACLBinding, filter bool) (*kadm.ACLBuilder, error) {
+	if err := validateACLBinding(binding); err != nil {
+		return nil, err
+	}
+	builder := kadm.NewACLs()
+	if err := applyACLResource(builder, binding.ResourceType, binding.ResourceName); err != nil {
+		return nil, err
+	}
+	if err := applyACLPattern(builder, binding.PatternType, filter); err != nil {
+		return nil, err
+	}
+	if err := applyACLOperation(builder, binding.Operation, filter); err != nil {
+		return nil, err
+	}
+	applyACLPrincipal(builder, binding.Principal, binding.Host, binding.Permission, filter)
+	return builder, nil
+}
+
+func validateACLBinding(binding mqgov.ACLBinding) error {
+	if strings.TrimSpace(binding.Principal) == "" {
+		return apperrors.New(apperrors.CodeUsageError, "ACL principal is required", nil)
+	}
+	if strings.TrimSpace(binding.ResourceType) == "" {
+		return apperrors.New(apperrors.CodeUsageError, "ACL resource type is required", nil)
+	}
+	if strings.TrimSpace(binding.ResourceName) == "" {
+		return apperrors.New(apperrors.CodeUsageError, "ACL resource name is required", nil)
+	}
+	if strings.TrimSpace(binding.Operation) == "" {
+		return apperrors.New(apperrors.CodeUsageError, "ACL operation is required", nil)
+	}
+	permission := strings.ToLower(strings.TrimSpace(binding.Permission))
+	if permission != "allow" && permission != "deny" {
+		return apperrors.New(apperrors.CodeUsageError, "ACL permission must be allow or deny", nil)
+	}
+	return nil
+}
+
+func applyACLResource(builder *kadm.ACLBuilder, resourceType, resourceName string) error {
+	resourceType = strings.TrimSpace(resourceType)
+	resourceName = strings.TrimSpace(resourceName)
+	if resourceType == "" {
+		applyACLNames(resourceName, builder.AnyResource)
+		return nil
+	}
+	switch normalizeACLValue(resourceType) {
+	case "any":
+		applyACLNames(resourceName, builder.AnyResource)
+	case "topic":
+		applyACLNames(resourceName, builder.Topics)
+	case "group":
+		applyACLNames(resourceName, builder.Groups)
+	case "cluster":
+		builder.Clusters()
+	case "transactionalid":
+		applyACLNames(resourceName, builder.TransactionalIDs)
+	case "delegationtoken":
+		applyACLNames(resourceName, builder.DelegationTokens)
+	default:
+		return apperrors.New(apperrors.CodeUsageError, "unsupported ACL resource type", nil)
+	}
+	return nil
+}
+
+func applyACLNames(resourceName string, apply func(...string) *kadm.ACLBuilder) {
+	if resourceName == "" {
+		apply()
+		return
+	}
+	apply(resourceName)
+}
+
+func applyACLPattern(builder *kadm.ACLBuilder, pattern string, filter bool) error {
+	pattern = strings.TrimSpace(pattern)
+	if pattern == "" {
+		if filter {
+			builder.ResourcePatternType(kadm.ACLPatternAny)
+		} else {
+			builder.ResourcePatternType(kadm.ACLPatternLiteral)
+		}
+		return nil
+	}
+	switch normalizeACLValue(pattern) {
+	case "literal":
+		builder.ResourcePatternType(kadm.ACLPatternLiteral)
+	case "prefixed":
+		builder.ResourcePatternType(kadm.ACLPatternPrefixed)
+	case "any":
+		builder.ResourcePatternType(kadm.ACLPatternAny)
+	case "match":
+		builder.ResourcePatternType(kadm.ACLPatternMatch)
+	default:
+		return apperrors.New(apperrors.CodeUsageError, "invalid ACL pattern type", nil)
+	}
+	return nil
+}
+
+func applyACLOperation(builder *kadm.ACLBuilder, operation string, filter bool) error {
+	operation = strings.TrimSpace(operation)
+	if operation == "" {
+		if filter {
+			builder.Operations()
+			return nil
+		}
+		return apperrors.New(apperrors.CodeUsageError, "ACL operation is required", nil)
+	}
+	parsed, ok := parseACLOperation(operation)
+	if !ok {
+		return apperrors.New(apperrors.CodeUsageError, "invalid ACL operation", nil)
+	}
+	builder.Operations(parsed)
+	return nil
+}
+
+func parseACLOperation(operation string) (kadm.ACLOperation, bool) {
+	switch normalizeACLValue(operation) {
+	case "any":
+		return kadm.OpAny, true
+	case "all":
+		return kadm.OpAll, true
+	case "read":
+		return kadm.OpRead, true
+	case "write":
+		return kadm.OpWrite, true
+	case "create":
+		return kadm.OpCreate, true
+	case "delete":
+		return kadm.OpDelete, true
+	case "alter":
+		return kadm.OpAlter, true
+	case "describe":
+		return kadm.OpDescribe, true
+	case "clusteraction":
+		return kadm.OpClusterAction, true
+	case "describeconfigs":
+		return kadm.OpDescribeConfigs, true
+	case "alterconfigs":
+		return kadm.OpAlterConfigs, true
+	case "idempotentwrite":
+		return kadm.OpIdempotentWrite, true
+	default:
+		return kadm.OpUnknown, false
+	}
+}
+
+func normalizeACLValue(value string) string {
+	replacer := strings.NewReplacer("_", "", "-", "", ".", "")
+	return strings.ToLower(replacer.Replace(strings.TrimSpace(value)))
+}
+
+func applyACLPrincipal(builder *kadm.ACLBuilder, principal, host, permission string, filter bool) {
+	principal = strings.TrimSpace(principal)
+	host = strings.TrimSpace(host)
+	permission = strings.ToLower(strings.TrimSpace(permission))
+	if host == "" && !filter {
+		host = "*"
+	}
+	switch permission {
+	case "allow":
+		builder.Allow(principalOrAny(principal)...).AllowHosts(hostOrAny(host)...)
+	case "deny":
+		builder.Deny(principalOrAny(principal)...).DenyHosts(hostOrAny(host)...)
+	default:
+		builder.Allow(principalOrAny(principal)...).AllowHosts(hostOrAny(host)...)
+		if filter {
+			builder.Deny(principalOrAny(principal)...).DenyHosts(hostOrAny(host)...)
+		}
+	}
+}
+
+func principalOrAny(value string) []string {
+	if value == "" {
+		return nil
+	}
+	return []string{value}
+}
+
+func hostOrAny(value string) []string {
+	if value == "" {
+		return nil
+	}
+	return []string{value}
+}
+
+func aclSortKey(binding mqgov.ACLBinding) string {
+	return binding.Principal + "\x00" + binding.Host + "\x00" + binding.ResourceType + "\x00" + binding.ResourceName + "\x00" + binding.PatternType + "\x00" + binding.Operation + "\x00" + binding.Permission
 }
 
 func unreachable(causes ...error) error {
