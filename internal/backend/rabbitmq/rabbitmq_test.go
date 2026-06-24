@@ -26,7 +26,7 @@ func TestRabbitMQACLGrantListRevoke(t *testing.T) {
 	permissions := map[string]rabbitMQPermission{}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		path := r.URL.EscapedPath()
-		if path == "/api/permissions/%2F" && r.Method == http.MethodGet {
+		if path == "/api/permissions" && r.Method == http.MethodGet {
 			out := make([]rabbitMQPermission, 0, len(permissions))
 			for _, permission := range permissions {
 				out = append(out, permission)

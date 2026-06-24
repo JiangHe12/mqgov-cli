@@ -311,11 +311,7 @@ func (b *Broker) ListACLs(ctx context.Context, filter mqgov.ACLFilter) ([]mqgov.
 	if err := validateRabbitMQACLFilter(filter); err != nil {
 		return nil, err
 	}
-	vhost := strings.TrimSpace(filter.Vhost)
 	endpoint := strings.TrimRight(b.manageURL, "/") + "/api/permissions"
-	if vhost != "" {
-		endpoint += "/" + url.PathEscape(vhost)
-	}
 	resp, err := b.managementRequest(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
 		return nil, err
