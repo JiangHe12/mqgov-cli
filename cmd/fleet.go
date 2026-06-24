@@ -172,15 +172,15 @@ func fleetContextsByName(items map[string]mqgovctx.Context, names []string) ([]f
 func fleetStatusForContext(cmd *cobra.Command, f *cliFlags, item fleetContext) fleetStatusItem {
 	backend, err := buildBrokerForFleetContext(f, item)
 	if err != nil {
-		return fleetStatusItem{Context: item.name, Status: "unreachable", Error: appErrorMessage(err)}
+		return fleetStatusItem{Context: item.name, Status: fleetErrorStatus(err), Error: appErrorMessage(err)}
 	}
 	if err := classifyAndAuthorize(f, item.item, mqclass.OperationClusterInfo, mqclass.Target{}, ""); err != nil {
-		return fleetStatusItem{Context: item.name, Status: "unreachable", Error: appErrorMessage(err)}
+		return fleetStatusItem{Context: item.name, Status: fleetErrorStatus(err), Error: appErrorMessage(err)}
 	}
 	desc := backend.Describe()
 	caps := backend.Capabilities()
 	if err := backend.Ping(cmd.Context()); err != nil {
-		return fleetStatusItem{Context: item.name, Status: "unreachable", Error: appErrorMessage(err), Backend: desc.Backend, Cluster: desc.Cluster, Namespace: desc.Namespace, Capabilities: caps}
+		return fleetStatusItem{Context: item.name, Status: fleetErrorStatus(err), Error: appErrorMessage(err), Backend: desc.Backend, Cluster: desc.Cluster, Namespace: desc.Namespace, Capabilities: caps}
 	}
 	return fleetStatusItem{Context: item.name, Status: audit.StatusSuccess, Backend: desc.Backend, Cluster: desc.Cluster, Namespace: desc.Namespace, Capabilities: caps}
 }
@@ -188,15 +188,15 @@ func fleetStatusForContext(cmd *cobra.Command, f *cliFlags, item fleetContext) f
 func fleetTopicsForContext(cmd *cobra.Command, f *cliFlags, item fleetContext, pattern string, limit int) fleetTopicItem {
 	backend, err := buildBrokerForFleetContext(f, item)
 	if err != nil {
-		return fleetTopicItem{Context: item.name, Status: "unreachable", Error: appErrorMessage(err)}
+		return fleetTopicItem{Context: item.name, Status: fleetErrorStatus(err), Error: appErrorMessage(err)}
 	}
 	desc := backend.Describe()
 	if err := classifyAndAuthorize(f, item.item, mqclass.OperationList, mqclass.Target{Topic: pattern}, ""); err != nil {
-		return fleetTopicItem{Context: item.name, Status: "unreachable", Error: appErrorMessage(err), Backend: desc.Backend, Cluster: desc.Cluster, Namespace: desc.Namespace}
+		return fleetTopicItem{Context: item.name, Status: fleetErrorStatus(err), Error: appErrorMessage(err), Backend: desc.Backend, Cluster: desc.Cluster, Namespace: desc.Namespace}
 	}
 	topics, err := backend.ListTopics(cmd.Context(), mqgov.TopicListOptions{Pattern: pattern, Limit: limit})
 	if err != nil {
-		return fleetTopicItem{Context: item.name, Status: "unreachable", Error: appErrorMessage(err), Backend: desc.Backend, Cluster: desc.Cluster, Namespace: desc.Namespace}
+		return fleetTopicItem{Context: item.name, Status: fleetErrorStatus(err), Error: appErrorMessage(err), Backend: desc.Backend, Cluster: desc.Cluster, Namespace: desc.Namespace}
 	}
 	return fleetTopicItem{Context: item.name, Status: audit.StatusSuccess, Backend: desc.Backend, Cluster: desc.Cluster, Namespace: desc.Namespace, Topics: topics, Count: len(topics)}
 }
@@ -275,4 +275,15 @@ func fleetTopicsAudit(items []fleetTopicItem) string {
 func appErrorMessage(err error) string {
 	appErr := apperrors.AsAppError(err)
 	return string(appErr.Code) + ": " + appErr.Message
+}
+
+func fleetErrorStatus(err error) string {
+	code := apperrors.AsAppError(err).Code
+	if code == apperrors.CodeAuthorizationRequired || code == apperrors.CodeAuthFailed {
+		return "denied"
+	}
+	if code == apperrors.CodeBackendUnreachable {
+		return "unreachable"
+	}
+	return "error"
 }

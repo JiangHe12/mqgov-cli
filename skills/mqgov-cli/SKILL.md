@@ -84,7 +84,7 @@ Schema governance:
 Fleet governance:
 
 - Fleet verbs are `fleet status|topics`; both are R0 read-only aggregation across configured contexts selected by `--all` or `--contexts a,b,c`.
-- Fleet is only fan-out: each selected context still uses its own stored credentials and the same per-context R0 classify/authorize path as the equivalent single-context read. Partial failures are reported per context as `unreachable`; the command still exits 0 after completing the dashboard.
+- Fleet is only fan-out: each selected context still uses its own stored credentials and the same per-context R0 classify/authorize path as the equivalent single-context read. Partial failures are reported per context as `denied`, `unreachable`, or `error`; the command still exits 0 after completing the dashboard.
 - Never use fleet for cross-broker copy, mirror, migration, or any write path.
 
 DLQ governance:

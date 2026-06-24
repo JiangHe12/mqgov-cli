@@ -234,7 +234,7 @@ mqgov fleet status --all -o json
 mqgov fleet topics --contexts dev,staging --pattern orders -o json
 ```
 
-`fleet status` fans out `Ping`, `Describe`, and `Capabilities` across selected contexts. `fleet topics` fans out topic listing and tags every row with its source context. Select contexts with exactly one of `--all` or `--contexts a,b,c`. Fleet is R0 only: each per-context read still runs through the same R0 classification and authorization path as a single-context command, using that context's own stored credentials. Partial failures are reported per context as `unreachable` data and the command still exits 0.
+`fleet status` fans out `Ping`, `Describe`, and `Capabilities` across selected contexts. `fleet topics` fans out topic listing and tags every row with its source context. Select contexts with exactly one of `--all` or `--contexts a,b,c`. Fleet is R0 only: each per-context read still runs through the same R0 classification and authorization path as a single-context command, using that context's own stored credentials. Partial failures are reported per context as `denied`, `unreachable`, or `error` data and the command still exits 0.
 </details>
 
 <details>

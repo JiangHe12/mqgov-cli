@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/JiangHe12/opskit-core/apperrors"
+	corectx "github.com/JiangHe12/opskit-core/ctx"
 
 	"github.com/JiangHe12/mqgov-cli/internal/mqgovctx"
 )
@@ -38,8 +39,8 @@ func TestFleetStatusAllAndPartialFailure(t *testing.T) {
 	if got["dev-a"].Status != "success" || got["dev-a"].Backend != "fake" || !got["dev-a"].Capabilities.SupportsOffsets {
 		t.Fatalf("dev-a status = %+v, want reachable fake capabilities", got["dev-a"])
 	}
-	if got["bad"].Status != "unreachable" || !strings.Contains(got["bad"].Error, "NOT_IMPLEMENTED") {
-		t.Fatalf("bad status = %+v, want unreachable NotImplemented", got["bad"])
+	if got["bad"].Status != "error" || !strings.Contains(got["bad"].Error, "NOT_IMPLEMENTED") {
+		t.Fatalf("bad status = %+v, want error NotImplemented", got["bad"])
 	}
 }
 
@@ -84,6 +85,36 @@ func TestFleetUsageErrors(t *testing.T) {
 		if got := apperrors.ExitCode(err); got == 0 {
 			t.Fatalf("args %v exit = 0, want usage error; out=%s", args, out)
 		}
+	}
+}
+
+func TestFleetFailureStatuses(t *testing.T) {
+	writeFleetTestConfig(t, map[string]mqgovctx.Context{
+		"denied":      {Base: corectx.Base{Roles: map[string]string{"bob": "reader"}}, Backend: "fake"},
+		"unreachable": {Backend: "kafka", KafkaBrokers: []string{"127.0.0.1:1"}},
+		"error":       {Backend: "unknown"},
+	})
+
+	out, err := runCommandForTest(t, "-o", "json", "--operator", "alice", "--timeout", "100ms", "fleet", "status", "--contexts", "denied,unreachable")
+	if err != nil {
+		t.Fatalf("fleet status error = %v; out=%s", err, out)
+	}
+	statusItems := decodeFleetStatusItems(t, out)
+	gotStatus := fleetStatusByContext(statusItems)
+	if gotStatus["denied"].Status != "denied" || !strings.Contains(gotStatus["denied"].Error, "AUTHORIZATION_REQUIRED") {
+		t.Fatalf("denied status = %+v, want denied authorization error", gotStatus["denied"])
+	}
+	if gotStatus["unreachable"].Status != "unreachable" || !strings.Contains(gotStatus["unreachable"].Error, "BACKEND_UNREACHABLE") {
+		t.Fatalf("unreachable status = %+v, want backend unreachable", gotStatus["unreachable"])
+	}
+
+	out, err = runCommandForTest(t, "-o", "json", "fleet", "topics", "--contexts", "error")
+	if err != nil {
+		t.Fatalf("fleet topics error = %v; out=%s", err, out)
+	}
+	topicItems := decodeFleetTopicItems(t, out)
+	if len(topicItems) != 1 || topicItems[0].Status != "error" || !strings.Contains(topicItems[0].Error, "NOT_IMPLEMENTED") {
+		t.Fatalf("topic items = %+v, want error NotImplemented", topicItems)
 	}
 }
 
@@ -132,4 +163,30 @@ func fleetStatusByContext(items []fleetStatusItem) map[string]fleetStatusItem {
 		out[item.Context] = item
 	}
 	return out
+}
+
+func decodeFleetStatusItems(t *testing.T, out string) []fleetStatusItem {
+	t.Helper()
+	var payload struct {
+		Data struct {
+			Items []fleetStatusItem `json:"items"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal([]byte(out), &payload); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v; out=%s", err, out)
+	}
+	return payload.Data.Items
+}
+
+func decodeFleetTopicItems(t *testing.T, out string) []fleetTopicItem {
+	t.Helper()
+	var payload struct {
+		Data struct {
+			Items []fleetTopicItem `json:"items"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal([]byte(out), &payload); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v; out=%s", err, out)
+	}
+	return payload.Data.Items
 }

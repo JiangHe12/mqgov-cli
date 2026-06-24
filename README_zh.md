@@ -234,7 +234,7 @@ mqgov fleet status --all -o json
 mqgov fleet topics --contexts dev,staging --pattern orders -o json
 ```
 
-`fleet status` 对选中的 context 扇出 `Ping`、`Describe`、`Capabilities`。`fleet topics` 扇出 topic list,并在每行标明来源 context。context 选择必须且只能使用 `--all` 或 `--contexts a,b,c` 之一。Fleet 只有 R0 读:每个 context 的每次底层读取仍走和单 context 命令相同的 R0 分类与授权路径,并使用该 context 自己的已存凭据。部分失败会作为该 context 的 `unreachable` 数据如实返回,命令整体仍退出 0。
+`fleet status` 对选中的 context 扇出 `Ping`、`Describe`、`Capabilities`。`fleet topics` 扇出 topic list,并在每行标明来源 context。context 选择必须且只能使用 `--all` 或 `--contexts a,b,c` 之一。Fleet 只有 R0 读:每个 context 的每次底层读取仍走和单 context 命令相同的 R0 分类与授权路径,并使用该 context 自己的已存凭据。部分失败会作为该 context 的 `denied`、`unreachable` 或 `error` 数据如实返回,命令整体仍退出 0。
 </details>
 
 <details>
