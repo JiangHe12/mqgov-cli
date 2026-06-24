@@ -11,7 +11,7 @@ mqgov-cli is the governed message-broker operations CLI for AI agents: one entry
 point for **Kafka**, **RabbitMQ**, **Pulsar**, and **RocketMQ**. It provides
 backend-bound contexts, a fail-closed message-operation risk classifier
 (`mqclass`), R0-R3 authorization with protected-context escalation,
-native broker ACL management where the backend supports it, non-destructive peek/tail where the backend can guarantee it, real per-partition blast-radius previews, tamper-evident
+native broker ACL management where the backend supports it, non-destructive peek/tail where the backend can guarantee it, dead-letter-queue governance (list/peek/redrive/purge) over each broker's native DLQ model, read-only schema-registry inspection (list/describe/check), a read-only cross-broker `fleet` view that aggregates R0 reads across contexts, real per-partition blast-radius previews, tamper-evident
 fingerprint-only audit, and redaction. It is built on the shared `opskit-core`
 governance engine.
 
@@ -81,10 +81,10 @@ go mod tidy                             # must be a no-op
 ## Backends — the dumb-adapter contract
 
 - Backends implement `mqgov.Broker`; optional capabilities use the separate
-  `OffsetManager` / `PartitionManager` / `ACLManager` / `Tailer` interfaces, type-asserted
+  `OffsetManager` / `PartitionManager` / `ACLManager` / `Tailer` / `DLQManager` / `SchemaManager` interfaces, type-asserted
   and gated by `Supports*`. Unsupported capabilities fail closed with
   `NotImplemented` — never faked. Capabilities must reflect what the client
-  actually supports (e.g. RabbitMQ/RocketMQ `SupportsOffsets=false`; RabbitMQ/RocketMQ do not support non-destructive tail; Kafka, RabbitMQ, and Pulsar support ACL, RocketMQ does not).
+  actually supports (e.g. RabbitMQ/RocketMQ `SupportsOffsets=false`; RabbitMQ/RocketMQ do not support non-destructive tail; Kafka, RabbitMQ, and Pulsar support ACL, RocketMQ does not; Kafka has no native DLQ discovery so DLQ list is NotImplemented while peek/redrive/purge work on an explicit DLQ topic, RocketMQ supports only DLQ list; Kafka and Pulsar support schema, RabbitMQ and RocketMQ do not).
 - **Backends are dumb**: they only execute broker operations. All R0-R3
   authorization stays in `cmd/` + `mqclass`; a backend must never make an
   authorization decision.
@@ -117,7 +117,7 @@ go mod tidy                             # must be a no-op
 
 ## Repository Layout
 
-- `cmd/` - Cobra commands (`topic`/`group`/`message`/`acl`/`ctx`/`audit`/`install`/…) and `-o json` output contracts
+- `cmd/` - Cobra commands (`topic`/`group`/`message`/`dlq`/`acl`/`schema`/`fleet`/`ctx`/`audit`/`install`/…) and `-o json` output contracts
 - `internal/backend/{kafka,rabbitmq,pulsar,rocketmq,fake}` - broker adapters
 - `internal/mqgov` - Broker abstraction + coordinate/fingerprint types + optional capability interfaces
 - `internal/mqclass` - fail-closed message-operation risk classifier
