@@ -42,6 +42,8 @@ mqgov acl list --principal User:svc -o json
 mqgov schema list -o json
 mqgov schema describe <subject-or-topic> --version latest -o json
 mqgov schema check <subject-or-topic> --schema-file ./next.avsc --schema-type AVRO -o json
+mqgov fleet status --all -o json
+mqgov fleet topics --contexts dev,staging -o json
 ```
 
 Writes require human authorization according to risk:
@@ -78,6 +80,12 @@ Schema governance:
 - Schema verbs are `schema list|describe|check`; all are R0 and audited. `check` is a read-only compatibility check and must never register, delete, or evolve a schema.
 - Kafka uses Confluent Schema Registry when the Kafka context has `--schema-registry-url`; optional `--schema-registry-username` and `--schema-registry-password` use credstore. Pulsar uses its built-in admin REST schema endpoints and existing token/TLS settings.
 - RabbitMQ and RocketMQ return `NOT_IMPLEMENTED` for schema verbs. Audit may include subject, version, compatibility, and schema hashes, but never schema text or registry credentials.
+
+Fleet governance:
+
+- Fleet verbs are `fleet status|topics`; both are R0 read-only aggregation across configured contexts selected by `--all` or `--contexts a,b,c`.
+- Fleet is only fan-out: each selected context still uses its own stored credentials and the same per-context R0 classify/authorize path as the equivalent single-context read. Partial failures are reported per context as `unreachable`; the command still exits 0 after completing the dashboard.
+- Never use fleet for cross-broker copy, mirror, migration, or any write path.
 
 DLQ governance:
 

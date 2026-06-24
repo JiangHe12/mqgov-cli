@@ -114,6 +114,7 @@ func buildCapabilities(backendCaps mqgov.Capabilities) capabilitiesData {
 				{Noun: "acl", Verb: "grant", Risk: "R2/R3 broad", AllowFlag: "allow-destructive-acl for R3"},
 				{Noun: "acl", Verb: "revoke", Risk: "R3", AllowFlag: "allow-destructive-acl"},
 				{Noun: "schema", Verb: "list/describe/check", Risk: "R0"},
+				{Noun: "fleet", Verb: "status/topics", Risk: "R0"},
 			},
 			ContextAPIVersions: []string{"mqgov-cli.io/context/v1"},
 			AuditAPIVersions:   []string{auditAPIVersion},

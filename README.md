@@ -38,7 +38,7 @@ It's built on the shared [`opskit-core`](https://github.com/JiangHe12/opskit-cor
 | | |
 |---|---|
 | 📨 **Four brokers** | **Kafka** (franz-go), **RabbitMQ** (AMQP + management API), **Pulsar** (client + admin REST), **RocketMQ** (rocketmq-client-go/v2). One backend-agnostic governance model; pick per context or override per command. |
-| 🧱 **topic / group / message / dlq / acl / schema** | topics: list · describe · create · alter · delete · purge. consumer groups: list · lag · reset-offset. messages: non-destructive peek · tail · produce. DLQs: list · peek · redrive · purge through native broker models. ACLs: list · grant · revoke where supported. Schemas: list · describe · check where native schema registry support exists. |
+| 🧱 **topic / group / message / dlq / acl / schema / fleet** | topics: list · describe · create · alter · delete · purge. consumer groups: list · lag · reset-offset. messages: non-destructive peek · tail · produce. DLQs: list · peek · redrive · purge through native broker models. ACLs: list · grant · revoke where supported. Schemas: list · describe · check where native schema registry support exists. Fleet: read-only status and topic inventory across configured contexts. |
 | 🔐 **R0–R3 governance** | every operation is risk-classified by the fail-closed `mqclass` engine; protected contexts and internal/system topics escalate one tier; AI callers can never self-authorize. |
 | 🎯 **Real blast-radius preview** | `reset-offset --dry-run` and `purge --dry-run` compute the actual per-partition message delta from the live broker — no guessing. The preview is read-only and never mutates. |
 | 👀 **Non-destructive peek/tail** | inspect or stream messages as fingerprints without consuming them or moving any cursor (Kafka direct partition reads, Pulsar Reader, RabbitMQ get+requeue for peek only). Where a broker can't guarantee this, the operation fails closed rather than silently consuming. |
@@ -128,7 +128,7 @@ Every command is sorted into one of four **risk tiers** by the fail-closed `mqcl
 
 | Tier | What it covers | What you must provide |
 |:---:|---|---|
-| **R0** | Reads & previews (`topic list/describe`, `group list/lag`, `message peek`, `message tail`, `dlq list/peek`, `acl list`, `schema list/describe/check`, `*-dry-run`, `audit query/verify`, `doctor`) | Nothing — but it's still audited |
+| **R0** | Reads & previews (`topic list/describe`, `group list/lag`, `message peek`, `message tail`, `dlq list/peek`, `acl list`, `schema list/describe/check`, `fleet status/topics`, `*-dry-run`, `audit query/verify`, `doctor`) | Nothing — but it's still audited |
 | **R1** | Ordinary writes (`message produce`, `topic create`) | `--yes` (or an interactive confirmation) |
 | **R2** | Elevated mutations (`topic alter`, `group create/delete`, `acl grant`, produce to a **protected** topic) | `--yes` **and** a non-empty `--ticket` |
 | **R3** | Destructive / irreversible (`group reset-offset`, `topic purge`, `topic delete`, `dlq redrive`, `dlq purge`, broad `acl grant`, `acl revoke`, produce to an **internal/system** topic) | The above **plus** the exact `--allow-*` flag |
@@ -227,6 +227,17 @@ mqgov schema check <subject-or-topic> --schema-file ./next.avsc --schema-type AV
 </details>
 
 <details>
+<summary><b>fleet</b> — cross-context read-only views</summary>
+
+```bash
+mqgov fleet status --all -o json
+mqgov fleet topics --contexts dev,staging --pattern orders -o json
+```
+
+`fleet status` fans out `Ping`, `Describe`, and `Capabilities` across selected contexts. `fleet topics` fans out topic listing and tags every row with its source context. Select contexts with exactly one of `--all` or `--contexts a,b,c`. Fleet is R0 only: each per-context read still runs through the same R0 classification and authorization path as a single-context command, using that context's own stored credentials. Partial failures are reported per context as `unreachable` data and the command still exits 0.
+</details>
+
+<details>
 <summary><b>acl</b> — broker access control</summary>
 
 ```bash
@@ -291,7 +302,7 @@ mqgov version
 
 mqgov-cli is designed to be driven by autonomous agents safely:
 
-- Run `mqgov capabilities -o json` first to discover what the bound backend supports — brokers differ, don't assume (e.g. Kafka, RabbitMQ, and Pulsar support `acl` with different native models; Kafka and Pulsar support `schema`; RabbitMQ/RocketMQ have no offsets, schema registry, or tail; RocketMQ has no peek).
+- Run `mqgov capabilities -o json` first to discover what the bound backend supports — brokers differ, don't assume (e.g. Kafka, RabbitMQ, and Pulsar support `acl` with different native models; Kafka and Pulsar support `schema`; RabbitMQ/RocketMQ have no offsets, schema registry, or tail; RocketMQ has no peek). Use `fleet status --all -o json` for a read-only cross-context dashboard.
 - Use `-o json` everywhere; every command returns a stable, versioned envelope.
 - Get blast radius from `--dry-run` / `--plan`, never from your own reasoning.
 - **Never self-fill `--ticket`, `--allow-*`, or a high-risk `--yes`.** Surface the required human approval and stop.

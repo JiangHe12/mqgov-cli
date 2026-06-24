@@ -38,7 +38,7 @@
 | | |
 |---|---|
 | 📨 **四个 broker** | **Kafka**(franz-go)、**RabbitMQ**(AMQP + 管理 API)、**Pulsar**(客户端 + admin REST)、**RocketMQ**(rocketmq-client-go/v2)。一套与后端无关的治理模型;按 context 选择或按命令覆盖。 |
-| 🧱 **topic / group / message / dlq / acl / schema** | topic:list · describe · create · alter · delete · purge。消费组:list · lag · reset-offset。消息:非破坏性 peek · tail · produce。DLQ:list · peek · redrive · purge,映射各 broker 原生模型。ACL:list · grant · revoke(按后端能力开放)。Schema:list · describe · check(按原生 schema registry 能力开放)。 |
+| 🧱 **topic / group / message / dlq / acl / schema / fleet** | topic:list · describe · create · alter · delete · purge。消费组:list · lag · reset-offset。消息:非破坏性 peek · tail · produce。DLQ:list · peek · redrive · purge,映射各 broker 原生模型。ACL:list · grant · revoke(按后端能力开放)。Schema:list · describe · check(按原生 schema registry 能力开放)。Fleet:跨已配置 context 的只读状态与 topic 视图。 |
 | 🔐 **R0–R3 治理** | 每个操作由 fail-closed 的 `mqclass` 引擎分级;保护上下文与内部/系统 topic 升一档;AI 调用方永远无法自我授权。 |
 | 🎯 **真实爆炸半径预览** | `reset-offset --dry-run` 和 `purge --dry-run` 从实时 broker 计算真实的每分区消息 delta —— 不靠猜。预览只读,绝不变更。 |
 | 👀 **非破坏性 peek/tail** | 把消息以指纹形式查看或流式读取,不消费、不移动游标(Kafka 直接分区读取、Pulsar Reader、RabbitMQ 仅 peek 使用 get+requeue)。无法保证非破坏的 broker 上,操作 **失败关闭**而非静默消费。 |
@@ -128,7 +128,7 @@ mqgov audit query --since 1h -o json
 
 | 档 | 涵盖 | 你必须提供 |
 |:---:|---|---|
-| **R0** | 读与预览(`topic list/describe`、`group list/lag`、`message peek`、`message tail`、`dlq list/peek`、`acl list`、`schema list/describe/check`、`*-dry-run`、`audit query/verify`、`doctor`) | 无 —— 但仍会审计 |
+| **R0** | 读与预览(`topic list/describe`、`group list/lag`、`message peek`、`message tail`、`dlq list/peek`、`acl list`、`schema list/describe/check`、`fleet status/topics`、`*-dry-run`、`audit query/verify`、`doctor`) | 无 —— 但仍会审计 |
 | **R1** | 普通写(`message produce`、`topic create`) | `--yes`(或交互确认) |
 | **R2** | 升级变更(`topic alter`、`group create/delete`、`acl grant`、向**保护** topic 生产) | `--yes` **且**非空 `--ticket` |
 | **R3** | 破坏性 / 不可逆(`group reset-offset`、`topic purge`、`topic delete`、`dlq redrive`、`dlq purge`、宽泛 `acl grant`、`acl revoke`、向**内部/系统** topic 生产) | 以上 **再加**该操作专属的 `--allow-*` 标志 |
@@ -227,6 +227,17 @@ mqgov schema check <subject-or-topic> --schema-file ./next.avsc --schema-type AV
 </details>
 
 <details>
+<summary><b>fleet</b> —— 跨 context 只读视图</summary>
+
+```bash
+mqgov fleet status --all -o json
+mqgov fleet topics --contexts dev,staging --pattern orders -o json
+```
+
+`fleet status` 对选中的 context 扇出 `Ping`、`Describe`、`Capabilities`。`fleet topics` 扇出 topic list,并在每行标明来源 context。context 选择必须且只能使用 `--all` 或 `--contexts a,b,c` 之一。Fleet 只有 R0 读:每个 context 的每次底层读取仍走和单 context 命令相同的 R0 分类与授权路径,并使用该 context 自己的已存凭据。部分失败会作为该 context 的 `unreachable` 数据如实返回,命令整体仍退出 0。
+</details>
+
+<details>
 <summary><b>acl</b> —— broker 访问控制</summary>
 
 ```bash
@@ -291,7 +302,7 @@ mqgov version
 
 mqgov-cli 设计为可被自治 agent 安全驱动:
 
-- 先跑 `mqgov capabilities -o json` 发现绑定后端支持什么 —— broker 各异,别假设(例如 Kafka、RabbitMQ、Pulsar 都支持 `acl`,但原生模型不同;Kafka 与 Pulsar 支持 `schema`;RabbitMQ/RocketMQ 无 offset、schema registry 或 tail;RocketMQ 无 peek)。
+- 先跑 `mqgov capabilities -o json` 发现绑定后端支持什么 —— broker 各异,别假设(例如 Kafka、RabbitMQ、Pulsar 都支持 `acl`,但原生模型不同;Kafka 与 Pulsar 支持 `schema`;RabbitMQ/RocketMQ 无 offset、schema registry 或 tail;RocketMQ 无 peek)。需要跨 context 仪表盘时用只读的 `fleet status --all -o json`。
 - 处处用 `-o json`;每个命令返回稳定、带版本的信封。
 - 爆炸半径来自 `--dry-run` / `--plan`,绝不来自你自己的推理。
 - **绝不自填 `--ticket`、`--allow-*` 或高危 `--yes`。** 把所需人工审批上报并停下。
