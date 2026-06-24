@@ -21,6 +21,24 @@ func TestCapabilitiesAreHonestPartialImplementation(t *testing.T) {
 	}
 }
 
+func TestACLCapabilityFailsClosed(t *testing.T) {
+	backend := &Broker{opts: Options{Cluster: "test"}}
+
+	caps := backend.Capabilities()
+	if caps.SupportsACL {
+		t.Fatalf("SupportsACL = true, want false")
+	}
+	if contains(caps.ResourceTypes, "acl") {
+		t.Fatalf("ResourceTypes = %v, want no acl resource", caps.ResourceTypes)
+	}
+	if contains(caps.Verbs, "grant-acl") || contains(caps.Verbs, "revoke-acl") {
+		t.Fatalf("Verbs = %v, want no ACL mutation verbs", caps.Verbs)
+	}
+	if _, ok := mqgov.SupportsACL(backend); ok {
+		t.Fatalf("RocketMQ implements ACLManager; want fail-closed SupportsACL gate")
+	}
+}
+
 func TestUnsupportedGroupOperationsFailClosed(t *testing.T) {
 	backend := &Broker{}
 
@@ -52,4 +70,13 @@ func TestNewRejectsUnsupportedTLS(t *testing.T) {
 	if got := apperrors.AsAppError(err).Code; got != apperrors.CodeNotImplemented {
 		t.Fatalf("New(TLS) code = %s, want %s", got, apperrors.CodeNotImplemented)
 	}
+}
+
+func contains(items []string, want string) bool {
+	for _, item := range items {
+		if item == want {
+			return true
+		}
+	}
+	return false
 }

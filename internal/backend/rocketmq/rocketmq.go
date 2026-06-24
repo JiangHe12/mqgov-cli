@@ -77,6 +77,10 @@ func (b *Broker) Describe() mqgov.Description {
 }
 
 func (b *Broker) Capabilities() mqgov.Capabilities {
+	// RocketMQ broker ACL management stays unsupported until rocketmq-client-go/v2
+	// exposes a public, cgo-free admin API for plain_acl. The public admin.Admin
+	// interface has no ACL config methods; continuing would require Go internal
+	// packages or hand-rolled remoting commands, both of which are forbidden here.
 	return mqgov.Capabilities{
 		Backend:            "rocketmq",
 		ResourceTypes:      []string{"topic", "message", "dlq"},

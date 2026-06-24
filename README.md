@@ -59,9 +59,11 @@ It's built on the shared [`opskit-core`](https://github.com/JiangHe12/opskit-cor
 | alter partitions | ✅ | ✅ | ❌ | ❌ |
 | purge | ✅ | ✅ | ✅ | ❌ |
 | **DLQ list / peek / redrive / purge** | list ❌; explicit topic peek/redrive/purge ✅ | ✅ `{topic}-{subscription}-DLQ` | ✅ DLX queues | list ✅ `%DLQ%group`; others ❌ |
-| **ACL list / grant / revoke** | ✅ | ✅ namespace/topic permissions | ✅ user-vhost permissions | ❌ `NOT_IMPLEMENTED` |
+| **ACL list / grant / revoke** | ✅ | ✅ namespace/topic permissions | ✅ user-vhost permissions | ❌ `NOT_IMPLEMENTED`³ |
 
 ¹ RocketMQ's Go v2 `PullConsumer` enters the consumer-group lifecycle and commits offsets, so it cannot guarantee non-destructive peek/tail — mqgov fails closed instead of silently advancing offsets. ² RabbitMQ has no forward non-destructive tail because reads are consume/requeue oriented. Unsupported operations always return `NOT_IMPLEMENTED` (exit 12), never a fake success.
+
+³ RocketMQ broker ACLs live in broker-side `plain_acl.yml`, but `rocketmq-client-go/v2` does not expose a public, cgo-free admin API for reading or changing that config. mqgov does not shell out to the Java `mqadmin` tool and does not hand-roll remoting commands; manage RocketMQ ACLs out of band with broker configuration or official mqadmin until the Go client exposes a clean API.
 
 ---
 
@@ -242,7 +244,7 @@ mqgov acl revoke --principal app-role --resource-type topic --resource-name orde
   --yes --ticket <t> --allow-destructive-acl
 ```
 
-`acl list` is R0 and audited. Normal `acl grant` is R2. Broad grants (Kafka prefixed pattern, wildcard principal, wildcard resource, cluster resource, `all`, `alter`, cluster-action style operations, broad RabbitMQ regexes such as `.*`, `.+`, `.`, and `orders.*`, or Pulsar `functions`/`sources`/`sinks`/`packages`) and every `acl revoke` are R3 and require `--allow-destructive-acl`. Kafka implements broker ACLs with `literal`/`prefixed` patterns. RabbitMQ maps ACLs to native per-user, per-vhost permission regexes (`configure`, `write`, `read`) and only supports `--permission allow` with `--pattern regex`. Pulsar maps ACLs to native role permissions on namespaces or topics with actions `produce`, `consume`, `functions`, `sources`, `sinks`, and `packages`; it is allow-only and uses `--pattern literal`. RocketMQ fails closed with `NOT_IMPLEMENTED`.
+`acl list` is R0 and audited. Normal `acl grant` is R2. Broad grants (Kafka prefixed pattern, wildcard principal, wildcard resource, cluster resource, `all`, `alter`, cluster-action style operations, broad RabbitMQ regexes such as `.*`, `.+`, `.`, and `orders.*`, or Pulsar `functions`/`sources`/`sinks`/`packages`) and every `acl revoke` are R3 and require `--allow-destructive-acl`. Kafka implements broker ACLs with `literal`/`prefixed` patterns. RabbitMQ maps ACLs to native per-user, per-vhost permission regexes (`configure`, `write`, `read`) and only supports `--permission allow` with `--pattern regex`. Pulsar maps ACLs to native role permissions on namespaces or topics with actions `produce`, `consume`, `functions`, `sources`, `sinks`, and `packages`; it is allow-only and uses `--pattern literal`. RocketMQ fails closed with `NOT_IMPLEMENTED`: broker ACLs are managed through broker-side `plain_acl.yml` or the official Java `mqadmin`, because `rocketmq-client-go/v2` exposes no clean public ACL admin API.
 </details>
 
 <details>

@@ -59,9 +59,11 @@
 | alter 分区 | ✅ | ✅ | ❌ | ❌ |
 | purge | ✅ | ✅ | ✅ | ❌ |
 | **DLQ list / peek / redrive / purge** | list ❌;显式 topic peek/redrive/purge ✅ | ✅ `{topic}-{subscription}-DLQ` | ✅ DLX 队列 | list ✅ `%DLQ%group`;其他 ❌ |
-| **ACL list / grant / revoke** | ✅ | ✅ namespace/topic permissions | ✅ user-vhost permissions | ❌ `NOT_IMPLEMENTED` |
+| **ACL list / grant / revoke** | ✅ | ✅ namespace/topic permissions | ✅ user-vhost permissions | ❌ `NOT_IMPLEMENTED`³ |
 
 ¹ RocketMQ 的 Go v2 `PullConsumer` 会进入消费组生命周期并提交 offset,无法保证非破坏性 peek/tail —— mqgov 选择失败关闭,而非静默推进 offset。² RabbitMQ 没有向前的非破坏性 tail,读取语义是 consume/requeue。不支持的操作一律返回 `NOT_IMPLEMENTED`(exit 12),绝不假装成功。
+
+³ RocketMQ broker ACL 存在 broker 侧 `plain_acl.yml` 中,但 `rocketmq-client-go/v2` 没有公开、cgo-free、干净的 ACL admin API 可读写该配置。mqgov 不 shell out 到 Java `mqadmin`,也不手搓 remoting 命令;在 Go 客户端提供干净 API 前,请通过 broker 配置或官方 mqadmin 带外管理 RocketMQ ACL。
 
 ---
 
@@ -242,7 +244,7 @@ mqgov acl revoke --principal app-role --resource-type topic --resource-name orde
   --yes --ticket <t> --allow-destructive-acl
 ```
 
-`acl list` 是 R0 且会审计。普通 `acl grant` 是 R2。宽泛授权(Kafka prefixed pattern、通配 principal、通配 resource、cluster 资源、`all`、`alter`、cluster-action 类操作,`.*`、`.+`、`.`、`orders.*` 这类宽泛 RabbitMQ regex,或 Pulsar `functions`/`sources`/`sinks`/`packages`)以及所有 `acl revoke` 都是 R3,需要 `--allow-destructive-acl`。Kafka 使用 `literal`/`prefixed` broker ACL。RabbitMQ 映射到原生按 user/vhost 的权限 regex(`configure`、`write`、`read`),只支持 `--permission allow` 和 `--pattern regex`。Pulsar 映射到原生 namespace/topic 上的 role 权限,action 为 `produce`、`consume`、`functions`、`sources`、`sinks`、`packages`;只支持 allow 和 `--pattern literal`。RocketMQ 失败关闭为 `NOT_IMPLEMENTED`。
+`acl list` 是 R0 且会审计。普通 `acl grant` 是 R2。宽泛授权(Kafka prefixed pattern、通配 principal、通配 resource、cluster 资源、`all`、`alter`、cluster-action 类操作,`.*`、`.+`、`.`、`orders.*` 这类宽泛 RabbitMQ regex,或 Pulsar `functions`/`sources`/`sinks`/`packages`)以及所有 `acl revoke` 都是 R3,需要 `--allow-destructive-acl`。Kafka 使用 `literal`/`prefixed` broker ACL。RabbitMQ 映射到原生按 user/vhost 的权限 regex(`configure`、`write`、`read`),只支持 `--permission allow` 和 `--pattern regex`。Pulsar 映射到原生 namespace/topic 上的 role 权限,action 为 `produce`、`consume`、`functions`、`sources`、`sinks`、`packages`;只支持 allow 和 `--pattern literal`。RocketMQ 失败关闭为 `NOT_IMPLEMENTED`:broker ACL 需通过 broker 侧 `plain_acl.yml` 或官方 Java `mqadmin` 带外管理,因为 `rocketmq-client-go/v2` 没有公开干净的 ACL admin API。
 </details>
 
 <details>
