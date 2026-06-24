@@ -79,11 +79,15 @@ func (b *Broker) Describe() mqgov.Description {
 func (b *Broker) Capabilities() mqgov.Capabilities {
 	return mqgov.Capabilities{
 		Backend:            "rocketmq",
-		ResourceTypes:      []string{"topic", "message"},
+		ResourceTypes:      []string{"topic", "message", "dlq"},
 		Verbs:              []string{"list", "describe", "produce", "create", "delete"},
 		SupportsOffsets:    false,
 		SupportsPartitions: false,
 		SupportsACL:        false,
+		SupportsDLQList:    true,
+		SupportsDLQPeek:    false,
+		SupportsDLQRedrive: false,
+		SupportsDLQPurge:   false,
 	}
 }
 
@@ -222,6 +226,41 @@ func (b *Broker) Produce(ctx context.Context, req mqgov.MessageProduceRequest) (
 		Coordinate:  mqgov.MessageCoordinate{TopicCoordinate: req.Coordinate, Partition: partition, Offset: result.QueueOffset},
 		Fingerprint: mqgov.Fingerprints(req.Key, req.Body, 1),
 	}, nil
+}
+
+func (b *Broker) ListDLQs(ctx context.Context, opts mqgov.DLQListOptions) ([]mqgov.DLQDescription, error) {
+	topics, err := b.ListTopics(ctx, mqgov.TopicListOptions{Pattern: opts.Pattern, Limit: opts.Limit})
+	if err != nil {
+		return nil, err
+	}
+	items := make([]mqgov.DLQDescription, 0)
+	for _, topic := range topics {
+		if !strings.HasPrefix(topic.Coordinate.Topic, "%DLQ%") {
+			continue
+		}
+		group := strings.TrimPrefix(topic.Coordinate.Topic, "%DLQ%")
+		if opts.Group != "" && opts.Group != group {
+			continue
+		}
+		items = append(items, mqgov.DLQDescription{
+			Coordinate:    topic.Coordinate,
+			ConsumerGroup: group,
+			NativeModel:   "%DLQ%{consumerGroup}",
+		})
+	}
+	return items, nil
+}
+
+func (b *Broker) PeekDLQ(context.Context, mqgov.DLQPeekRequest) (mqgov.DLQPeekResult, error) {
+	return mqgov.DLQPeekResult{}, notImplemented("RocketMQ v2 client cannot provide a guaranteed non-destructive DLQ peek")
+}
+
+func (b *Broker) RedriveDLQ(context.Context, mqgov.DLQRedriveRequest) (mqgov.DLQRedriveResult, error) {
+	return mqgov.DLQRedriveResult{}, notImplemented("RocketMQ DLQ redrive requires non-destructive DLQ reads not supported by this backend")
+}
+
+func (b *Broker) PurgeDLQ(context.Context, mqgov.DLQPurgeRequest) (mqgov.DLQPurgeResult, error) {
+	return mqgov.DLQPurgeResult{}, notImplemented("RocketMQ DLQ purge is not supported by this backend")
 }
 
 func (b *Broker) topicQueues(ctx context.Context, topic string) ([]*primitive.MessageQueue, error) {

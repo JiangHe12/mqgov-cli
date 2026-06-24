@@ -121,11 +121,15 @@ func (b *Broker) Describe() mqgov.Description {
 func (b *Broker) Capabilities() mqgov.Capabilities {
 	return mqgov.Capabilities{
 		Backend:            "pulsar",
-		ResourceTypes:      []string{"topic", "group", "message", "offset", "acl"},
-		Verbs:              []string{"list", "describe", "lag", "peek", "tail", "produce", "create", "alter", "delete", "purge", "reset-offset", "grant-acl", "revoke-acl"},
+		ResourceTypes:      []string{"topic", "group", "message", "offset", "acl", "dlq"},
+		Verbs:              []string{"list", "describe", "lag", "peek", "tail", "produce", "create", "alter", "delete", "purge", "reset-offset", "grant-acl", "revoke-acl", "redrive"},
 		SupportsOffsets:    true,
 		SupportsPartitions: true,
 		SupportsACL:        true,
+		SupportsDLQList:    true,
+		SupportsDLQPeek:    true,
+		SupportsDLQRedrive: true,
+		SupportsDLQPurge:   true,
 	}
 }
 
@@ -356,6 +360,98 @@ func (b *Broker) PurgeTopic(ctx context.Context, req mqgov.TopicPurgeRequest) (m
 	}, nil
 }
 
+func (b *Broker) ListDLQs(ctx context.Context, opts mqgov.DLQListOptions) ([]mqgov.DLQDescription, error) {
+	if opts.Topic != "" && opts.Group != "" {
+		dlq := pulsarDLQName(opts.Topic, opts.Group)
+		desc, err := b.DescribeTopic(ctx, mqgov.TopicCoordinate{Topic: dlq})
+		if err != nil {
+			return nil, err
+		}
+		return []mqgov.DLQDescription{{
+			Coordinate:    desc.Coordinate,
+			SourceTopic:   opts.Topic,
+			ConsumerGroup: opts.Group,
+			NativeModel:   "{topic}-{subscription}-DLQ",
+			Messages:      pulsarTopicMessages(desc),
+		}}, nil
+	}
+	topics, err := b.ListTopics(ctx, mqgov.TopicListOptions{Pattern: opts.Pattern, Limit: opts.Limit})
+	if err != nil {
+		return nil, err
+	}
+	items := make([]mqgov.DLQDescription, 0)
+	for _, topic := range topics {
+		if !strings.HasSuffix(topic.Coordinate.Topic, "-DLQ") {
+			continue
+		}
+		source, sub := pulsarDLQParts(topic.Coordinate.Topic)
+		if opts.Topic != "" && source != opts.Topic {
+			continue
+		}
+		if opts.Group != "" && sub != opts.Group {
+			continue
+		}
+		items = append(items, mqgov.DLQDescription{
+			Coordinate:    topic.Coordinate,
+			SourceTopic:   source,
+			ConsumerGroup: sub,
+			NativeModel:   "{topic}-{subscription}-DLQ",
+			Messages:      pulsarTopicMessages(topic),
+		})
+	}
+	sort.Slice(items, func(i, j int) bool { return items[i].Coordinate.Topic < items[j].Coordinate.Topic })
+	return items, nil
+}
+
+func (b *Broker) PeekDLQ(ctx context.Context, req mqgov.DLQPeekRequest) (mqgov.DLQPeekResult, error) {
+	dlq := b.resolvePulsarDLQ(req.DLQ.Topic, req.Topic, req.Group)
+	result, err := b.Peek(ctx, mqgov.MessagePeekRequest{Coordinate: mqgov.TopicCoordinate{Cluster: req.DLQ.Cluster, Namespace: req.DLQ.Namespace, Topic: dlq}, Count: req.Count})
+	if err != nil {
+		return mqgov.DLQPeekResult{}, err
+	}
+	return mqgov.DLQPeekResult{DLQ: result.Coordinate, Count: result.Count, Messages: result.Messages}, nil
+}
+
+func (b *Broker) RedriveDLQ(ctx context.Context, req mqgov.DLQRedriveRequest) (mqgov.DLQRedriveResult, error) {
+	count := req.Count
+	if count <= 0 {
+		count = 100
+	}
+	dlq := b.resolvePulsarDLQ(req.DLQ.Topic, req.Topic, req.Group)
+	dlqCoord := mqgov.TopicCoordinate{Cluster: req.DLQ.Cluster, Namespace: req.DLQ.Namespace, Topic: dlq}
+	if req.DryRun {
+		desc, err := b.DescribeTopic(ctx, dlqCoord)
+		if err != nil {
+			return mqgov.DLQRedriveResult{}, err
+		}
+		total := pulsarTopicMessages(desc)
+		if total > int64(count) {
+			total = int64(count)
+		}
+		return mqgov.DLQRedriveResult{DLQ: dlqCoord, Target: req.Target, DryRun: true, Impact: []mqgov.PartitionImpact{{Partition: 0, Count: total}}, Total: total, Fingerprint: mqgov.ResourceFingerprints{Count: total}}, nil
+	}
+	messages, err := b.readPulsarMessages(ctx, dlq, count)
+	if err != nil {
+		return mqgov.DLQRedriveResult{}, err
+	}
+	for _, msg := range messages {
+		if _, err := b.Produce(ctx, mqgov.MessageProduceRequest{Coordinate: req.Target, Key: msg.Key, Body: msg.Body, Headers: msg.Headers}); err != nil {
+			return mqgov.DLQRedriveResult{}, err
+		}
+	}
+	total := int64(len(messages))
+	return mqgov.DLQRedriveResult{DLQ: dlqCoord, Target: req.Target, DryRun: false, Impact: []mqgov.PartitionImpact{{Partition: 0, Count: total}}, Total: total, Fingerprint: mqgov.ResourceFingerprints{Count: total}}, nil
+}
+
+func (b *Broker) PurgeDLQ(ctx context.Context, req mqgov.DLQPurgeRequest) (mqgov.DLQPurgeResult, error) {
+	dlq := b.resolvePulsarDLQ(req.DLQ.Topic, req.Topic, req.Group)
+	result, err := b.PurgeTopic(ctx, mqgov.TopicPurgeRequest{Coordinate: mqgov.TopicCoordinate{Cluster: req.DLQ.Cluster, Namespace: req.DLQ.Namespace, Topic: dlq}, DLQ: true, DryRun: req.DryRun})
+	if err != nil {
+		return mqgov.DLQPurgeResult{}, err
+	}
+	return mqgov.DLQPurgeResult{DLQ: result.Coordinate, DryRun: result.DryRun, Impact: result.Impact, Total: result.Total, Fingerprint: result.Fingerprint}, nil
+}
+
 func (b *Broker) ListACLs(ctx context.Context, filter mqgov.ACLFilter) ([]mqgov.ACLBinding, error) {
 	target, err := b.pulsarACLTarget(filter.ResourceType, filter.ResourceName, true)
 	if err != nil {
@@ -497,6 +593,34 @@ func (b *Broker) offsetPlan(ctx context.Context, req mqgov.OffsetPlanRequest) (m
 		Impact: []mqgov.PartitionImpact{{Partition: 0, From: backlog, To: target, Count: abs64(backlog - target)}},
 		Total:  abs64(backlog - target),
 	}, nil
+}
+
+func (b *Broker) readPulsarMessages(ctx context.Context, topic string, count int) ([]mqgov.Message, error) {
+	reader, err := b.client.CreateReader(pulsarclient.ReaderOptions{
+		Topic:                   b.fqn(topic),
+		StartMessageID:          pulsarclient.EarliestMessageID(),
+		StartMessageIDInclusive: true,
+		ReceiverQueueSize:       maxInt(count, 1),
+	})
+	if err != nil {
+		return nil, backendErr(err)
+	}
+	defer reader.Close()
+	out := make([]mqgov.Message, 0, count)
+	for len(out) < count && reader.HasNext() {
+		msg, err := reader.Next(ctx)
+		if err != nil {
+			return nil, backendErr(err)
+		}
+		id := msg.ID()
+		out = append(out, mqgov.Message{
+			Coordinate: mqgov.MessageCoordinate{TopicCoordinate: mqgov.TopicCoordinate{Cluster: b.opts.Cluster, Namespace: b.opts.Tenant + "/" + b.opts.Namespace, Topic: topic}, Partition: int(id.PartitionIdx()), Offset: id.EntryID()},
+			Key:        []byte(msg.Key()),
+			Body:       msg.Payload(),
+			Headers:    bytesHeaders(msg.Properties()),
+		})
+	}
+	return out, nil
 }
 
 func (b *Broker) stats(ctx context.Context, topic string) (topicStats, error) {
@@ -1016,6 +1140,45 @@ func stringHeaders(headers map[string][]byte) map[string]string {
 		out[key] = string(value)
 	}
 	return out
+}
+
+func bytesHeaders(headers map[string]string) map[string][]byte {
+	if len(headers) == 0 {
+		return nil
+	}
+	out := make(map[string][]byte, len(headers))
+	for key, value := range headers {
+		out[key] = []byte(value)
+	}
+	return out
+}
+
+func (b *Broker) resolvePulsarDLQ(dlq, topic, group string) string {
+	if topic != "" && group != "" {
+		return pulsarDLQName(topic, group)
+	}
+	return shortTopicName(dlq)
+}
+
+func pulsarDLQName(topic, group string) string {
+	return shortTopicName(topic) + "-" + group + "-DLQ"
+}
+
+func pulsarDLQParts(dlq string) (string, string) {
+	name := strings.TrimSuffix(shortTopicName(dlq), "-DLQ")
+	idx := strings.LastIndex(name, "-")
+	if idx <= 0 {
+		return name, ""
+	}
+	return name[:idx], name[idx+1:]
+}
+
+func pulsarTopicMessages(desc mqgov.TopicDescription) int64 {
+	if value := desc.Config["backlog"]; value != "" {
+		parsed, _ := strconv.ParseInt(value, 10, 64)
+		return parsed
+	}
+	return 0
 }
 
 func timeout(opts Options) time.Duration {

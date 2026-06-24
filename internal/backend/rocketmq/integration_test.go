@@ -56,6 +56,27 @@ func TestRocketMQIntegration(t *testing.T) {
 		t.Fatalf("Produce() error = %v", err)
 	}
 
+	dlqTopic := "%DLQ%" + topic + "_group"
+	dlqCoord := mqgov.TopicCoordinate{Cluster: "integration", Topic: dlqTopic}
+	defer func() { _ = backend.DeleteTopic(context.Background(), dlqCoord) }()
+	if _, err := backend.CreateTopic(ctx, mqgov.TopicCreateRequest{Coordinate: dlqCoord, Partitions: 1}); err != nil {
+		t.Fatalf("CreateTopic(DLQ) error = %v", err)
+	}
+	dlqManager, ok := mqgov.SupportsDLQ(backend)
+	if !ok {
+		t.Fatalf("SupportsDLQ() = false, want true")
+	}
+	dlqs, err := dlqManager.ListDLQs(ctx, mqgov.DLQListOptions{Group: topic + "_group"})
+	if err != nil {
+		t.Fatalf("ListDLQs() error = %v", err)
+	}
+	if len(dlqs) != 1 || dlqs[0].Coordinate.Topic != dlqTopic {
+		t.Fatalf("ListDLQs() = %+v, want %q", dlqs, dlqTopic)
+	}
+	if _, err := dlqManager.PeekDLQ(ctx, mqgov.DLQPeekRequest{DLQ: dlqCoord}); apperrors.AsAppError(err).Code != apperrors.CodeNotImplemented {
+		t.Fatalf("PeekDLQ() error = %v, want NotImplemented", err)
+	}
+
 	queue := firstQueue(t, ctx, backend, topic)
 	if _, err := backend.Peek(ctx, mqgov.MessagePeekRequest{Coordinate: coord, Partition: queue.QueueId, Offset: 0, Count: 1}); apperrors.AsAppError(err).Code != apperrors.CodeNotImplemented {
 		t.Fatalf("Peek() error = %v, want NotImplemented", err)

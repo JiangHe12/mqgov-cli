@@ -133,6 +133,51 @@ func TestKafkaIntegration(t *testing.T) {
 	if purge.Total == 0 {
 		t.Fatalf("purge total = 0, want positive impact: %+v", purge)
 	}
+
+	dlqCoord := mqgov.TopicCoordinate{Cluster: "integration", Topic: topic + ".dlq"}
+	defer func() { _ = backend.DeleteTopic(context.Background(), dlqCoord) }()
+	if _, err := backend.CreateTopic(ctx, mqgov.TopicCreateRequest{Coordinate: dlqCoord, Partitions: 1}); err != nil {
+		t.Fatalf("CreateTopic(DLQ) error = %v", err)
+	}
+	dlqProduced, err := backend.Produce(ctx, mqgov.MessageProduceRequest{Coordinate: dlqCoord, Key: []byte("dlq-k"), Body: []byte("dlq-body")})
+	if err != nil {
+		t.Fatalf("Produce(DLQ) error = %v", err)
+	}
+	dlqManager, ok := mqgov.SupportsDLQ(backend)
+	if !ok {
+		t.Fatalf("SupportsDLQ() = false, want true")
+	}
+	if _, err := dlqManager.ListDLQs(ctx, mqgov.DLQListOptions{}); apperrors.AsAppError(err).Code != apperrors.CodeNotImplemented {
+		t.Fatalf("ListDLQs() error = %v, want NotImplemented", err)
+	}
+	dlqPeek, err := dlqManager.PeekDLQ(ctx, mqgov.DLQPeekRequest{DLQ: dlqCoord, Partition: dlqProduced.Coordinate.Partition, Offset: dlqProduced.Coordinate.Offset, Count: 1})
+	if err != nil {
+		t.Fatalf("PeekDLQ() error = %v", err)
+	}
+	if dlqPeek.Count != 1 || dlqPeek.Messages[0].BodySHA256 != dlqProduced.Fingerprint.BodySHA256 {
+		t.Fatalf("PeekDLQ() = %+v, want produced fingerprint %+v", dlqPeek, dlqProduced.Fingerprint)
+	}
+	dlqPlan, err := dlqManager.RedriveDLQ(ctx, mqgov.DLQRedriveRequest{DLQ: dlqCoord, Target: coord, Count: 1, DryRun: true})
+	if err != nil {
+		t.Fatalf("RedriveDLQ(dry-run) error = %v", err)
+	}
+	if dlqPlan.Total != 1 {
+		t.Fatalf("RedriveDLQ(dry-run).Total = %d, want 1", dlqPlan.Total)
+	}
+	dlqRedriven, err := dlqManager.RedriveDLQ(ctx, mqgov.DLQRedriveRequest{DLQ: dlqCoord, Target: coord, Count: 1})
+	if err != nil {
+		t.Fatalf("RedriveDLQ() error = %v", err)
+	}
+	if dlqRedriven.Total != 1 {
+		t.Fatalf("RedriveDLQ().Total = %d, want 1", dlqRedriven.Total)
+	}
+	dlqPurge, err := dlqManager.PurgeDLQ(ctx, mqgov.DLQPurgeRequest{DLQ: dlqCoord, DryRun: true})
+	if err != nil {
+		t.Fatalf("PurgeDLQ(dry-run) error = %v", err)
+	}
+	if dlqPurge.Total != 1 {
+		t.Fatalf("PurgeDLQ(dry-run).Total = %d, want 1", dlqPurge.Total)
+	}
 	if err := backend.DeleteTopic(ctx, coord); err != nil {
 		t.Fatalf("DeleteTopic() error = %v", err)
 	}

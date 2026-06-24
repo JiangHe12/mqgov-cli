@@ -84,11 +84,15 @@ func (b *Broker) Describe() mqgov.Description {
 func (b *Broker) Capabilities() mqgov.Capabilities {
 	return mqgov.Capabilities{
 		Backend:            "rabbitmq",
-		ResourceTypes:      []string{"topic", "message", "acl"},
-		Verbs:              []string{"list", "describe", "peek", "produce", "create", "delete", "purge", "grant-acl", "revoke-acl"},
+		ResourceTypes:      []string{"topic", "message", "acl", "dlq"},
+		Verbs:              []string{"list", "describe", "peek", "produce", "create", "delete", "purge", "grant-acl", "revoke-acl", "redrive"},
 		SupportsOffsets:    false,
 		SupportsPartitions: true,
 		SupportsACL:        true,
+		SupportsDLQList:    true,
+		SupportsDLQPeek:    true,
+		SupportsDLQRedrive: true,
+		SupportsDLQPurge:   true,
 	}
 }
 
@@ -237,6 +241,110 @@ func (b *Broker) PurgeTopic(ctx context.Context, req mqgov.TopicPurgeRequest) (m
 	}, nil
 }
 
+func (b *Broker) ListDLQs(ctx context.Context, opts mqgov.DLQListOptions) ([]mqgov.DLQDescription, error) {
+	queues, err := b.listQueues(ctx)
+	if err != nil {
+		return nil, err
+	}
+	sources := rabbitMQDLQSources(queues)
+	items := make([]mqgov.DLQDescription, 0)
+	for _, queue := range queues {
+		if opts.Pattern != "" && opts.Pattern != queue.Name {
+			continue
+		}
+		if opts.Topic != "" && opts.Topic != queue.Name {
+			continue
+		}
+		source := sources[queue.Name]
+		if source == "" && rabbitMQDLQByName(queue.Name) {
+			source = rabbitMQSourceQueue(queue.Name)
+		}
+		if source == "" {
+			continue
+		}
+		items = append(items, mqgov.DLQDescription{
+			Coordinate:  mqgov.TopicCoordinate{Cluster: b.opts.Cluster, Namespace: b.vhost(), Topic: queue.Name},
+			SourceTopic: source,
+			NativeModel: "dead-letter-exchange queue",
+			Messages:    int64(queue.Messages),
+		})
+	}
+	sort.Slice(items, func(i, j int) bool { return items[i].Coordinate.Topic < items[j].Coordinate.Topic })
+	return items, nil
+}
+
+func (b *Broker) PeekDLQ(ctx context.Context, req mqgov.DLQPeekRequest) (mqgov.DLQPeekResult, error) {
+	result, err := b.Peek(ctx, mqgov.MessagePeekRequest{Coordinate: req.DLQ, Count: req.Count})
+	if err != nil {
+		return mqgov.DLQPeekResult{}, err
+	}
+	return mqgov.DLQPeekResult{DLQ: req.DLQ, Count: result.Count, Messages: result.Messages}, nil
+}
+
+func (b *Broker) RedriveDLQ(ctx context.Context, req mqgov.DLQRedriveRequest) (mqgov.DLQRedriveResult, error) {
+	count := req.Count
+	if count <= 0 {
+		count = 100
+	}
+	if req.DryRun {
+		queue, err := b.inspectQueue(ctx, req.DLQ.Topic)
+		if err != nil {
+			return mqgov.DLQRedriveResult{}, err
+		}
+		total := int64(queue.Messages)
+		if total > int64(count) {
+			total = int64(count)
+		}
+		return mqgov.DLQRedriveResult{DLQ: req.DLQ, Target: req.Target, DryRun: true, Impact: []mqgov.PartitionImpact{{Partition: 0, Count: total}}, Total: total, Fingerprint: mqgov.ResourceFingerprints{Count: total}}, nil
+	}
+	total := int64(0)
+	_, err := withChannel(ctx, b, func(ch *amqp.Channel) (struct{}, error) {
+		if err := ch.Confirm(false); err != nil {
+			return struct{}{}, err
+		}
+		returns := ch.NotifyReturn(make(chan amqp.Return, 1))
+		for int(total) < count {
+			msg, ok, err := ch.Get(req.DLQ.Topic, false)
+			if err != nil {
+				return struct{}{}, err
+			}
+			if !ok {
+				return struct{}{}, nil
+			}
+			err = publishConfirmed(ctx, ch, returns, req.Target.Topic, amqp.Publishing{
+				DeliveryMode: amqp.Persistent,
+				Headers:      msg.Headers,
+				Body:         msg.Body,
+			})
+			if err != nil {
+				_ = msg.Nack(false, true)
+				return struct{}{}, err
+			}
+			if err := msg.Ack(false); err != nil {
+				return struct{}{}, err
+			}
+			total++
+		}
+		return struct{}{}, nil
+	})
+	if err != nil {
+		var appErr *apperrors.AppError
+		if errors.As(err, &appErr) {
+			return mqgov.DLQRedriveResult{}, err
+		}
+		return mqgov.DLQRedriveResult{}, classifyAMQPError(err)
+	}
+	return mqgov.DLQRedriveResult{DLQ: req.DLQ, Target: req.Target, DryRun: false, Impact: []mqgov.PartitionImpact{{Partition: 0, Count: total}}, Total: total, Fingerprint: mqgov.ResourceFingerprints{Count: total}}, nil
+}
+
+func (b *Broker) PurgeDLQ(ctx context.Context, req mqgov.DLQPurgeRequest) (mqgov.DLQPurgeResult, error) {
+	result, err := b.PurgeTopic(ctx, mqgov.TopicPurgeRequest{Coordinate: req.DLQ, DLQ: true, DryRun: req.DryRun})
+	if err != nil {
+		return mqgov.DLQPurgeResult{}, err
+	}
+	return mqgov.DLQPurgeResult{DLQ: req.DLQ, DryRun: result.DryRun, Impact: result.Impact, Total: result.Total, Fingerprint: result.Fingerprint}, nil
+}
+
 func (b *Broker) dial() (*amqp.Connection, error) {
 	if b.tlsConfig != nil {
 		return amqp.DialTLS(b.amqpURL, b.tlsConfig)
@@ -266,6 +374,52 @@ func withChannel[T any](ctx context.Context, b *Broker, fn func(*amqp.Channel) (
 	}
 }
 
+func publishConfirmed(ctx context.Context, ch *amqp.Channel, returns <-chan amqp.Return, target string, publishing amqp.Publishing) error {
+	drainReturns(returns)
+	confirm, err := ch.PublishWithDeferredConfirmWithContext(ctx, "", target, true, false, publishing)
+	if err != nil {
+		return err
+	}
+	if confirm == nil {
+		return apperrors.New(apperrors.CodeBackendError, "RabbitMQ publisher confirm was not enabled", nil)
+	}
+	for {
+		select {
+		case ret := <-returns:
+			return unroutableRedriveErr(ret)
+		case <-confirm.Done():
+			if !confirm.Acked() {
+				return apperrors.New(apperrors.CodeBackendError, "RabbitMQ redrive publish was not confirmed", nil)
+			}
+			select {
+			case ret := <-returns:
+				return unroutableRedriveErr(ret)
+			default:
+				return nil
+			}
+		case <-ctx.Done():
+			return apperrors.New(apperrors.CodeBackendUnreachable, "RabbitMQ redrive publish confirmation timed out", ctx.Err())
+		}
+	}
+}
+
+func drainReturns(returns <-chan amqp.Return) {
+	for {
+		select {
+		case <-returns:
+		default:
+			return
+		}
+	}
+}
+
+func unroutableRedriveErr(ret amqp.Return) error {
+	if ret.Exchange == "" {
+		return apperrors.New(apperrors.CodeResourceNotFound, "RabbitMQ redrive target queue not found", fmt.Errorf("rabbitmq publish returned: %s", ret.ReplyText))
+	}
+	return apperrors.New(apperrors.CodeBackendError, "RabbitMQ redrive publish was returned unroutable", fmt.Errorf("rabbitmq publish returned: %s", ret.ReplyText))
+}
+
 func (b *Broker) inspectQueue(ctx context.Context, name string) (amqp.Queue, error) {
 	queue, err := withChannel(ctx, b, func(ch *amqp.Channel) (amqp.Queue, error) {
 		return ch.QueueDeclarePassive(name, true, false, false, false, nil)
@@ -277,9 +431,10 @@ func (b *Broker) inspectQueue(ctx context.Context, name string) (amqp.Queue, err
 }
 
 type managementQueue struct {
-	Name      string `json:"name"`
-	Messages  int    `json:"messages_ready"`
-	Consumers int    `json:"consumers"`
+	Name      string         `json:"name"`
+	Messages  int            `json:"messages_ready"`
+	Consumers int            `json:"consumers"`
+	Arguments map[string]any `json:"arguments"`
 }
 
 type rabbitMQPermission struct {
@@ -475,6 +630,35 @@ func rabbitMQACLBindings(permission rabbitMQPermission, filter mqgov.ACLFilter) 
 		}
 	}
 	return out
+}
+
+func rabbitMQDLQSources(queues []managementQueue) map[string]string {
+	out := make(map[string]string)
+	for _, queue := range queues {
+		if queue.Arguments == nil {
+			continue
+		}
+		routingKey, _ := queue.Arguments["x-dead-letter-routing-key"].(string)
+		if routingKey != "" {
+			out[routingKey] = queue.Name
+		}
+	}
+	return out
+}
+
+func rabbitMQDLQByName(name string) bool {
+	lower := strings.ToLower(name)
+	return strings.HasSuffix(lower, ".dlq") || strings.HasSuffix(lower, "-dlq") || strings.HasSuffix(lower, "_dlq")
+}
+
+func rabbitMQSourceQueue(name string) string {
+	lower := strings.ToLower(name)
+	for _, suffix := range []string{".dlq", "-dlq", "_dlq"} {
+		if strings.HasSuffix(lower, suffix) {
+			return name[:len(name)-len(suffix)]
+		}
+	}
+	return ""
 }
 
 func rabbitMQACLMatches(binding mqgov.ACLBinding, filter mqgov.ACLFilter) bool {

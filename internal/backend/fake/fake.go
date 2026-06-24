@@ -40,6 +40,17 @@ func New(cluster, namespace string) *Broker {
 		Partitions: 3,
 		Config:     map[string]string{"retention.ms": "60000"},
 	}}
+	b.topics["orders.dlq"] = &topicState{
+		desc: mqgov.TopicDescription{
+			Coordinate: mqgov.TopicCoordinate{Cluster: cluster, Namespace: namespace, Topic: "orders.dlq"},
+			Partitions: 1,
+		},
+		messages: []mqgov.Message{{
+			Coordinate: mqgov.MessageCoordinate{TopicCoordinate: mqgov.TopicCoordinate{Cluster: cluster, Namespace: namespace, Topic: "orders.dlq"}},
+			Key:        []byte("dlq-key"),
+			Body:       []byte("dlq-body"),
+		}},
+	}
 	b.topics["payments"] = &topicState{desc: mqgov.TopicDescription{
 		Coordinate: mqgov.TopicCoordinate{Cluster: cluster, Namespace: namespace, Topic: "payments"},
 		Partitions: 2,
@@ -65,11 +76,15 @@ func (b *Broker) Describe() mqgov.Description {
 func (b *Broker) Capabilities() mqgov.Capabilities {
 	return mqgov.Capabilities{
 		Backend:            "fake",
-		ResourceTypes:      []string{"topic", "group", "message", "offset"},
-		Verbs:              []string{"list", "describe", "lag", "peek", "produce", "create", "alter", "delete", "purge", "reset-offset"},
+		ResourceTypes:      []string{"topic", "group", "message", "offset", "dlq"},
+		Verbs:              []string{"list", "describe", "lag", "peek", "produce", "create", "alter", "delete", "purge", "reset-offset", "redrive"},
 		SupportsOffsets:    true,
 		SupportsPartitions: true,
 		SupportsACL:        false,
+		SupportsDLQList:    true,
+		SupportsDLQPeek:    true,
+		SupportsDLQRedrive: true,
+		SupportsDLQPurge:   true,
 	}
 }
 
@@ -234,6 +249,104 @@ func (b *Broker) PurgeTopic(_ context.Context, req mqgov.TopicPurgeRequest) (mqg
 		DLQ:         req.DLQ,
 		DryRun:      req.DryRun,
 		Impact:      impact,
+		Total:       total,
+		Fingerprint: mqgov.ResourceFingerprints{Count: total},
+	}, nil
+}
+
+func (b *Broker) ListDLQs(_ context.Context, opts mqgov.DLQListOptions) ([]mqgov.DLQDescription, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	items := make([]mqgov.DLQDescription, 0)
+	for name, state := range b.topics {
+		if opts.Pattern != "" && opts.Pattern != name {
+			continue
+		}
+		if opts.Topic != "" && opts.Topic+".dlq" != name && opts.Topic != name {
+			continue
+		}
+		if name == "orders.dlq" {
+			items = append(items, mqgov.DLQDescription{
+				Coordinate:  state.desc.Coordinate,
+				SourceTopic: "orders",
+				NativeModel: "fake-topic",
+				Messages:    int64(len(state.messages)),
+			})
+		}
+	}
+	sort.Slice(items, func(i, j int) bool { return items[i].Coordinate.Topic < items[j].Coordinate.Topic })
+	return items, nil
+}
+
+func (b *Broker) PeekDLQ(_ context.Context, req mqgov.DLQPeekRequest) (mqgov.DLQPeekResult, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	state, ok := b.topics[req.DLQ.Topic]
+	if !ok {
+		return mqgov.DLQPeekResult{}, apperrors.New(apperrors.CodeResourceNotFound, "DLQ not found", nil)
+	}
+	count := req.Count
+	if count <= 0 {
+		count = 1
+	}
+	msgs := make([]mqgov.MessageFingerprint, 0, count)
+	for i, msg := range state.messages {
+		if len(msgs) >= count {
+			break
+		}
+		msgs = append(msgs, mqgov.FingerprintMessage(0, int64(i), msg.Key, msg.Body))
+	}
+	return mqgov.DLQPeekResult{DLQ: req.DLQ, Count: len(msgs), Messages: msgs}, nil
+}
+
+func (b *Broker) RedriveDLQ(_ context.Context, req mqgov.DLQRedriveRequest) (mqgov.DLQRedriveResult, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	dlq, ok := b.topics[req.DLQ.Topic]
+	if !ok {
+		return mqgov.DLQRedriveResult{}, apperrors.New(apperrors.CodeResourceNotFound, "DLQ not found", nil)
+	}
+	target, ok := b.topics[req.Target.Topic]
+	if !ok {
+		return mqgov.DLQRedriveResult{}, apperrors.New(apperrors.CodeResourceNotFound, "target topic not found", nil)
+	}
+	limit := req.Count
+	if limit <= 0 || limit > len(dlq.messages) {
+		limit = len(dlq.messages)
+	}
+	if !req.DryRun {
+		for _, msg := range dlq.messages[:limit] {
+			offset := int64(len(target.messages))
+			target.messages = append(target.messages, mqgov.Message{Coordinate: mqgov.MessageCoordinate{TopicCoordinate: req.Target, Offset: offset}, Key: msg.Key, Body: msg.Body, Headers: msg.Headers})
+		}
+		dlq.messages = dlq.messages[limit:]
+	}
+	total := int64(limit)
+	return mqgov.DLQRedriveResult{
+		DLQ:         req.DLQ,
+		Target:      req.Target,
+		DryRun:      req.DryRun,
+		Impact:      []mqgov.PartitionImpact{{Partition: 0, Count: total}},
+		Total:       total,
+		Fingerprint: mqgov.ResourceFingerprints{Count: total},
+	}, nil
+}
+
+func (b *Broker) PurgeDLQ(_ context.Context, req mqgov.DLQPurgeRequest) (mqgov.DLQPurgeResult, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	state, ok := b.topics[req.DLQ.Topic]
+	if !ok {
+		return mqgov.DLQPurgeResult{}, apperrors.New(apperrors.CodeResourceNotFound, "DLQ not found", nil)
+	}
+	total := int64(len(state.messages))
+	if !req.DryRun {
+		state.messages = nil
+	}
+	return mqgov.DLQPurgeResult{
+		DLQ:         req.DLQ,
+		DryRun:      req.DryRun,
+		Impact:      []mqgov.PartitionImpact{{Partition: 0, Count: total}},
 		Total:       total,
 		Fingerprint: mqgov.ResourceFingerprints{Count: total},
 	}, nil

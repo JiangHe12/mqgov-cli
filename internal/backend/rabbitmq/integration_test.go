@@ -15,6 +15,10 @@ import (
 	"testing"
 	"time"
 
+	amqp "github.com/rabbitmq/amqp091-go"
+
+	"github.com/JiangHe12/opskit-core/apperrors"
+
 	"github.com/JiangHe12/mqgov-cli/internal/mqgov"
 )
 
@@ -156,12 +160,123 @@ func TestRabbitMQIntegration(t *testing.T) {
 	if got := messageCount(t, desc); got != 0 {
 		t.Fatalf("messages after purge = %d, want 0", got)
 	}
+
+	dlq := queue + ".dlq"
+	source := queue + ".source"
+	sourceCoord := mqgov.TopicCoordinate{Cluster: "integration", Namespace: "/", Topic: source}
+	dlqCoord := mqgov.TopicCoordinate{Cluster: "integration", Namespace: "/", Topic: dlq}
+	defer func() { _ = backend.DeleteTopic(context.Background(), sourceCoord) }()
+	defer func() { _ = backend.DeleteTopic(context.Background(), dlqCoord) }()
+	declareRabbitMQDLXQueues(t, ctx, backend, source, dlq)
+	producedDLQ, err := backend.Produce(ctx, mqgov.MessageProduceRequest{Coordinate: sourceCoord, Body: []byte("dead")})
+	if err != nil {
+		t.Fatalf("Produce(source for DLQ) error = %v", err)
+	}
+	deadLetterOne(t, ctx, backend, source)
+	waitRabbitMQMessages(t, ctx, backend, dlqCoord, 1)
+	dlqManager, ok := mqgov.SupportsDLQ(backend)
+	if !ok {
+		t.Fatalf("SupportsDLQ() = false, want true")
+	}
+	dlqs, err := dlqManager.ListDLQs(ctx, mqgov.DLQListOptions{Pattern: dlq})
+	if err != nil {
+		t.Fatalf("ListDLQs() error = %v", err)
+	}
+	if len(dlqs) != 1 || dlqs[0].Coordinate.Topic != dlq {
+		t.Fatalf("ListDLQs() = %+v, want %q", dlqs, dlq)
+	}
+	dlqPeek, err := dlqManager.PeekDLQ(ctx, mqgov.DLQPeekRequest{DLQ: dlqCoord, Count: 1})
+	if err != nil {
+		t.Fatalf("PeekDLQ() error = %v", err)
+	}
+	if dlqPeek.Count != 1 || dlqPeek.Messages[0].BodySHA256 != producedDLQ.Fingerprint.BodySHA256 {
+		t.Fatalf("PeekDLQ() = %+v, want %+v", dlqPeek, producedDLQ.Fingerprint)
+	}
+	redrivePlan, err := dlqManager.RedriveDLQ(ctx, mqgov.DLQRedriveRequest{DLQ: dlqCoord, Target: coord, Count: 1, DryRun: true})
+	if err != nil {
+		t.Fatalf("RedriveDLQ(dry-run) error = %v", err)
+	}
+	if redrivePlan.Total != 1 {
+		t.Fatalf("RedriveDLQ(dry-run).Total = %d, want 1", redrivePlan.Total)
+	}
+	missingTarget := mqgov.TopicCoordinate{Cluster: "integration", Namespace: "/", Topic: queue + ".missing-target"}
+	if _, err := dlqManager.RedriveDLQ(ctx, mqgov.DLQRedriveRequest{DLQ: dlqCoord, Target: missingTarget, Count: 1}); apperrors.AsAppError(err).Code != apperrors.CodeResourceNotFound {
+		t.Fatalf("RedriveDLQ(missing target) error = %v, want ResourceNotFound", err)
+	}
+	waitRabbitMQMessages(t, ctx, backend, dlqCoord, 1)
+	redriven, err := dlqManager.RedriveDLQ(ctx, mqgov.DLQRedriveRequest{DLQ: dlqCoord, Target: coord, Count: 1})
+	if err != nil {
+		t.Fatalf("RedriveDLQ() error = %v", err)
+	}
+	if redriven.Total != 1 {
+		t.Fatalf("RedriveDLQ().Total = %d, want 1", redriven.Total)
+	}
+	waitRabbitMQMessages(t, ctx, backend, dlqCoord, 0)
+	waitRabbitMQMessages(t, ctx, backend, coord, 1)
+	if purgeDLQ, err := dlqManager.PurgeDLQ(ctx, mqgov.DLQPurgeRequest{DLQ: dlqCoord, DryRun: true}); err != nil {
+		t.Fatalf("PurgeDLQ(dry-run) error = %v", err)
+	} else if purgeDLQ.Total != 0 {
+		t.Fatalf("PurgeDLQ(dry-run).Total = %d, want 0", purgeDLQ.Total)
+	}
 	if err := backend.DeleteTopic(ctx, coord); err != nil {
 		t.Fatalf("DeleteTopic() error = %v", err)
 	}
 	if _, err := backend.DescribeTopic(ctx, coord); err == nil {
 		t.Fatal("DescribeTopic(deleted) error = nil, want not found")
 	}
+}
+
+func declareRabbitMQDLXQueues(t *testing.T, ctx context.Context, backend *Broker, source, dlq string) {
+	t.Helper()
+	_, err := withChannel(ctx, backend, func(ch *amqp.Channel) (struct{}, error) {
+		if err := ch.ExchangeDeclare(source+".dlx", "direct", true, false, false, false, nil); err != nil {
+			return struct{}{}, err
+		}
+		if _, err := ch.QueueDeclare(dlq, true, false, false, false, amqp.Table{"x-dead-letter-exchange": source + ".dlx"}); err != nil {
+			return struct{}{}, err
+		}
+		if err := ch.QueueBind(dlq, dlq, source+".dlx", false, nil); err != nil {
+			return struct{}{}, err
+		}
+		_, err := ch.QueueDeclare(source, true, false, false, false, amqp.Table{"x-dead-letter-exchange": source + ".dlx", "x-dead-letter-routing-key": dlq})
+		return struct{}{}, err
+	})
+	if err != nil {
+		t.Fatalf("declare DLX queues error = %v", err)
+	}
+}
+
+func deadLetterOne(t *testing.T, ctx context.Context, backend *Broker, queue string) {
+	t.Helper()
+	_, err := withChannel(ctx, backend, func(ch *amqp.Channel) (struct{}, error) {
+		msg, ok, err := ch.Get(queue, false)
+		if err != nil {
+			return struct{}{}, err
+		}
+		if !ok {
+			return struct{}{}, fmt.Errorf("source queue %s empty", queue)
+		}
+		return struct{}{}, msg.Nack(false, false)
+	})
+	if err != nil {
+		t.Fatalf("deadLetterOne() error = %v", err)
+	}
+}
+
+func waitRabbitMQMessages(t *testing.T, ctx context.Context, backend *Broker, coord mqgov.TopicCoordinate, want int) {
+	t.Helper()
+	var last int
+	for range 20 {
+		desc, err := backend.DescribeTopic(ctx, coord)
+		if err == nil {
+			last = messageCount(t, desc)
+			if last == want {
+				return
+			}
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+	t.Fatalf("queue %s messages = %d, want %d", coord.Topic, last, want)
 }
 
 func messageCount(t *testing.T, desc mqgov.TopicDescription) int {

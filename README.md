@@ -4,7 +4,7 @@
 
 **Governed message-broker operations for humans _and_ AI agents.**
 
-One safe command line for **Kafka**, **RabbitMQ**, **Pulsar**, and **RocketMQ** — list, describe, peek, tail, produce, reset offsets, inspect ACLs, purge, and delete topics without ever fat-fingering production or silently draining a queue.
+One safe command line for **Kafka**, **RabbitMQ**, **Pulsar**, and **RocketMQ** — list, describe, peek, tail, produce, govern DLQs, reset offsets, inspect ACLs, purge, and delete topics without ever fat-fingering production or silently draining a queue.
 
 [![npm version](https://img.shields.io/npm/v/mqgov-cli.svg)](https://www.npmjs.com/package/mqgov-cli)
 [![CI](https://github.com/JiangHe12/mqgov-cli/actions/workflows/ci.yml/badge.svg)](https://github.com/JiangHe12/mqgov-cli/actions/workflows/ci.yml)
@@ -38,7 +38,7 @@ It's built on the shared [`opskit-core`](https://github.com/JiangHe12/opskit-cor
 | | |
 |---|---|
 | 📨 **Four brokers** | **Kafka** (franz-go), **RabbitMQ** (AMQP + management API), **Pulsar** (client + admin REST), **RocketMQ** (rocketmq-client-go/v2). One backend-agnostic governance model; pick per context or override per command. |
-| 🧱 **topic / group / message / acl** | topics: list · describe · create · alter · delete · purge. consumer groups: list · lag · reset-offset. messages: non-destructive peek · tail · produce. ACLs: list · grant · revoke where supported. |
+| 🧱 **topic / group / message / dlq / acl** | topics: list · describe · create · alter · delete · purge. consumer groups: list · lag · reset-offset. messages: non-destructive peek · tail · produce. DLQs: list · peek · redrive · purge through native broker models. ACLs: list · grant · revoke where supported. |
 | 🔐 **R0–R3 governance** | every operation is risk-classified by the fail-closed `mqclass` engine; protected contexts and internal/system topics escalate one tier; AI callers can never self-authorize. |
 | 🎯 **Real blast-radius preview** | `reset-offset --dry-run` and `purge --dry-run` compute the actual per-partition message delta from the live broker — no guessing. The preview is read-only and never mutates. |
 | 👀 **Non-destructive peek/tail** | inspect or stream messages as fingerprints without consuming them or moving any cursor (Kafka direct partition reads, Pulsar Reader, RabbitMQ get+requeue for peek only). Where a broker can't guarantee this, the operation fails closed rather than silently consuming. |
@@ -58,6 +58,7 @@ It's built on the shared [`opskit-core`](https://github.com/JiangHe12/opskit-cor
 | **offset lag / reset** | ✅ | ✅ (cursor) | ❌ (no offsets) | ❌ |
 | alter partitions | ✅ | ✅ | ❌ | ❌ |
 | purge | ✅ | ✅ | ✅ | ❌ |
+| **DLQ list / peek / redrive / purge** | list ❌; explicit topic peek/redrive/purge ✅ | ✅ `{topic}-{subscription}-DLQ` | ✅ DLX queues | list ✅ `%DLQ%group`; others ❌ |
 | **ACL list / grant / revoke** | ✅ | ✅ namespace/topic permissions | ✅ user-vhost permissions | ❌ `NOT_IMPLEMENTED` |
 
 ¹ RocketMQ's Go v2 `PullConsumer` enters the consumer-group lifecycle and commits offsets, so it cannot guarantee non-destructive peek/tail — mqgov fails closed instead of silently advancing offsets. ² RabbitMQ has no forward non-destructive tail because reads are consume/requeue oriented. Unsupported operations always return `NOT_IMPLEMENTED` (exit 12), never a fake success.
@@ -124,10 +125,10 @@ Every command is sorted into one of four **risk tiers** by the fail-closed `mqcl
 
 | Tier | What it covers | What you must provide |
 |:---:|---|---|
-| **R0** | Reads & previews (`topic list/describe`, `group list/lag`, `message peek`, `message tail`, `acl list`, `*-dry-run`, `audit query/verify`, `doctor`) | Nothing — but it's still audited |
+| **R0** | Reads & previews (`topic list/describe`, `group list/lag`, `message peek`, `message tail`, `dlq list/peek`, `acl list`, `*-dry-run`, `audit query/verify`, `doctor`) | Nothing — but it's still audited |
 | **R1** | Ordinary writes (`message produce`, `topic create`) | `--yes` (or an interactive confirmation) |
 | **R2** | Elevated mutations (`topic alter`, `group create/delete`, `acl grant`, produce to a **protected** topic) | `--yes` **and** a non-empty `--ticket` |
-| **R3** | Destructive / irreversible (`group reset-offset`, `topic purge`, `topic delete`, broad `acl grant`, `acl revoke`, produce to an **internal/system** topic) | The above **plus** the exact `--allow-*` flag |
+| **R3** | Destructive / irreversible (`group reset-offset`, `topic purge`, `topic delete`, `dlq redrive`, `dlq purge`, broad `acl grant`, `acl revoke`, produce to an **internal/system** topic) | The above **plus** the exact `--allow-*` flag |
 
 The R3 allow flags: `--allow-offset-reset`, `--allow-topic-purge`, `--allow-topic-delete`, `--allow-destructive-acl`, `--allow-internal-produce`.
 
@@ -191,6 +192,23 @@ mqgov message produce <topic> [--key <k>] [--body <text>] --yes                 
 ```
 
 `peek` and `tail` never consume a message or move a cursor, and return only sha256 fingerprints (`keySha256`, `bodySha256`, size, optional timestamp) — never the body. `tail` is bounded by `--max-messages` and `--timeout`; `--follow` streams new messages only until those bounds or cancellation. Tail is supported by Kafka and Pulsar. On RabbitMQ and RocketMQ, `tail` fails closed (`NOT_IMPLEMENTED`); on RocketMQ, `peek` also fails closed.
+</details>
+
+<details>
+<summary><b>dlq</b> — dead-letter queue governance</summary>
+
+```bash
+mqgov dlq list [--topic <source-or-dlq>] [--group <group-or-sub>] [--pattern <name|glob>] -o json     # R0
+mqgov dlq peek <dlq> [--topic <source>] [--group <group-or-sub>] [--count N] -o json                   # R0, fingerprints only
+mqgov dlq redrive <dlq> --target <live-topic> [--count N] --dry-run -o json                            # R0 preview
+mqgov dlq redrive <dlq> --target <live-topic> [--count N] --yes --ticket <t> --allow-internal-produce  # R3
+mqgov dlq purge <dlq> --dry-run -o json                                                                 # R0 preview
+mqgov dlq purge <dlq> --yes --ticket <t> --allow-topic-purge                                           # R3
+```
+
+DLQ mapping is backend-native and honest: RocketMQ lists `%DLQ%{consumerGroup}` topics only; RabbitMQ treats DLQs as ordinary queues fed by a dead-letter exchange; Kafka has no native DLQ and never auto-discovers one, so use an explicit DLQ topic for peek/redrive/purge; Pulsar uses `{topic}-{subscription}-DLQ`. Unsupported verbs return `NOT_IMPLEMENTED`.
+
+Redrive is governed as internal produce: dry-run is a read-only preview and real execution requires `--allow-internal-produce`. Audit remains fingerprint/count-only and never stores message body, key, or headers.
 </details>
 
 <details>

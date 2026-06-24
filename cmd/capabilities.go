@@ -28,6 +28,10 @@ type capBackend struct {
 	SupportsOffsets    bool     `json:"supportsOffsets"`
 	SupportsPartitions bool     `json:"supportsPartitions"`
 	SupportsACL        bool     `json:"supportsAcl"`
+	SupportsDLQList    bool     `json:"supportsDlqList"`
+	SupportsDLQPeek    bool     `json:"supportsDlqPeek"`
+	SupportsDLQRedrive bool     `json:"supportsDlqRedrive"`
+	SupportsDLQPurge   bool     `json:"supportsDlqPurge"`
 }
 
 type capSupported struct {
@@ -82,6 +86,10 @@ func buildCapabilities(backendCaps mqgov.Capabilities) capabilitiesData {
 			SupportsOffsets:    backendCaps.SupportsOffsets,
 			SupportsPartitions: backendCaps.SupportsPartitions,
 			SupportsACL:        backendCaps.SupportsACL,
+			SupportsDLQList:    backendCaps.SupportsDLQList,
+			SupportsDLQPeek:    backendCaps.SupportsDLQPeek,
+			SupportsDLQRedrive: backendCaps.SupportsDLQRedrive,
+			SupportsDLQPurge:   backendCaps.SupportsDLQPurge,
 		},
 		Supported: capSupported{
 			Commands: []capCommand{
@@ -97,6 +105,9 @@ func buildCapabilities(backendCaps mqgov.Capabilities) capabilitiesData {
 				{Noun: "message", Verb: "tail", Risk: "R0"},
 				{Noun: "message", Verb: "produce", Risk: "R1/R2 protected"},
 				{Noun: "message", Verb: "produce internal/system", Risk: "R3", AllowFlag: "allow-internal-produce"},
+				{Noun: "dlq", Verb: "list/peek", Risk: "R0"},
+				{Noun: "dlq", Verb: "redrive", Risk: "R3", AllowFlag: "allow-internal-produce"},
+				{Noun: "dlq", Verb: "purge", Risk: "R3", AllowFlag: "allow-topic-purge"},
 				{Noun: "acl", Verb: "list", Risk: "R0"},
 				{Noun: "acl", Verb: "grant", Risk: "R2/R3 broad", AllowFlag: "allow-destructive-acl for R3"},
 				{Noun: "acl", Verb: "revoke", Risk: "R3", AllowFlag: "allow-destructive-acl"},

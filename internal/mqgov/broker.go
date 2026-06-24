@@ -62,6 +62,72 @@ type TopicPurgeResult struct {
 	Fingerprint ResourceFingerprints `json:"fingerprint"`
 }
 
+type DLQListOptions struct {
+	Namespace string `json:"namespace,omitempty"`
+	Topic     string `json:"topic,omitempty"`
+	Group     string `json:"group,omitempty"`
+	Pattern   string `json:"pattern,omitempty"`
+	Limit     int    `json:"limit,omitempty"`
+}
+
+type DLQDescription struct {
+	Coordinate    TopicCoordinate `json:"coordinate"`
+	SourceTopic   string          `json:"sourceTopic,omitempty"`
+	ConsumerGroup string          `json:"consumerGroup,omitempty"`
+	NativeModel   string          `json:"nativeModel"`
+	Messages      int64           `json:"messages,omitempty"`
+}
+
+type DLQPeekRequest struct {
+	DLQ       TopicCoordinate
+	Topic     string
+	Group     string
+	Partition int
+	Offset    int64
+	Count     int
+}
+
+type DLQPeekResult struct {
+	DLQ       TopicCoordinate      `json:"dlq"`
+	Partition int                  `json:"partition,omitempty"`
+	Offset    int64                `json:"offset,omitempty"`
+	Count     int                  `json:"count"`
+	Messages  []MessageFingerprint `json:"messages"`
+}
+
+type DLQRedriveRequest struct {
+	DLQ    TopicCoordinate
+	Target TopicCoordinate
+	Topic  string
+	Group  string
+	Count  int
+	DryRun bool
+}
+
+type DLQRedriveResult struct {
+	DLQ         TopicCoordinate      `json:"dlq"`
+	Target      TopicCoordinate      `json:"target"`
+	DryRun      bool                 `json:"dryRun"`
+	Impact      []PartitionImpact    `json:"impact"`
+	Total       int64                `json:"total"`
+	Fingerprint ResourceFingerprints `json:"fingerprint"`
+}
+
+type DLQPurgeRequest struct {
+	DLQ    TopicCoordinate
+	Topic  string
+	Group  string
+	DryRun bool
+}
+
+type DLQPurgeResult struct {
+	DLQ         TopicCoordinate      `json:"dlq"`
+	DryRun      bool                 `json:"dryRun"`
+	Impact      []PartitionImpact    `json:"impact"`
+	Total       int64                `json:"total"`
+	Fingerprint ResourceFingerprints `json:"fingerprint"`
+}
+
 type GroupListOptions struct {
 	Namespace string `json:"namespace,omitempty"`
 	Pattern   string `json:"pattern,omitempty"`
@@ -176,6 +242,10 @@ type Capabilities struct {
 	SupportsOffsets    bool     `json:"supportsOffsets"`
 	SupportsPartitions bool     `json:"supportsPartitions"`
 	SupportsACL        bool     `json:"supportsAcl"`
+	SupportsDLQList    bool     `json:"supportsDlqList"`
+	SupportsDLQPeek    bool     `json:"supportsDlqPeek"`
+	SupportsDLQRedrive bool     `json:"supportsDlqRedrive"`
+	SupportsDLQPurge   bool     `json:"supportsDlqPurge"`
 }
 
 type ACLBinding struct {
@@ -236,6 +306,13 @@ type Tailer interface {
 	Tail(ctx context.Context, req MessageTailRequest, emit func(MessageFingerprint) error) (MessageTailResult, error)
 }
 
+type DLQManager interface {
+	ListDLQs(ctx context.Context, opts DLQListOptions) ([]DLQDescription, error)
+	PeekDLQ(ctx context.Context, req DLQPeekRequest) (DLQPeekResult, error)
+	RedriveDLQ(ctx context.Context, req DLQRedriveRequest) (DLQRedriveResult, error)
+	PurgeDLQ(ctx context.Context, req DLQPurgeRequest) (DLQPurgeResult, error)
+}
+
 func SupportsOffsets(b Broker) (OffsetManager, bool) {
 	manager, ok := b.(OffsetManager)
 	return manager, ok
@@ -254,4 +331,9 @@ func SupportsACL(b Broker) (ACLManager, bool) {
 func SupportsTail(b Broker) (Tailer, bool) {
 	tailer, ok := b.(Tailer)
 	return tailer, ok
+}
+
+func SupportsDLQ(b Broker) (DLQManager, bool) {
+	manager, ok := b.(DLQManager)
+	return manager, ok
 }

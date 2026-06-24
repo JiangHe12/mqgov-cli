@@ -4,7 +4,7 @@
 
 **面向人类_和_ AI agent 的受治理消息中间件操作工具。**
 
-一条安全的命令行,统一管理 **Kafka**、**RabbitMQ**、**Pulsar**、**RocketMQ** —— 列出、查看、peek、tail、生产、重置 offset、查看/变更 ACL、清空、删除 topic,绝不手滑搞挂生产、也绝不静默清空一个队列。
+一条安全的命令行,统一管理 **Kafka**、**RabbitMQ**、**Pulsar**、**RocketMQ** —— 列出、查看、peek、tail、生产、治理 DLQ、重置 offset、查看/变更 ACL、清空、删除 topic,绝不手滑搞挂生产、也绝不静默清空一个队列。
 
 [![npm version](https://img.shields.io/npm/v/mqgov-cli.svg)](https://www.npmjs.com/package/mqgov-cli)
 [![CI](https://github.com/JiangHe12/mqgov-cli/actions/workflows/ci.yml/badge.svg)](https://github.com/JiangHe12/mqgov-cli/actions/workflows/ci.yml)
@@ -38,7 +38,7 @@
 | | |
 |---|---|
 | 📨 **四个 broker** | **Kafka**(franz-go)、**RabbitMQ**(AMQP + 管理 API)、**Pulsar**(客户端 + admin REST)、**RocketMQ**(rocketmq-client-go/v2)。一套与后端无关的治理模型;按 context 选择或按命令覆盖。 |
-| 🧱 **topic / group / message / acl** | topic:list · describe · create · alter · delete · purge。消费组:list · lag · reset-offset。消息:非破坏性 peek · tail · produce。ACL:list · grant · revoke(按后端能力开放)。 |
+| 🧱 **topic / group / message / dlq / acl** | topic:list · describe · create · alter · delete · purge。消费组:list · lag · reset-offset。消息:非破坏性 peek · tail · produce。DLQ:list · peek · redrive · purge,映射各 broker 原生模型。ACL:list · grant · revoke(按后端能力开放)。 |
 | 🔐 **R0–R3 治理** | 每个操作由 fail-closed 的 `mqclass` 引擎分级;保护上下文与内部/系统 topic 升一档;AI 调用方永远无法自我授权。 |
 | 🎯 **真实爆炸半径预览** | `reset-offset --dry-run` 和 `purge --dry-run` 从实时 broker 计算真实的每分区消息 delta —— 不靠猜。预览只读,绝不变更。 |
 | 👀 **非破坏性 peek/tail** | 把消息以指纹形式查看或流式读取,不消费、不移动游标(Kafka 直接分区读取、Pulsar Reader、RabbitMQ 仅 peek 使用 get+requeue)。无法保证非破坏的 broker 上,操作 **失败关闭**而非静默消费。 |
@@ -58,6 +58,7 @@
 | **offset lag / reset** | ✅ | ✅(游标) | ❌(无 offset) | ❌ |
 | alter 分区 | ✅ | ✅ | ❌ | ❌ |
 | purge | ✅ | ✅ | ✅ | ❌ |
+| **DLQ list / peek / redrive / purge** | list ❌;显式 topic peek/redrive/purge ✅ | ✅ `{topic}-{subscription}-DLQ` | ✅ DLX 队列 | list ✅ `%DLQ%group`;其他 ❌ |
 | **ACL list / grant / revoke** | ✅ | ✅ namespace/topic permissions | ✅ user-vhost permissions | ❌ `NOT_IMPLEMENTED` |
 
 ¹ RocketMQ 的 Go v2 `PullConsumer` 会进入消费组生命周期并提交 offset,无法保证非破坏性 peek/tail —— mqgov 选择失败关闭,而非静默推进 offset。² RabbitMQ 没有向前的非破坏性 tail,读取语义是 consume/requeue。不支持的操作一律返回 `NOT_IMPLEMENTED`(exit 12),绝不假装成功。
@@ -124,10 +125,10 @@ mqgov audit query --since 1h -o json
 
 | 档 | 涵盖 | 你必须提供 |
 |:---:|---|---|
-| **R0** | 读与预览(`topic list/describe`、`group list/lag`、`message peek`、`message tail`、`acl list`、`*-dry-run`、`audit query/verify`、`doctor`) | 无 —— 但仍会审计 |
+| **R0** | 读与预览(`topic list/describe`、`group list/lag`、`message peek`、`message tail`、`dlq list/peek`、`acl list`、`*-dry-run`、`audit query/verify`、`doctor`) | 无 —— 但仍会审计 |
 | **R1** | 普通写(`message produce`、`topic create`) | `--yes`(或交互确认) |
 | **R2** | 升级变更(`topic alter`、`group create/delete`、`acl grant`、向**保护** topic 生产) | `--yes` **且**非空 `--ticket` |
-| **R3** | 破坏性 / 不可逆(`group reset-offset`、`topic purge`、`topic delete`、宽泛 `acl grant`、`acl revoke`、向**内部/系统** topic 生产) | 以上 **再加**该操作专属的 `--allow-*` 标志 |
+| **R3** | 破坏性 / 不可逆(`group reset-offset`、`topic purge`、`topic delete`、`dlq redrive`、`dlq purge`、宽泛 `acl grant`、`acl revoke`、向**内部/系统** topic 生产) | 以上 **再加**该操作专属的 `--allow-*` 标志 |
 
 R3 的 allow 标志:`--allow-offset-reset`、`--allow-topic-purge`、`--allow-topic-delete`、`--allow-destructive-acl`、`--allow-internal-produce`。
 
@@ -191,6 +192,23 @@ mqgov message produce <topic> [--key <k>] [--body <text>] --yes                 
 ```
 
 `peek` 和 `tail` 绝不消费消息、不移动游标,只返回 sha256 指纹(`keySha256`、`bodySha256`、size、可选 timestamp)—— 绝不返回消息体。`tail` 受 `--max-messages` 与 `--timeout` 约束;`--follow` 也只会流式读取到这些边界或取消为止。Tail 支持 Kafka 与 Pulsar;RabbitMQ 与 RocketMQ 上 `tail` 失败关闭(`NOT_IMPLEMENTED`);RocketMQ 上 `peek` 也失败关闭。
+</details>
+
+<details>
+<summary><b>dlq</b> —— 死信队列治理</summary>
+
+```bash
+mqgov dlq list [--topic <source-or-dlq>] [--group <group-or-sub>] [--pattern <name|glob>] -o json     # R0
+mqgov dlq peek <dlq> [--topic <source>] [--group <group-or-sub>] [--count N] -o json                   # R0,仅指纹
+mqgov dlq redrive <dlq> --target <live-topic> [--count N] --dry-run -o json                            # R0 预览
+mqgov dlq redrive <dlq> --target <live-topic> [--count N] --yes --ticket <t> --allow-internal-produce  # R3
+mqgov dlq purge <dlq> --dry-run -o json                                                                 # R0 预览
+mqgov dlq purge <dlq> --yes --ticket <t> --allow-topic-purge                                           # R3
+```
+
+DLQ 映射保持后端原生且诚实:RocketMQ 只列出 `%DLQ%{consumerGroup}` topic;RabbitMQ 把 DLQ 视为 dead-letter exchange 喂入的普通队列;Kafka 没有原生 DLQ,也不自动发现,peek/redrive/purge 只针对用户显式指定的 DLQ topic;Pulsar 使用 `{topic}-{subscription}-DLQ`。不支持的动词返回 `NOT_IMPLEMENTED`。
+
+Redrive 按 internal-produce 治理:dry-run 是只读预览,真实执行需要 `--allow-internal-produce`。审计仍然只记录指纹/计数,永不记录 message body、key、headers。
 </details>
 
 <details>

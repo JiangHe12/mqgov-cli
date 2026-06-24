@@ -14,6 +14,9 @@ const (
 	OperationLag         Operation = "lag"
 	OperationPeek        Operation = "peek"
 	OperationTail        Operation = "tail"
+	OperationListDLQ     Operation = "list-dlq"
+	OperationPeekDLQ     Operation = "peek-dlq"
+	OperationRedriveDLQ  Operation = "redrive-dlq"
 	OperationClusterInfo Operation = "cluster-info"
 	OperationProduce     Operation = "produce"
 	OperationCreateTopic Operation = "create-topic"
@@ -88,6 +91,7 @@ func applyDestructivePins(result Result, op Operation, target Target) Result {
 	if op == OperationProduce && (target.InternalTopic || isInternalTopic(target.Topic)) {
 		result = pinR3(result, "produce to internal/system topic is destructive")
 	}
+	result = applyRedrivePins(result, op, target)
 	if op == OperationRevokeACL {
 		result = pinR3(result, "ACL revoke is destructive")
 	}
@@ -97,13 +101,23 @@ func applyDestructivePins(result Result, op Operation, target Target) Result {
 	return result
 }
 
+func applyRedrivePins(result Result, op Operation, target Target) Result {
+	if op != OperationRedriveDLQ || target.Plan {
+		return result
+	}
+	if hasPattern(target.Topic) || isAllTarget(target.Topic) {
+		result = pinR3(result, "redrive wildcard/all target expands blast radius")
+	}
+	return pinR3(result, "DLQ redrive uses internal produce")
+}
+
 func classifyBase(op Operation) Result {
 	switch op {
-	case OperationList, OperationDescribe, OperationLag, OperationPeek, OperationTail, OperationClusterInfo, OperationListACL:
+	case OperationList, OperationDescribe, OperationLag, OperationPeek, OperationTail, OperationListDLQ, OperationPeekDLQ, OperationClusterInfo, OperationListACL:
 		return Result{Risk: safety.R0, Reason: "read-only broker operation"}
 	case OperationProduce, OperationCreateTopic:
 		return Result{Risk: safety.R1, Reason: "non-protected topic write"}
-	case OperationAlterTopic, OperationCreateGroup, OperationDeleteGroup, OperationGrantACL:
+	case OperationAlterTopic, OperationCreateGroup, OperationDeleteGroup, OperationRedriveDLQ, OperationGrantACL:
 		return Result{Risk: safety.R2, Reason: "elevated topic/group mutation"}
 	case OperationResetOffset, OperationSeekOffset, OperationPurgeTopic, OperationPurgeDLQ, OperationDeleteTopic, OperationRevokeACL:
 		return Result{Risk: safety.R3, Reason: "destructive broker operation"}
@@ -147,11 +161,16 @@ func isPurgeOrDelete(op Operation) bool {
 }
 
 func isReadOnlyPlan(op Operation) bool {
-	return op == OperationResetOffset || op == OperationSeekOffset || op == OperationPurgeTopic || op == OperationPurgeDLQ
+	return op == OperationResetOffset || op == OperationSeekOffset || op == OperationPurgeTopic || op == OperationPurgeDLQ || op == OperationRedriveDLQ
 }
 
 func hasPattern(value string) bool {
 	return strings.ContainsAny(value, "*?[")
+}
+
+func isAllTarget(value string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(value))
+	return normalized == "all" || normalized == "any"
 }
 
 func isInternalTopic(topic string) bool {
