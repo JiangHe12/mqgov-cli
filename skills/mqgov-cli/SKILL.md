@@ -56,6 +56,10 @@ mqgov group reset-offset <group> <topic> --to latest --yes --ticket <ticket> --a
 mqgov topic purge <topic> --dry-run -o json
 mqgov topic purge <topic> --yes --ticket <ticket> --allow-topic-purge -o json
 mqgov topic delete <topic> --yes --ticket <ticket> --allow-topic-delete -o json
+mqgov schema register <subject-or-topic> --schema-file ./next.avsc --schema-type AVRO --yes -o json
+mqgov schema register <subject-or-topic> --schema-file ./next.avsc --schema-type AVRO --yes --ticket <ticket> -o json
+mqgov schema delete <subject-or-topic> --yes --ticket <ticket> --allow-schema-delete -o json
+mqgov schema delete <subject-or-topic> --version <version> --permanent --yes --ticket <ticket> --allow-schema-delete -o json
 mqgov dlq redrive <dlq> --target <live-topic> --count 100 --dry-run -o json
 mqgov dlq redrive <dlq> --target <live-topic> --count 100 --yes --ticket <ticket> --allow-internal-produce -o json
 mqgov dlq purge <dlq> --dry-run -o json
@@ -77,8 +81,12 @@ ACL governance:
 
 Schema governance:
 
-- Schema verbs are `schema list|describe|check`; all are R0 and audited. `check` is a read-only compatibility check and must never register, delete, or evolve a schema.
+- Schema read verbs are `schema list|describe|check`; all are R0 and audited. `check` is a read-only compatibility check and must never register, delete, or evolve a schema.
+- `schema register` is R1 for a new subject (`--yes`) and R2 for an existing subject (`--yes --ticket`). Registering to an existing subject is schema evolution; there is no separate evolve verb.
+- Existing-subject register first runs the backend compatibility check. If incompatible, stop; do not register.
+- `schema delete` is R3 and requires `--yes --ticket --allow-schema-delete`. Never invent or self-fill that allow flag.
 - Kafka uses Confluent Schema Registry when the Kafka context has `--schema-registry-url`; optional `--schema-registry-username` and `--schema-registry-password` use credstore. Pulsar uses its built-in admin REST schema endpoints and existing token/TLS settings.
+- Kafka supports Confluent SR soft delete and hard delete with `--permanent`. Pulsar has no soft/hard distinction: this backend supports permanent subject delete only and returns `NOT_IMPLEMENTED` for soft delete or version delete.
 - RabbitMQ and RocketMQ return `NOT_IMPLEMENTED` for schema verbs. Audit may include subject, version, compatibility, and schema hashes, but never schema text or registry credentials.
 
 Fleet governance:

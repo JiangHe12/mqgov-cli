@@ -66,6 +66,10 @@ type schemaRegistryCompatibility struct {
 	Messages   []string `json:"messages"`
 }
 
+type schemaRegistryRegisterResult struct {
+	ID int `json:"id"`
+}
+
 func New(opts Options) (*Broker, error) {
 	kopts, err := kgoOptions(opts)
 	if err != nil {
@@ -98,7 +102,7 @@ func (b *Broker) Capabilities() mqgov.Capabilities {
 	return mqgov.Capabilities{
 		Backend:            "kafka",
 		ResourceTypes:      []string{"topic", "group", "message", "offset", "acl", "dlq", "schema"},
-		Verbs:              []string{"list", "describe", "lag", "peek", "tail", "produce", "create", "alter", "delete", "purge", "reset-offset", "grant-acl", "revoke-acl", "redrive", "check-schema"},
+		Verbs:              []string{"list", "describe", "lag", "peek", "tail", "produce", "create", "alter", "delete", "purge", "reset-offset", "grant-acl", "revoke-acl", "redrive", "check-schema", "register-schema", "delete-schema"},
 		SupportsOffsets:    true,
 		SupportsPartitions: true,
 		SupportsACL:        true,
@@ -585,6 +589,72 @@ func (b *Broker) CheckCompatibility(ctx context.Context, req mqgov.SchemaCheckRe
 		return mqgov.SchemaCheckResult{}, backendErr(fmt.Errorf("decode schema registry compatibility: %w", err))
 	}
 	return mqgov.SchemaCheckResult{Subject: req.Subject, Version: version, Compatible: compat.Compatible, SchemaHash: mqgov.SHA256Hex([]byte(req.Schema)), Message: strings.Join(compat.Messages, "; ")}, nil
+}
+
+func (b *Broker) RegisterSchema(ctx context.Context, req mqgov.SchemaRegisterRequest) (mqgov.SchemaDescription, error) {
+	if strings.TrimSpace(req.Subject) == "" {
+		return mqgov.SchemaDescription{}, apperrors.New(apperrors.CodeUsageError, "schema subject is required", nil)
+	}
+	if strings.TrimSpace(req.Schema) == "" {
+		return mqgov.SchemaDescription{}, apperrors.New(apperrors.CodeUsageError, "schema text is required", nil)
+	}
+	payload := map[string]string{"schema": req.Schema}
+	if req.Type != "" {
+		payload["schemaType"] = strings.ToUpper(strings.TrimSpace(req.Type))
+	}
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return mqgov.SchemaDescription{}, backendErr(err)
+	}
+	body, err := b.schemaRegistryJSON(ctx, http.MethodPost, "/subjects/"+url.PathEscape(req.Subject)+"/versions", data)
+	if err != nil {
+		return mqgov.SchemaDescription{}, err
+	}
+	var registered schemaRegistryRegisterResult
+	if err := json.Unmarshal(body, &registered); err != nil {
+		return mqgov.SchemaDescription{}, backendErr(fmt.Errorf("decode schema registry registration: %w", err))
+	}
+	desc, err := b.DescribeSchema(ctx, mqgov.SchemaDescribeRequest{Subject: req.Subject, Version: "latest"})
+	if err != nil {
+		return mqgov.SchemaDescription{}, err
+	}
+	if desc.ID == 0 {
+		desc.ID = registered.ID
+	}
+	return desc, nil
+}
+
+func (b *Broker) DeleteSchema(ctx context.Context, req mqgov.SchemaDeleteRequest) (mqgov.SchemaDeleteResult, error) {
+	if strings.TrimSpace(req.Subject) == "" {
+		return mqgov.SchemaDeleteResult{}, apperrors.New(apperrors.CodeUsageError, "schema subject is required", nil)
+	}
+	path := "/subjects/" + url.PathEscape(req.Subject)
+	if req.Version != "" {
+		path += "/versions/" + url.PathEscape(req.Version)
+	}
+	if req.Permanent {
+		path += "?permanent=true"
+	}
+	body, err := b.schemaRegistryJSON(ctx, http.MethodDelete, path, nil)
+	if err != nil {
+		return mqgov.SchemaDeleteResult{}, err
+	}
+	result := mqgov.SchemaDeleteResult{Subject: req.Subject, Version: req.Version, Permanent: req.Permanent}
+	if req.Version != "" {
+		var version int
+		if err := json.Unmarshal(body, &version); err == nil && version > 0 {
+			result.Version = strconv.Itoa(version)
+		}
+		return result, nil
+	}
+	var versions []int
+	if err := json.Unmarshal(body, &versions); err == nil {
+		result.Versions = make([]string, 0, len(versions))
+		for _, version := range versions {
+			result.Versions = append(result.Versions, strconv.Itoa(version))
+		}
+	}
+	return result, nil
 }
 
 func (b *Broker) Lag(ctx context.Context, group mqgov.GroupCoordinate, topic mqgov.TopicCoordinate) (mqgov.OffsetPlan, error) {

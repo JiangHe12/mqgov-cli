@@ -136,7 +136,7 @@ func (b *Broker) Capabilities() mqgov.Capabilities {
 	return mqgov.Capabilities{
 		Backend:            "pulsar",
 		ResourceTypes:      []string{"topic", "group", "message", "offset", "acl", "dlq", "schema"},
-		Verbs:              []string{"list", "describe", "lag", "peek", "tail", "produce", "create", "alter", "delete", "purge", "reset-offset", "grant-acl", "revoke-acl", "redrive", "check-schema"},
+		Verbs:              []string{"list", "describe", "lag", "peek", "tail", "produce", "create", "alter", "delete", "purge", "reset-offset", "grant-acl", "revoke-acl", "redrive", "check-schema", "register-schema", "delete-schema"},
 		SupportsOffsets:    true,
 		SupportsPartitions: true,
 		SupportsACL:        true,
@@ -608,6 +608,41 @@ func (b *Broker) CheckCompatibility(ctx context.Context, req mqgov.SchemaCheckRe
 	}
 	compatible, message := pulsarCompatibility(body)
 	return mqgov.SchemaCheckResult{Subject: shortTopicName(req.Subject), Version: firstNonEmpty(req.Version, "latest"), Compatible: compatible, SchemaHash: mqgov.SHA256Hex([]byte(req.Schema)), Message: message}, nil
+}
+
+func (b *Broker) RegisterSchema(ctx context.Context, req mqgov.SchemaRegisterRequest) (mqgov.SchemaDescription, error) {
+	if strings.TrimSpace(req.Subject) == "" {
+		return mqgov.SchemaDescription{}, apperrors.New(apperrors.CodeUsageError, "schema subject is required", nil)
+	}
+	if strings.TrimSpace(req.Schema) == "" {
+		return mqgov.SchemaDescription{}, apperrors.New(apperrors.CodeUsageError, "schema text is required", nil)
+	}
+	payload := pulsarSchemaPayload{Type: firstNonEmpty(strings.ToUpper(strings.TrimSpace(req.Type)), "AVRO"), Schema: req.Schema}
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return mqgov.SchemaDescription{}, backendErr(err)
+	}
+	if _, err := b.adminJSON(ctx, http.MethodPost, b.schemaPath(req.Subject)+"/schema", data); err != nil {
+		return mqgov.SchemaDescription{}, err
+	}
+	return b.DescribeSchema(ctx, mqgov.SchemaDescribeRequest{Subject: req.Subject, Version: "latest"})
+}
+
+func (b *Broker) DeleteSchema(ctx context.Context, req mqgov.SchemaDeleteRequest) (mqgov.SchemaDeleteResult, error) {
+	if strings.TrimSpace(req.Subject) == "" {
+		return mqgov.SchemaDeleteResult{}, apperrors.New(apperrors.CodeUsageError, "schema subject is required", nil)
+	}
+	if !req.Permanent {
+		return mqgov.SchemaDeleteResult{}, apperrors.New(apperrors.CodeNotImplemented, "Pulsar schema delete is permanent only; pass --permanent", nil)
+	}
+	if req.Version != "" && req.Version != "latest" {
+		return mqgov.SchemaDeleteResult{}, apperrors.New(apperrors.CodeNotImplemented, "Pulsar schema version delete is not supported by this backend", nil)
+	}
+	_, err := b.adminJSON(ctx, http.MethodDelete, b.schemaPath(req.Subject)+"/schema", nil)
+	if err != nil {
+		return mqgov.SchemaDeleteResult{}, err
+	}
+	return mqgov.SchemaDeleteResult{Subject: shortTopicName(req.Subject), Version: req.Version, Permanent: true}, nil
 }
 
 func (b *Broker) Lag(ctx context.Context, group mqgov.GroupCoordinate, topic mqgov.TopicCoordinate) (mqgov.OffsetPlan, error) {

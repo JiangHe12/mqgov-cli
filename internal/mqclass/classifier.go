@@ -34,6 +34,8 @@ const (
 	OperationListSchema     Operation = "list-schema"
 	OperationDescribeSchema Operation = "describe-schema"
 	OperationCheckSchema    Operation = "check-schema"
+	OperationRegisterSchema Operation = "register-schema"
+	OperationDeleteSchema   Operation = "delete-schema"
 )
 
 type Target struct {
@@ -43,6 +45,8 @@ type Target struct {
 	InternalTopic  bool
 	ACL            ACLTarget
 	Plan           bool
+	SchemaExists   bool
+	SchemaUnknown  bool
 }
 
 type ACLTarget struct {
@@ -101,6 +105,9 @@ func applyDestructivePins(result Result, op Operation, target Target) Result {
 	if op == OperationGrantACL && broadACLGrant(target.ACL) {
 		result = pinR3(result, "broad ACL grant")
 	}
+	if op == OperationRegisterSchema && (target.SchemaExists || target.SchemaUnknown) {
+		result = escalate(result, "existing or uncertain schema subject is evolution")
+	}
 	return result
 }
 
@@ -118,11 +125,11 @@ func classifyBase(op Operation) Result {
 	switch op {
 	case OperationList, OperationDescribe, OperationLag, OperationPeek, OperationTail, OperationListDLQ, OperationPeekDLQ, OperationClusterInfo, OperationListACL, OperationListSchema, OperationDescribeSchema, OperationCheckSchema:
 		return Result{Risk: safety.R0, Reason: "read-only broker operation"}
-	case OperationProduce, OperationCreateTopic:
+	case OperationProduce, OperationCreateTopic, OperationRegisterSchema:
 		return Result{Risk: safety.R1, Reason: "non-protected topic write"}
 	case OperationAlterTopic, OperationCreateGroup, OperationDeleteGroup, OperationRedriveDLQ, OperationGrantACL:
 		return Result{Risk: safety.R2, Reason: "elevated topic/group mutation"}
-	case OperationResetOffset, OperationSeekOffset, OperationPurgeTopic, OperationPurgeDLQ, OperationDeleteTopic, OperationRevokeACL:
+	case OperationResetOffset, OperationSeekOffset, OperationPurgeTopic, OperationPurgeDLQ, OperationDeleteTopic, OperationRevokeACL, OperationDeleteSchema:
 		return Result{Risk: safety.R3, Reason: "destructive broker operation"}
 	default:
 		return Result{Risk: safety.R3, Reason: "unknown broker operation"}
@@ -160,7 +167,7 @@ func isOffsetChange(op Operation) bool {
 }
 
 func isPurgeOrDelete(op Operation) bool {
-	return op == OperationPurgeTopic || op == OperationPurgeDLQ || op == OperationDeleteTopic
+	return op == OperationPurgeTopic || op == OperationPurgeDLQ || op == OperationDeleteTopic || op == OperationDeleteSchema
 }
 
 func isReadOnlyPlan(op Operation) bool {
