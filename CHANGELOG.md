@@ -2,6 +2,45 @@
 
 All notable changes to this project are documented in this file.
 
+## v0.4.0
+
+_Governed schema-registry mutation and bounded cross-broker message mirroring._
+
+### Added
+
+- `schema register|delete` — governed schema-registry write operations. `register`
+  is R1 for a new subject and R2 for an existing or uncertain subject (an existing
+  subject is compatibility-checked first and an incompatible schema is refused);
+  `delete` is R3 behind the command-specific `--allow-schema-delete`. **Kafka** maps
+  Confluent Schema Registry register plus soft/`--permanent` delete; **Pulsar**
+  supports permanent subject delete only and returns `NOT_IMPLEMENTED` for soft or
+  per-version delete; RabbitMQ/RocketMQ stay fail-closed.
+- `message mirror SOURCE_TOPIC --to-context NAME --to-topic NAME --limit N` — a
+  bounded one-shot copy of messages from one context's topic to another, across
+  brokers. Source positions: `earliest|latest|offset:N|timestamp:<RFC3339>` plus
+  `--partition` for **Kafka**; `earliest|latest|timestamp` for **Pulsar** (`offset:N`
+  and partition-specific mirror are refused). RabbitMQ/RocketMQ source is fail-closed
+  `NOT_IMPLEMENTED` (read-is-consume / offset-committing). There is no daemon/follow mode.
+
+### Governance
+
+- `schema register`/`delete` and `message mirror` go through the same fail-closed
+  `mqclass` classifier. `message mirror` is dual-authorized: the source read is
+  classified R0 against the source context (a protected source escalates the read and
+  blocks cheap exfiltration), and the target write is classified as a produce against
+  the target context (protected target → R2, internal/system target → R3 via
+  `--allow-internal-produce`); a wildcard target is rejected.
+- `--dry-run`/`--plan` for `message mirror` stays R0 and never produces — the same
+  `dryRun` flag drives both classification and the no-write path, and the message
+  count is computed by the CLI.
+
+### Security
+
+- `message mirror` audit records only source/target coordinates, a message count, and
+  an aggregate sha256 of the bodies — never message keys, bodies, or headers, which
+  flow only in memory. Schema register/delete audit records subject/version and a
+  sha256 of the schema text, never the schema body.
+
 ## v0.3.0
 
 _Dead-letter-queue governance, read-only schema-registry inspection, and a read-only cross-broker fleet view._
