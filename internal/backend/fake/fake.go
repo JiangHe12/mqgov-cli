@@ -3,6 +3,7 @@ package fake
 import (
 	"context"
 	"sort"
+	"strconv"
 	"sync"
 
 	"github.com/JiangHe12/opskit-core/apperrors"
@@ -81,7 +82,7 @@ func (b *Broker) Capabilities() mqgov.Capabilities {
 	return mqgov.Capabilities{
 		Backend:            "fake",
 		ResourceTypes:      []string{"topic", "group", "message", "offset", "dlq", "schema"},
-		Verbs:              []string{"list", "describe", "lag", "peek", "produce", "create", "alter", "delete", "purge", "reset-offset", "redrive", "check-schema"},
+		Verbs:              []string{"list", "describe", "lag", "peek", "produce", "create", "alter", "delete", "purge", "reset-offset", "redrive", "check-schema", "register-schema", "delete-schema"},
 		SupportsOffsets:    true,
 		SupportsPartitions: true,
 		SupportsACL:        false,
@@ -133,6 +134,52 @@ func (b *Broker) CheckCompatibility(_ context.Context, req mqgov.SchemaCheckRequ
 		return mqgov.SchemaCheckResult{}, apperrors.New(apperrors.CodeResourceNotFound, "schema subject not found", nil)
 	}
 	return mqgov.SchemaCheckResult{Subject: req.Subject, Version: firstNonEmpty(req.Version, "latest"), Compatible: true, SchemaHash: mqgov.SHA256Hex([]byte(req.Schema))}, nil
+}
+
+func (b *Broker) RegisterSchema(_ context.Context, req mqgov.SchemaRegisterRequest) (mqgov.SchemaDescription, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if req.Subject == "" {
+		return mqgov.SchemaDescription{}, apperrors.New(apperrors.CodeUsageError, "schema subject is required", nil)
+	}
+	if req.Schema == "" {
+		return mqgov.SchemaDescription{}, apperrors.New(apperrors.CodeUsageError, "schema text is required", nil)
+	}
+	version := "1"
+	id := 1
+	var versions []string
+	if current, ok := b.schemas[req.Subject]; ok {
+		version = strconv.Itoa(len(current.Versions) + 1)
+		id = current.ID + 1
+		versions = append(append([]string{}, current.Versions...), version)
+	} else {
+		versions = []string{version}
+	}
+	desc := mqgov.SchemaDescription{
+		Subject:    req.Subject,
+		Version:    version,
+		ID:         id,
+		Type:       firstNonEmpty(req.Type, "AVRO"),
+		Schema:     req.Schema,
+		SchemaHash: mqgov.SHA256Hex([]byte(req.Schema)),
+		Versions:   versions,
+	}
+	b.schemas[req.Subject] = desc
+	return desc, nil
+}
+
+func (b *Broker) DeleteSchema(_ context.Context, req mqgov.SchemaDeleteRequest) (mqgov.SchemaDeleteResult, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	desc, ok := b.schemas[req.Subject]
+	if !ok {
+		return mqgov.SchemaDeleteResult{}, apperrors.New(apperrors.CodeResourceNotFound, "schema subject not found", nil)
+	}
+	if req.Version != "" && req.Version != "latest" && req.Version != desc.Version {
+		return mqgov.SchemaDeleteResult{}, apperrors.New(apperrors.CodeResourceNotFound, "schema version not found", nil)
+	}
+	delete(b.schemas, req.Subject)
+	return mqgov.SchemaDeleteResult{Subject: req.Subject, Version: req.Version, Permanent: req.Permanent, Versions: desc.Versions}, nil
 }
 
 func (b *Broker) ListTopics(_ context.Context, opts mqgov.TopicListOptions) ([]mqgov.TopicDescription, error) {

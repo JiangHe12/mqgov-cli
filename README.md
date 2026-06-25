@@ -38,7 +38,7 @@ It's built on the shared [`opskit-core`](https://github.com/JiangHe12/opskit-cor
 | | |
 |---|---|
 | 📨 **Four brokers** | **Kafka** (franz-go), **RabbitMQ** (AMQP + management API), **Pulsar** (client + admin REST), **RocketMQ** (rocketmq-client-go/v2). One backend-agnostic governance model; pick per context or override per command. |
-| 🧱 **topic / group / message / dlq / acl / schema / fleet** | topics: list · describe · create · alter · delete · purge. consumer groups: list · lag · reset-offset. messages: non-destructive peek · tail · produce. DLQs: list · peek · redrive · purge through native broker models. ACLs: list · grant · revoke where supported. Schemas: list · describe · check where native schema registry support exists. Fleet: read-only status and topic inventory across configured contexts. |
+| 🧱 **topic / group / message / dlq / acl / schema / fleet** | topics: list · describe · create · alter · delete · purge. consumer groups: list · lag · reset-offset. messages: non-destructive peek · tail · produce. DLQs: list · peek · redrive · purge through native broker models. ACLs: list · grant · revoke where supported. Schemas: list · describe · check · register · delete where native schema registry support exists. Fleet: read-only status and topic inventory across configured contexts. |
 | 🔐 **R0–R3 governance** | every operation is risk-classified by the fail-closed `mqclass` engine; protected contexts and internal/system topics escalate one tier; AI callers can never self-authorize. |
 | 🎯 **Real blast-radius preview** | `reset-offset --dry-run` and `purge --dry-run` compute the actual per-partition message delta from the live broker — no guessing. The preview is read-only and never mutates. |
 | 👀 **Non-destructive peek/tail** | inspect or stream messages as fingerprints without consuming them or moving any cursor (Kafka direct partition reads, Pulsar Reader, RabbitMQ get+requeue for peek only). Where a broker can't guarantee this, the operation fails closed rather than silently consuming. |
@@ -60,7 +60,7 @@ It's built on the shared [`opskit-core`](https://github.com/JiangHe12/opskit-cor
 | purge | ✅ | ✅ | ✅ | ❌ |
 | **DLQ list / peek / redrive / purge** | list ❌; explicit topic peek/redrive/purge ✅ | ✅ `{topic}-{subscription}-DLQ` | ✅ DLX queues | list ✅ `%DLQ%group`; others ❌ |
 | **ACL list / grant / revoke** | ✅ | ✅ namespace/topic permissions | ✅ user-vhost permissions | ❌ `NOT_IMPLEMENTED`³ |
-| **schema list / describe / check** | ✅ Confluent Schema Registry | ✅ built-in admin schema API | ❌ `NOT_IMPLEMENTED` | ❌ `NOT_IMPLEMENTED` |
+| **schema list / describe / check / register / delete** | ✅ Confluent Schema Registry | ✅ built-in admin schema API | ❌ `NOT_IMPLEMENTED` | ❌ `NOT_IMPLEMENTED` |
 
 ¹ RocketMQ's Go v2 `PullConsumer` enters the consumer-group lifecycle and commits offsets, so it cannot guarantee non-destructive peek/tail — mqgov fails closed instead of silently advancing offsets. ² RabbitMQ has no forward non-destructive tail because reads are consume/requeue oriented. Unsupported operations always return `NOT_IMPLEMENTED` (exit 12), never a fake success.
 
@@ -129,11 +129,11 @@ Every command is sorted into one of four **risk tiers** by the fail-closed `mqcl
 | Tier | What it covers | What you must provide |
 |:---:|---|---|
 | **R0** | Reads & previews (`topic list/describe`, `group list/lag`, `message peek`, `message tail`, `dlq list/peek`, `acl list`, `schema list/describe/check`, `fleet status/topics`, `*-dry-run`, `audit query/verify`, `doctor`) | Nothing — but it's still audited |
-| **R1** | Ordinary writes (`message produce`, `topic create`) | `--yes` (or an interactive confirmation) |
-| **R2** | Elevated mutations (`topic alter`, `group create/delete`, `acl grant`, produce to a **protected** topic) | `--yes` **and** a non-empty `--ticket` |
-| **R3** | Destructive / irreversible (`group reset-offset`, `topic purge`, `topic delete`, `dlq redrive`, `dlq purge`, broad `acl grant`, `acl revoke`, produce to an **internal/system** topic) | The above **plus** the exact `--allow-*` flag |
+| **R1** | Ordinary writes (`message produce`, `topic create`, `schema register` for a new subject) | `--yes` (or an interactive confirmation) |
+| **R2** | Elevated mutations (`topic alter`, `group create/delete`, `acl grant`, `schema register` for an existing subject, produce to a **protected** topic) | `--yes` **and** a non-empty `--ticket` |
+| **R3** | Destructive / irreversible (`group reset-offset`, `topic purge`, `topic delete`, `schema delete`, `dlq redrive`, `dlq purge`, broad `acl grant`, `acl revoke`, produce to an **internal/system** topic) | The above **plus** the exact `--allow-*` flag |
 
-The R3 allow flags: `--allow-offset-reset`, `--allow-topic-purge`, `--allow-topic-delete`, `--allow-destructive-acl`, `--allow-internal-produce`.
+The R3 allow flags: `--allow-offset-reset`, `--allow-topic-purge`, `--allow-topic-delete`, `--allow-destructive-acl`, `--allow-internal-produce`, `--allow-schema-delete`.
 
 **Protected contexts, protected topics, and internal/system topics raise the tier by one.** For example, producing to `__consumer_offsets` is treated as a destructive R3 operation and needs `--allow-internal-produce`.
 
@@ -221,9 +221,12 @@ Redrive is governed as internal produce: dry-run is a read-only preview and real
 mqgov schema list [--pattern <subject>] -o json
 mqgov schema describe <subject-or-topic> [--version latest|N] -o json
 mqgov schema check <subject-or-topic> --schema-file ./next.avsc --schema-type AVRO [--version latest] -o json
+mqgov schema register <subject-or-topic> --schema-file ./next.avsc --schema-type AVRO --yes -o json
+mqgov schema register <subject-or-topic> --schema-file ./next.avsc --schema-type AVRO --yes --ticket <t> -o json
+mqgov schema delete <subject-or-topic> [--version N] [--permanent] --yes --ticket <t> --allow-schema-delete -o json
 ```
 
-`schema list`, `schema describe`, and `schema check` are R0 and audited. `check` uses read-only compatibility endpoints and never registers, deletes, or evolves a schema. Kafka maps to Confluent Schema Registry (`GET /subjects`, `GET /subjects/{subject}/versions`, `GET /subjects/{subject}/versions/{version|latest}`, and `POST /compatibility/subjects/{subject}/versions/{version}`). Pulsar maps to its built-in admin schema endpoints under `/admin/v2/schemas/{tenant}/{namespace}/{topic}`. RabbitMQ and RocketMQ fail closed with `NOT_IMPLEMENTED`. Audit stores only subject/version metadata and schema hashes, never schema text or registry credentials.
+`schema list`, `schema describe`, and `schema check` are R0 and audited. `schema register` is R1 for a new subject and R2 when the subject already exists; registering a new version is the evolution path. Existing subjects first run the backend compatibility check and incompatible schemas are rejected before registration. `schema delete` is R3 and requires `--allow-schema-delete`. Kafka maps to Confluent Schema Registry, including soft delete and hard delete with `--permanent`. Pulsar maps to its built-in admin schema endpoints; because Pulsar has no soft/hard split, this backend only accepts permanent subject deletion and returns `NOT_IMPLEMENTED` for soft or version delete. RabbitMQ and RocketMQ fail closed with `NOT_IMPLEMENTED`. Audit stores only subject/version metadata and schema hashes, never schema text or registry credentials.
 </details>
 
 <details>

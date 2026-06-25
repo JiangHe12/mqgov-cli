@@ -3,11 +3,8 @@
 package kafka
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
-	"net/http"
 	"os"
 	"strings"
 	"testing"
@@ -212,7 +209,17 @@ func TestKafkaSchemaRegistryIntegration(t *testing.T) {
 	subject := fmt.Sprintf("mqgov-it-schema-%d-value", time.Now().UnixNano())
 	baseSchema := `{"type":"record","name":"Order","fields":[{"name":"id","type":"string"}]}`
 	nextSchema := `{"type":"record","name":"Order","fields":[{"name":"id","type":"string"},{"name":"note","type":["null","string"],"default":null}]}`
-	registerKafkaSchema(t, ctx, srURL, subject, baseSchema)
+	defer func() {
+		_, _ = manager.DeleteSchema(context.Background(), mqgov.SchemaDeleteRequest{Subject: subject})
+		_, _ = manager.DeleteSchema(context.Background(), mqgov.SchemaDeleteRequest{Subject: subject, Permanent: true})
+	}()
+	registered, err := manager.RegisterSchema(ctx, mqgov.SchemaRegisterRequest{Subject: subject, Type: "AVRO", Schema: baseSchema})
+	if err != nil {
+		t.Fatalf("RegisterSchema() error = %v", err)
+	}
+	if registered.Subject != subject || registered.Version != "1" || registered.SchemaHash == "" {
+		t.Fatalf("RegisterSchema() = %+v, want version 1 metadata", registered)
+	}
 
 	subjects, err := manager.ListSchemas(ctx, mqgov.SchemaListOptions{Subject: subject})
 	if err != nil {
@@ -235,23 +242,26 @@ func TestKafkaSchemaRegistryIntegration(t *testing.T) {
 	if !check.Compatible || check.SchemaHash == "" {
 		t.Fatalf("CheckCompatibility() = %+v, want compatible with hash", check)
 	}
-}
-
-func registerKafkaSchema(t *testing.T, ctx context.Context, srURL, subject, schema string) {
-	t.Helper()
-	payload, _ := json.Marshal(map[string]string{"schema": schema, "schemaType": "AVRO"})
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(srURL, "/")+"/subjects/"+subject+"/versions", bytes.NewReader(payload))
+	evolved, err := manager.RegisterSchema(ctx, mqgov.SchemaRegisterRequest{Subject: subject, Type: "AVRO", Schema: nextSchema})
 	if err != nil {
-		t.Fatalf("NewRequest(register schema) error = %v", err)
+		t.Fatalf("RegisterSchema(evolution) error = %v", err)
 	}
-	req.Header.Set("Content-Type", "application/vnd.schemaregistry.v1+json")
-	resp, err := http.DefaultClient.Do(req)
+	if evolved.Version != "2" || evolved.SchemaHash != mqgov.SHA256Hex([]byte(nextSchema)) {
+		t.Fatalf("RegisterSchema(evolution) = %+v, want version 2", evolved)
+	}
+	deletedVersion, err := manager.DeleteSchema(ctx, mqgov.SchemaDeleteRequest{Subject: subject, Version: "2"})
 	if err != nil {
-		t.Fatalf("register schema request error = %v", err)
+		t.Fatalf("DeleteSchema(version) error = %v", err)
 	}
-	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		t.Fatalf("register schema status = %d", resp.StatusCode)
+	if deletedVersion.Subject != subject || deletedVersion.Version != "2" {
+		t.Fatalf("DeleteSchema(version) = %+v, want version 2", deletedVersion)
+	}
+	deletedSubject, err := manager.DeleteSchema(ctx, mqgov.SchemaDeleteRequest{Subject: subject})
+	if err != nil {
+		t.Fatalf("DeleteSchema(subject) error = %v", err)
+	}
+	if deletedSubject.Subject != subject || len(deletedSubject.Versions) == 0 {
+		t.Fatalf("DeleteSchema(subject) = %+v, want deleted versions", deletedSubject)
 	}
 }
 

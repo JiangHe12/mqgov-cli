@@ -30,6 +30,13 @@ func TestContractJSONEnvelopeAndExitCodes(t *testing.T) {
 		{name: "schema list is R0", args: []string{"-o", "json", "schema", "list"}, wantExit: 0, wantKind: "SchemaList"},
 		{name: "schema describe is R0", args: []string{"-o", "json", "schema", "describe", "orders-value"}, wantExit: 0, wantKind: "SchemaDescription"},
 		{name: "schema check is R0", args: []string{"-o", "json", "schema", "check", "orders-value", "--schema", `{"type":"record","name":"Order"}`}, wantExit: 0, wantKind: "SchemaCheckResult"},
+		{name: "schema register new subject requires R1 authorization", args: []string{"-o", "json", "schema", "register", "invoices-value", "--schema", `{"type":"record","name":"Invoice"}`}, wantExit: 8},
+		{name: "schema register new subject passes with yes", args: []string{"-o", "json", "--yes", "schema", "register", "invoices-value", "--schema", `{"type":"record","name":"Invoice"}`}, wantExit: 0, wantKind: "SchemaDescription"},
+		{name: "schema register existing subject requires R2 ticket", args: []string{"-o", "json", "--yes", "schema", "register", "orders-value", "--schema", `{"type":"record","name":"Order","fields":[{"name":"id","type":"string"}]}`}, wantExit: 8},
+		{name: "schema register existing subject passes with yes and ticket", args: []string{"-o", "json", "--yes", "--ticket", "OPS-1", "schema", "register", "orders-value", "--schema", `{"type":"record","name":"Order","fields":[{"name":"id","type":"string"}]}`}, wantExit: 0, wantKind: "SchemaDescription"},
+		{name: "schema delete requires R3 authorization", args: []string{"-o", "json", "schema", "delete", "orders-value"}, wantExit: 8},
+		{name: "schema delete requires specific allow flag", args: []string{"-o", "json", "--yes", "--ticket", "OPS-1", "schema", "delete", "orders-value"}, wantExit: 8},
+		{name: "schema delete passes with schema delete allow flag", args: []string{"-o", "json", "--yes", "--ticket", "OPS-1", "--allow-schema-delete", "schema", "delete", "orders-value"}, wantExit: 0, wantKind: "SchemaDeleteResult"},
 		{name: "schema unsupported backend fails closed", args: []string{"-o", "json", "--backend", "rabbitmq", "schema", "list"}, wantExit: 12},
 		{name: "dlq list is R0", args: []string{"-o", "json", "dlq", "list"}, wantExit: 0, wantKind: "DLQList"},
 		{name: "dlq peek is R0", args: []string{"-o", "json", "dlq", "peek", "orders.dlq", "--count", "1"}, wantExit: 0, wantKind: "DLQPeekResult"},
@@ -107,6 +114,28 @@ func TestAuditDoesNotPersistSchemaPlaintext(t *testing.T) {
 	text := string(data)
 	if strings.Contains(text, "SecretSchema") || strings.Contains(text, schema) {
 		t.Fatalf("audit log contains schema plaintext: %s", text)
+	}
+	if !strings.Contains(text, "schemaSha256") {
+		t.Fatalf("audit log missing schema hash: %s", text)
+	}
+}
+
+func TestAuditDoesNotPersistRegisteredSchemaPlaintext(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	schema := `{"type":"record","name":"SecretRegisteredSchema"}`
+	_, err := runCommandForTest(t, "-o", "json", "--yes", "schema", "register", "secret-value", "--schema", schema)
+	if err != nil {
+		t.Fatalf("schema register error = %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(os.Getenv("HOME"), ".mqgov-cli", "audit.log"))
+	if err != nil {
+		t.Fatalf("ReadFile(audit.log) error = %v", err)
+	}
+	text := string(data)
+	if strings.Contains(text, "SecretRegisteredSchema") || strings.Contains(text, schema) {
+		t.Fatalf("audit log contains registered schema plaintext: %s", text)
 	}
 	if !strings.Contains(text, "schemaSha256") {
 		t.Fatalf("audit log missing schema hash: %s", text)

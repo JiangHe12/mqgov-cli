@@ -38,7 +38,7 @@
 | | |
 |---|---|
 | 📨 **四个 broker** | **Kafka**(franz-go)、**RabbitMQ**(AMQP + 管理 API)、**Pulsar**(客户端 + admin REST)、**RocketMQ**(rocketmq-client-go/v2)。一套与后端无关的治理模型;按 context 选择或按命令覆盖。 |
-| 🧱 **topic / group / message / dlq / acl / schema / fleet** | topic:list · describe · create · alter · delete · purge。消费组:list · lag · reset-offset。消息:非破坏性 peek · tail · produce。DLQ:list · peek · redrive · purge,映射各 broker 原生模型。ACL:list · grant · revoke(按后端能力开放)。Schema:list · describe · check(按原生 schema registry 能力开放)。Fleet:跨已配置 context 的只读状态与 topic 视图。 |
+| 🧱 **topic / group / message / dlq / acl / schema / fleet** | topic:list · describe · create · alter · delete · purge。消费组:list · lag · reset-offset。消息:非破坏性 peek · tail · produce。DLQ:list · peek · redrive · purge,映射各 broker 原生模型。ACL:list · grant · revoke(按后端能力开放)。Schema:list · describe · check · register · delete(按原生 schema registry 能力开放)。Fleet:跨已配置 context 的只读状态与 topic 视图。 |
 | 🔐 **R0–R3 治理** | 每个操作由 fail-closed 的 `mqclass` 引擎分级;保护上下文与内部/系统 topic 升一档;AI 调用方永远无法自我授权。 |
 | 🎯 **真实爆炸半径预览** | `reset-offset --dry-run` 和 `purge --dry-run` 从实时 broker 计算真实的每分区消息 delta —— 不靠猜。预览只读,绝不变更。 |
 | 👀 **非破坏性 peek/tail** | 把消息以指纹形式查看或流式读取,不消费、不移动游标(Kafka 直接分区读取、Pulsar Reader、RabbitMQ 仅 peek 使用 get+requeue)。无法保证非破坏的 broker 上,操作 **失败关闭**而非静默消费。 |
@@ -60,7 +60,7 @@
 | purge | ✅ | ✅ | ✅ | ❌ |
 | **DLQ list / peek / redrive / purge** | list ❌;显式 topic peek/redrive/purge ✅ | ✅ `{topic}-{subscription}-DLQ` | ✅ DLX 队列 | list ✅ `%DLQ%group`;其他 ❌ |
 | **ACL list / grant / revoke** | ✅ | ✅ namespace/topic permissions | ✅ user-vhost permissions | ❌ `NOT_IMPLEMENTED`³ |
-| **schema list / describe / check** | ✅ Confluent Schema Registry | ✅ 内建 admin schema API | ❌ `NOT_IMPLEMENTED` | ❌ `NOT_IMPLEMENTED` |
+| **schema list / describe / check / register / delete** | ✅ Confluent Schema Registry | ✅ 内建 admin schema API | ❌ `NOT_IMPLEMENTED` | ❌ `NOT_IMPLEMENTED` |
 
 ¹ RocketMQ 的 Go v2 `PullConsumer` 会进入消费组生命周期并提交 offset,无法保证非破坏性 peek/tail —— mqgov 选择失败关闭,而非静默推进 offset。² RabbitMQ 没有向前的非破坏性 tail,读取语义是 consume/requeue。不支持的操作一律返回 `NOT_IMPLEMENTED`(exit 12),绝不假装成功。
 
@@ -129,11 +129,11 @@ mqgov audit query --since 1h -o json
 | 档 | 涵盖 | 你必须提供 |
 |:---:|---|---|
 | **R0** | 读与预览(`topic list/describe`、`group list/lag`、`message peek`、`message tail`、`dlq list/peek`、`acl list`、`schema list/describe/check`、`fleet status/topics`、`*-dry-run`、`audit query/verify`、`doctor`) | 无 —— 但仍会审计 |
-| **R1** | 普通写(`message produce`、`topic create`) | `--yes`(或交互确认) |
-| **R2** | 升级变更(`topic alter`、`group create/delete`、`acl grant`、向**保护** topic 生产) | `--yes` **且**非空 `--ticket` |
-| **R3** | 破坏性 / 不可逆(`group reset-offset`、`topic purge`、`topic delete`、`dlq redrive`、`dlq purge`、宽泛 `acl grant`、`acl revoke`、向**内部/系统** topic 生产) | 以上 **再加**该操作专属的 `--allow-*` 标志 |
+| **R1** | 普通写(`message produce`、`topic create`、新 subject 的 `schema register`) | `--yes`(或交互确认) |
+| **R2** | 升级变更(`topic alter`、`group create/delete`、`acl grant`、已有 subject 的 `schema register`、向**保护** topic 生产) | `--yes` **且**非空 `--ticket` |
+| **R3** | 破坏性 / 不可逆(`group reset-offset`、`topic purge`、`topic delete`、`schema delete`、`dlq redrive`、`dlq purge`、宽泛 `acl grant`、`acl revoke`、向**内部/系统** topic 生产) | 以上 **再加**该操作专属的 `--allow-*` 标志 |
 
-R3 的 allow 标志:`--allow-offset-reset`、`--allow-topic-purge`、`--allow-topic-delete`、`--allow-destructive-acl`、`--allow-internal-produce`。
+R3 的 allow 标志:`--allow-offset-reset`、`--allow-topic-purge`、`--allow-topic-delete`、`--allow-destructive-acl`、`--allow-internal-produce`、`--allow-schema-delete`。
 
 **保护上下文、保护 topic、内部/系统 topic 都使档位升一级。** 例如向 `__consumer_offsets` 生产被当作破坏性 R3 操作,需要 `--allow-internal-produce`。
 
@@ -221,9 +221,12 @@ Redrive 按 internal-produce 治理:dry-run 是只读预览,真实执行需要 `
 mqgov schema list [--pattern <subject>] -o json
 mqgov schema describe <subject-or-topic> [--version latest|N] -o json
 mqgov schema check <subject-or-topic> --schema-file ./next.avsc --schema-type AVRO [--version latest] -o json
+mqgov schema register <subject-or-topic> --schema-file ./next.avsc --schema-type AVRO --yes -o json
+mqgov schema register <subject-or-topic> --schema-file ./next.avsc --schema-type AVRO --yes --ticket <t> -o json
+mqgov schema delete <subject-or-topic> [--version N] [--permanent] --yes --ticket <t> --allow-schema-delete -o json
 ```
 
-`schema list`、`schema describe`、`schema check` 都是 R0 且会审计。`check` 只调用只读兼容性校验端点,绝不注册、删除或演进 schema。Kafka 映射到 Confluent Schema Registry(`GET /subjects`、`GET /subjects/{subject}/versions`、`GET /subjects/{subject}/versions/{version|latest}`、`POST /compatibility/subjects/{subject}/versions/{version}`)。Pulsar 映射到 `/admin/v2/schemas/{tenant}/{namespace}/{topic}` 下的内建 admin schema 端点。RabbitMQ 与 RocketMQ 失败关闭为 `NOT_IMPLEMENTED`。审计只记录 subject/version 元数据和 schema hash,永不记录 schema 全文或 registry 凭据。
+`schema list`、`schema describe`、`schema check` 都是 R0 且会审计。`schema register` 对新 subject 是 R1,对已存在 subject 是 R2;向已有 subject 注册新版本就是演进。已有 subject 会先调用后端兼容性检查,不兼容则拒绝注册。`schema delete` 是 R3,必须提供 `--allow-schema-delete`。Kafka 映射到 Confluent Schema Registry,支持 soft delete 与 `--permanent` hard delete。Pulsar 映射到内建 admin schema 端点;由于 Pulsar 没有 soft/hard 区分,本后端只接受永久 subject 删除,soft 或 version delete 返回 `NOT_IMPLEMENTED`。RabbitMQ 与 RocketMQ 失败关闭为 `NOT_IMPLEMENTED`。审计只记录 subject/version 元数据和 schema hash,永不记录 schema 全文或 registry 凭据。
 </details>
 
 <details>

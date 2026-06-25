@@ -4,9 +4,7 @@ package pulsar
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"net/http"
 	"os"
 	"strings"
 	"testing"
@@ -69,7 +67,13 @@ func TestPulsarIntegration(t *testing.T) {
 	}
 	baseSchema := `{"type":"record","name":"Order","fields":[{"name":"id","type":"string"}]}`
 	nextSchema := `{"type":"record","name":"Order","fields":[{"name":"id","type":"string"},{"name":"note","type":["null","string"],"default":null}]}`
-	registerPulsarSchema(t, ctx, backend, topic, "AVRO", baseSchema)
+	registered, err := schemaManager.RegisterSchema(ctx, mqgov.SchemaRegisterRequest{Subject: topic, Type: "AVRO", Schema: baseSchema})
+	if err != nil {
+		t.Fatalf("RegisterSchema() error = %v", err)
+	}
+	if registered.Subject != topic || registered.SchemaHash == "" {
+		t.Fatalf("RegisterSchema() = %+v, want schema metadata", registered)
+	}
 	schemas, err := schemaManager.ListSchemas(ctx, mqgov.SchemaListOptions{Subject: topic})
 	if err != nil {
 		t.Fatalf("ListSchemas() error = %v", err)
@@ -90,6 +94,26 @@ func TestPulsarIntegration(t *testing.T) {
 	}
 	if !schemaCheck.Compatible || schemaCheck.SchemaHash == "" {
 		t.Fatalf("CheckCompatibility() = %+v, want compatible with hash", schemaCheck)
+	}
+	evolved, err := schemaManager.RegisterSchema(ctx, mqgov.SchemaRegisterRequest{Subject: topic, Type: "AVRO", Schema: nextSchema})
+	if err != nil {
+		t.Fatalf("RegisterSchema(evolution) error = %v", err)
+	}
+	if evolved.SchemaHash != mqgov.SHA256Hex([]byte(nextSchema)) {
+		t.Fatalf("RegisterSchema(evolution) = %+v, want next schema hash", evolved)
+	}
+	if _, err := schemaManager.DeleteSchema(ctx, mqgov.SchemaDeleteRequest{Subject: topic}); apperrors.AsAppError(err).Code != apperrors.CodeNotImplemented {
+		t.Fatalf("DeleteSchema(soft) error = %v, want NotImplemented", err)
+	}
+	deletedSchema, err := schemaManager.DeleteSchema(ctx, mqgov.SchemaDeleteRequest{Subject: topic, Permanent: true})
+	if err != nil {
+		t.Fatalf("DeleteSchema(permanent) error = %v", err)
+	}
+	if deletedSchema.Subject != topic || !deletedSchema.Permanent {
+		t.Fatalf("DeleteSchema(permanent) = %+v, want permanent subject delete", deletedSchema)
+	}
+	if _, err := schemaManager.DescribeSchema(ctx, mqgov.SchemaDescribeRequest{Subject: topic, Version: "latest"}); apperrors.AsAppError(err).Code != apperrors.CodeResourceNotFound {
+		t.Fatalf("DescribeSchema(after delete) error = %v, want ResourceNotFound", err)
 	}
 	if _, err := backend.AlterTopic(ctx, mqgov.TopicAlterRequest{Coordinate: coord, Partitions: 3}); err == nil {
 		t.Fatalf("AlterTopic(non-partitioned) error = nil, want clear error")
@@ -301,15 +325,4 @@ func getenvDefault(name, fallback string) string {
 		return value
 	}
 	return fallback
-}
-
-func registerPulsarSchema(t *testing.T, ctx context.Context, backend *Broker, topic, schemaType, schema string) {
-	t.Helper()
-	payload, err := json.Marshal(pulsarSchemaPayload{Type: schemaType, Schema: schema})
-	if err != nil {
-		t.Fatalf("marshal Pulsar schema payload: %v", err)
-	}
-	if _, err := backend.adminJSON(ctx, http.MethodPost, backend.schemaPath(topic)+"/schema", payload); err != nil {
-		t.Fatalf("register Pulsar schema error = %v", err)
-	}
 }

@@ -169,6 +169,25 @@ type SchemaCheckResult struct {
 	Message    string `json:"message,omitempty"`
 }
 
+type SchemaRegisterRequest struct {
+	Subject string
+	Type    string
+	Schema  string
+}
+
+type SchemaDeleteRequest struct {
+	Subject   string
+	Version   string
+	Permanent bool
+}
+
+type SchemaDeleteResult struct {
+	Subject   string   `json:"subject"`
+	Version   string   `json:"version,omitempty"`
+	Permanent bool     `json:"permanent"`
+	Versions  []string `json:"versions,omitempty"`
+}
+
 type GroupListOptions struct {
 	Namespace string `json:"namespace,omitempty"`
 	Pattern   string `json:"pattern,omitempty"`
@@ -359,6 +378,8 @@ type SchemaManager interface {
 	ListSchemas(ctx context.Context, opts SchemaListOptions) ([]SchemaSubject, error)
 	DescribeSchema(ctx context.Context, req SchemaDescribeRequest) (SchemaDescription, error)
 	CheckCompatibility(ctx context.Context, req SchemaCheckRequest) (SchemaCheckResult, error)
+	RegisterSchema(ctx context.Context, req SchemaRegisterRequest) (SchemaDescription, error)
+	DeleteSchema(ctx context.Context, req SchemaDeleteRequest) (SchemaDeleteResult, error)
 }
 
 func SupportsOffsets(b Broker) (OffsetManager, bool) {

@@ -15,8 +15,8 @@ import (
 )
 
 func newSchemaCmd(f *cliFlags) *cobra.Command {
-	cmd := &cobra.Command{Use: "schema", Short: "Inspect broker-native schemas"}
-	cmd.AddCommand(newSchemaListCmd(f), newSchemaDescribeCmd(f), newSchemaCheckCmd(f))
+	cmd := &cobra.Command{Use: "schema", Short: "Inspect and govern broker-native schemas"}
+	cmd.AddCommand(newSchemaListCmd(f), newSchemaDescribeCmd(f), newSchemaCheckCmd(f), newSchemaRegisterCmd(f), newSchemaDeleteCmd(f))
 	return cmd
 }
 
@@ -135,6 +135,108 @@ func newSchemaCheckCmd(f *cliFlags) *cobra.Command {
 	return cmd
 }
 
+func newSchemaRegisterCmd(f *cliFlags) *cobra.Command {
+	var schemaType string
+	var schemaText string
+	var schemaFile string
+	cmd := &cobra.Command{
+		Use:   "register SUBJECT",
+		Short: "Register a schema subject or a new subject version",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			backend, meta, err := buildBroker(f)
+			if err != nil {
+				return err
+			}
+			manager, err := schemaManager(backend)
+			if err != nil {
+				return err
+			}
+			subject := args[0]
+			schema, err := readSchemaInput(schemaText, schemaFile)
+			if err != nil {
+				return err
+			}
+			target := mqclass.Target{Topic: subject}
+			existing, describeErr := manager.DescribeSchema(cmd.Context(), mqgov.SchemaDescribeRequest{Subject: subject, Version: "latest"})
+			if describeErr == nil {
+				target.SchemaExists = true
+			} else if !isResourceNotFound(describeErr) {
+				target.SchemaUnknown = true
+			}
+			if err := classifyAndAuthorize(f, meta, mqclass.OperationRegisterSchema, target, ""); err != nil {
+				return err
+			}
+			if describeErr != nil && target.SchemaUnknown {
+				appendAuditWarn(f, auditEventSchema, meta, audit.EventTarget{ResourceType: "schema", Resource: subject}, audit.StatusFailed, "register schemaSha256="+mqgov.SHA256Hex([]byte(schema)), describeErr)
+				return describeErr
+			}
+			if target.SchemaExists {
+				check, err := manager.CheckCompatibility(cmd.Context(), mqgov.SchemaCheckRequest{Subject: subject, Version: existing.Version, Type: schemaType, Schema: schema})
+				if err != nil {
+					appendAuditWarn(f, auditEventSchema, meta, audit.EventTarget{ResourceType: "schema", Resource: subject}, audit.StatusFailed, "register schemaSha256="+mqgov.SHA256Hex([]byte(schema)), err)
+					return err
+				}
+				if !check.Compatible {
+					err := apperrors.New(apperrors.CodeValidationFailed, "schema is not compatible with existing subject", nil)
+					appendAuditWarn(f, auditEventSchema, meta, audit.EventTarget{ResourceType: "schema", Resource: subject}, audit.StatusFailed, fmt.Sprintf("register compatible=false schemaSha256=%s", check.SchemaHash), err)
+					return err
+				}
+			}
+			result, err := manager.RegisterSchema(cmd.Context(), mqgov.SchemaRegisterRequest{Subject: subject, Type: schemaType, Schema: schema})
+			if err != nil {
+				appendAuditWarn(f, auditEventSchema, meta, audit.EventTarget{ResourceType: "schema", Resource: subject}, audit.StatusFailed, "register schemaSha256="+mqgov.SHA256Hex([]byte(schema)), err)
+				return err
+			}
+			appendAuditWarn(f, auditEventSchema, meta, audit.EventTarget{ResourceType: "schema", Resource: subject}, audit.StatusSuccess, schemaRegisterDiff(result), nil)
+			return newPrinter(f).JSONData("SchemaDescription", result)
+		},
+	}
+	cmd.Flags().StringVar(&schemaType, "schema-type", "", "Schema type, for example AVRO, JSON, PROTOBUF, or STRING")
+	cmd.Flags().StringVar(&schemaText, "schema", "", "Schema text to register")
+	cmd.Flags().StringVar(&schemaFile, "schema-file", "", "File containing schema text to register")
+	return cmd
+}
+
+func newSchemaDeleteCmd(f *cliFlags) *cobra.Command {
+	var version string
+	var permanent bool
+	cmd := &cobra.Command{
+		Use:   "delete SUBJECT",
+		Short: "Delete a schema subject or version",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			backend, meta, err := buildBroker(f)
+			if err != nil {
+				return err
+			}
+			manager, err := schemaManager(backend)
+			if err != nil {
+				return err
+			}
+			subject := args[0]
+			desc, err := manager.DescribeSchema(cmd.Context(), mqgov.SchemaDescribeRequest{Subject: subject, Version: firstNonEmpty(version, "latest")})
+			if err != nil {
+				appendAuditWarn(f, auditEventSchema, meta, audit.EventTarget{ResourceType: "schema", Resource: subject}, audit.StatusFailed, "delete", err)
+				return err
+			}
+			if err := classifyAndAuthorize(f, meta, mqclass.OperationDeleteSchema, mqclass.Target{Topic: subject}, allowSchemaDelete); err != nil {
+				return err
+			}
+			result, err := manager.DeleteSchema(cmd.Context(), mqgov.SchemaDeleteRequest{Subject: subject, Version: version, Permanent: permanent})
+			if err != nil {
+				appendAuditWarn(f, auditEventSchema, meta, audit.EventTarget{ResourceType: "schema", Resource: subject}, audit.StatusFailed, schemaDeleteDiff(desc, version, permanent), err)
+				return err
+			}
+			appendAuditWarn(f, auditEventSchema, meta, audit.EventTarget{ResourceType: "schema", Resource: subject}, audit.StatusSuccess, schemaDeleteResultDiff(result, desc), nil)
+			return newPrinter(f).JSONData("SchemaDeleteResult", result)
+		},
+	}
+	cmd.Flags().StringVar(&version, "version", "", "Schema version to delete; omit to delete the subject")
+	cmd.Flags().BoolVar(&permanent, "permanent", false, "Permanently delete the schema subject or version when supported")
+	return cmd
+}
+
 func schemaManager(backend mqgov.Broker) (mqgov.SchemaManager, error) {
 	if !backend.Capabilities().SupportsSchema {
 		return nil, apperrors.New(apperrors.CodeNotImplemented, "backend does not support schema registry", nil)
@@ -165,4 +267,20 @@ func readSchemaInput(schemaText, schemaFile string) (string, error) {
 
 func schemaMetaDiff(desc mqgov.SchemaDescription) string {
 	return "describe subject=" + desc.Subject + " version=" + desc.Version + " id=" + strconv.Itoa(desc.ID) + " schemaSha256=" + desc.SchemaHash
+}
+
+func schemaRegisterDiff(desc mqgov.SchemaDescription) string {
+	return "register subject=" + desc.Subject + " version=" + desc.Version + " schemaSha256=" + desc.SchemaHash
+}
+
+func schemaDeleteDiff(desc mqgov.SchemaDescription, version string, permanent bool) string {
+	return "delete subject=" + desc.Subject + " version=" + firstNonEmpty(version, desc.Version) + " schemaSha256=" + desc.SchemaHash + " permanent=" + strconv.FormatBool(permanent)
+}
+
+func schemaDeleteResultDiff(result mqgov.SchemaDeleteResult, desc mqgov.SchemaDescription) string {
+	return "delete subject=" + result.Subject + " version=" + firstNonEmpty(result.Version, desc.Version) + " schemaSha256=" + desc.SchemaHash + " permanent=" + strconv.FormatBool(result.Permanent)
+}
+
+func isResourceNotFound(err error) bool {
+	return apperrors.AsAppError(err).Code == apperrors.CodeResourceNotFound
 }

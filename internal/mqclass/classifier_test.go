@@ -42,6 +42,10 @@ func TestClassifyGovernanceInvariants(t *testing.T) {
 		{name: "list schema R0", op: OperationListSchema, want: safety.R0},
 		{name: "describe schema R0", op: OperationDescribeSchema, want: safety.R0},
 		{name: "check schema R0", op: OperationCheckSchema, want: safety.R0},
+		{name: "register new schema R1", op: OperationRegisterSchema, target: Target{Topic: "orders-value"}, want: safety.R1},
+		{name: "register existing schema R2", op: OperationRegisterSchema, target: Target{Topic: "orders-value", SchemaExists: true}, want: safety.R2},
+		{name: "register uncertain schema R2 fail closed", op: OperationRegisterSchema, target: Target{Topic: "orders-value", SchemaUnknown: true}, want: safety.R2},
+		{name: "delete schema R3", op: OperationDeleteSchema, target: Target{Topic: "orders-value"}, want: safety.R3},
 		{name: "grant ACL R2", op: OperationGrantACL, target: Target{ACL: ACLTarget{Principal: "User:svc", ResourceType: "topic", ResourceName: "orders", PatternType: "literal", Operation: "read", Permission: "allow"}}, want: safety.R2},
 		{name: "revoke ACL R3", op: OperationRevokeACL, target: Target{ACL: ACLTarget{Principal: "User:svc", ResourceType: "topic", ResourceName: "orders", Operation: "read", Permission: "allow"}}, want: safety.R3},
 		{name: "unknown R3", op: Operation("teleport"), want: safety.R3},
@@ -176,6 +180,9 @@ func TestClassifyAdversarialEscalation(t *testing.T) {
 		{name: "dlq redrive all target pins R3", op: OperationRedriveDLQ, target: Target{Topic: "all"}, want: safety.R3},
 		{name: "dlq redrive wildcard dry-run is R0 preview", op: OperationRedriveDLQ, target: Target{Topic: "prod-*", Plan: true}, want: safety.R1},
 		{name: "delete protected remains R3", op: OperationDeleteTopic, target: Target{Topic: "orders", ProtectedTopic: true}, want: safety.R3},
+		{name: "register schema wildcard upgrades R1 to R2", op: OperationRegisterSchema, target: Target{Topic: "orders-*"}, want: safety.R2},
+		{name: "register existing schema wildcard upgrades R2 to R3", op: OperationRegisterSchema, target: Target{Topic: "orders-*", SchemaExists: true}, want: safety.R3},
+		{name: "delete schema wildcard remains R3", op: OperationDeleteSchema, target: Target{Topic: "orders-*"}, want: safety.R3},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

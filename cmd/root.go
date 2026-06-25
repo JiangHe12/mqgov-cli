@@ -45,6 +45,7 @@ const (
 	allowTopicDelete      = safety.AllowFlag("allow-topic-delete")
 	allowDestructiveACL   = safety.AllowFlag("allow-destructive-acl")
 	allowInternalProduce  = safety.AllowFlag("allow-internal-produce")
+	allowSchemaDelete     = safety.AllowFlag("allow-schema-delete")
 	auditEventTopic       = audit.EventType("mq.topic")
 	auditEventGroup       = audit.EventType("mq.group")
 	auditEventMessage     = audit.EventType("mq.message")
@@ -80,6 +81,7 @@ type cliFlags struct {
 	AllowTopicDelete    bool
 	AllowDestructiveACL bool
 	AllowInternalProd   bool
+	AllowSchemaDelete   bool
 	OTLPEnd             string
 	OTLPMetrics         string
 	OTLPInsec           bool
@@ -182,6 +184,7 @@ func newRootCmdWith(f *cliFlags) *cobra.Command {
 	cmd.PersistentFlags().BoolVar(&f.AllowTopicDelete, "allow-topic-delete", false, "Allow R3 topic delete")
 	cmd.PersistentFlags().BoolVar(&f.AllowDestructiveACL, "allow-destructive-acl", false, "Allow R3 destructive ACL operation")
 	cmd.PersistentFlags().BoolVar(&f.AllowInternalProd, "allow-internal-produce", false, "Allow R3 produce to internal/system topics")
+	cmd.PersistentFlags().BoolVar(&f.AllowSchemaDelete, "allow-schema-delete", false, "Allow R3 schema delete")
 	cmd.PersistentFlags().StringVar(&f.OTLPEnd, "otel-endpoint", "", "OTLP trace endpoint")
 	cmd.PersistentFlags().StringVar(&f.OTLPMetrics, "otel-metrics-endpoint", "", "OTLP metrics endpoint")
 	cmd.PersistentFlags().BoolVar(&f.OTLPInsec, "otel-insecure", false, "Disable TLS for OTLP exporter")
@@ -405,6 +408,7 @@ func authorize(f *cliFlags, base safety.Risk, meta mqgovctx.Context, required sa
 			allowTopicDelete:     f.AllowTopicDelete,
 			allowDestructiveACL:  f.AllowDestructiveACL,
 			allowInternalProduce: f.AllowInternalProd,
+			allowSchemaDelete:    f.AllowSchemaDelete,
 		},
 		Roles:    meta.Roles,
 		Operator: currentOperator(f),
