@@ -249,6 +249,24 @@ type MessageTailResult struct {
 	Impact     []PartitionImpact `json:"impact,omitempty"`
 }
 
+type MessageMirrorRequest struct {
+	Source    TopicCoordinate
+	Target    TopicCoordinate
+	From      string
+	Partition int
+	Limit     int
+	DryRun    bool
+}
+
+type MessageMirrorResult struct {
+	Source      TopicCoordinate      `json:"source"`
+	Target      TopicCoordinate      `json:"target"`
+	DryRun      bool                 `json:"dryRun"`
+	Count       int64                `json:"count"`
+	Impact      []PartitionImpact    `json:"impact,omitempty"`
+	Fingerprint ResourceFingerprints `json:"fingerprint"`
+}
+
 type OffsetPlanRequest struct {
 	Group     GroupCoordinate
 	Topic     TopicCoordinate
@@ -367,6 +385,10 @@ type Tailer interface {
 	Tail(ctx context.Context, req MessageTailRequest, emit func(MessageFingerprint) error) (MessageTailResult, error)
 }
 
+type MirrorSource interface {
+	MirrorMessages(ctx context.Context, req MessageMirrorRequest, emit func(Message) error) (MessageMirrorResult, error)
+}
+
 type DLQManager interface {
 	ListDLQs(ctx context.Context, opts DLQListOptions) ([]DLQDescription, error)
 	PeekDLQ(ctx context.Context, req DLQPeekRequest) (DLQPeekResult, error)
@@ -400,6 +422,11 @@ func SupportsACL(b Broker) (ACLManager, bool) {
 func SupportsTail(b Broker) (Tailer, bool) {
 	tailer, ok := b.(Tailer)
 	return tailer, ok
+}
+
+func SupportsMirrorSource(b Broker) (MirrorSource, bool) {
+	source, ok := b.(MirrorSource)
+	return source, ok
 }
 
 func SupportsDLQ(b Broker) (DLQManager, bool) {

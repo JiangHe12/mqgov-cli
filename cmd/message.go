@@ -2,8 +2,11 @@ package cmd
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/JiangHe12/opskit-core/apperrors"
@@ -14,11 +17,12 @@ import (
 
 	"github.com/JiangHe12/mqgov-cli/internal/mqclass"
 	"github.com/JiangHe12/mqgov-cli/internal/mqgov"
+	"github.com/JiangHe12/mqgov-cli/internal/mqgovctx"
 )
 
 func newMessageCmd(f *cliFlags) *cobra.Command {
 	cmd := &cobra.Command{Use: "message", Short: "Produce or read message fingerprints"}
-	cmd.AddCommand(newMessagePeekCmd(f), newMessageTailCmd(f), newMessageProduceCmd(f))
+	cmd.AddCommand(newMessagePeekCmd(f), newMessageTailCmd(f), newMessageProduceCmd(f), newMessageMirrorCmd(f))
 	return cmd
 }
 
@@ -162,4 +166,149 @@ func newMessageProduceCmd(f *cliFlags) *cobra.Command {
 	cmd.Flags().StringVar(&key, "key", "", "Message key")
 	cmd.Flags().StringVar(&body, "body", "", "Message body")
 	return cmd
+}
+
+func newMessageMirrorCmd(f *cliFlags) *cobra.Command {
+	var toContext string
+	var toTopic string
+	var limit int
+	var from string
+	var partition int
+	cmd := &cobra.Command{
+		Use:   "mirror SOURCE_TOPIC",
+		Short: "Copy a bounded batch of messages to another context",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			sourceBackend, sourceMeta, err := buildBroker(f)
+			if err != nil {
+				return err
+			}
+			source, ok := mqgov.SupportsMirrorSource(sourceBackend)
+			if !ok {
+				return apperrors.New(apperrors.CodeNotImplemented, "source backend does not support non-destructive message mirror", nil)
+			}
+			if toContext == "" {
+				return apperrors.New(apperrors.CodeUsageError, "--to-context is required", nil)
+			}
+			if toTopic == "" {
+				return apperrors.New(apperrors.CodeUsageError, "--to-topic is required", nil)
+			}
+			if limit <= 0 {
+				return apperrors.New(apperrors.CodeUsageError, "--limit must be positive", nil)
+			}
+			sourceTopic := args[0]
+			if hasMirrorTargetPattern(toTopic) {
+				return apperrors.New(apperrors.CodeUsageError, "mirror target topic must not contain wildcards", nil)
+			}
+			sourceTarget := mqclass.Target{Topic: sourceTopic, ProtectedTopic: sourceMeta.Protected || protectedTopicName(sourceMeta, sourceTopic), InternalTopic: isInternalMessageTopic(sourceTopic)}
+			if err := classifyAndAuthorize(f, sourceMeta, mqclass.OperationPeek, sourceTarget, ""); err != nil {
+				return err
+			}
+			targetBackend, targetMeta, targetFlags, err := buildMirrorTargetBroker(f, toContext)
+			if err != nil {
+				return err
+			}
+			dryRun := f.DryRun || f.Plan
+			targetDesc, _ := targetBackend.DescribeTopic(cmd.Context(), topicCoord(targetFlags, targetMeta, toTopic))
+			target := mqclass.Target{Topic: toTopic, ProtectedTopic: isProtectedTopic(targetMeta, toTopic, targetDesc), InternalTopic: targetDesc.Internal, Plan: dryRun}
+			allow := safety.AllowFlag("")
+			if target.InternalTopic && !dryRun {
+				allow = allowInternalProduce
+			}
+			if err := classifyAndAuthorize(f, targetMeta, mqclass.OperationMirror, target, allow); err != nil {
+				return err
+			}
+			acc := newMirrorAccumulator()
+			req := mqgov.MessageMirrorRequest{
+				Source:    topicCoord(f, sourceMeta, sourceTopic),
+				Target:    topicCoord(targetFlags, targetMeta, toTopic),
+				From:      from,
+				Partition: partition,
+				Limit:     limit,
+				DryRun:    dryRun,
+			}
+			result, err := source.MirrorMessages(cmd.Context(), req, func(msg mqgov.Message) error {
+				acc.Add(msg.Body)
+				if dryRun {
+					return nil
+				}
+				_, err := targetBackend.Produce(cmd.Context(), mqgov.MessageProduceRequest{Coordinate: req.Target, Key: msg.Key, Body: msg.Body, Headers: msg.Headers})
+				return err
+			})
+			result.Fingerprint = acc.Fingerprints()
+			if err != nil {
+				appendAuditWarn(f, auditEventMessage, sourceMeta, audit.EventTarget{ResourceType: "message", Resource: sourceTopic + "->" + toContext + "/" + toTopic}, audit.StatusFailed, mirrorAuditDiff(result), err)
+				return err
+			}
+			appendAuditWarn(f, auditEventMessage, sourceMeta, audit.EventTarget{ResourceType: "message", Resource: sourceTopic + "->" + toContext + "/" + toTopic}, audit.StatusSuccess, mirrorAuditDiff(result), nil)
+			return newPrinter(f).JSONData("MessageMirrorResult", result)
+		},
+	}
+	cmd.Flags().StringVar(&toContext, "to-context", "", "Target context name")
+	cmd.Flags().StringVar(&toTopic, "to-topic", "", "Target topic")
+	cmd.Flags().IntVar(&limit, "limit", 100, "Maximum messages to copy")
+	cmd.Flags().StringVar(&from, "from", "earliest", "Start position: earliest | latest | offset:N | timestamp:<RFC3339>")
+	cmd.Flags().IntVar(&partition, "partition", -1, "Source partition (-1 = all partitions when supported)")
+	return cmd
+}
+
+func buildMirrorTargetBroker(f *cliFlags, name string) (mqgov.Broker, mqgovctx.Context, *cliFlags, error) {
+	cfg, err := mqgovctx.Load()
+	if err != nil {
+		return nil, mqgovctx.Context{}, nil, err
+	}
+	item, ok := cfg.Contexts[name]
+	if !ok {
+		return nil, mqgovctx.Context{}, nil, apperrors.New(apperrors.CodeUsageError, "target context not found", nil)
+	}
+	local := fleetLocalFlags(f, name)
+	backend, err := buildBrokerFromContext(&local, item, name)
+	return backend, item, &local, err
+}
+
+type mirrorAccumulator struct {
+	bodyHashes []byte
+	totalSize  int
+	totalCount int64
+}
+
+func newMirrorAccumulator() *mirrorAccumulator {
+	return &mirrorAccumulator{}
+}
+
+func (a *mirrorAccumulator) Add(body []byte) {
+	bodyHash := sha256.Sum256(body)
+	a.bodyHashes = append(a.bodyHashes, bodyHash[:]...)
+	a.totalSize += len(body)
+	a.totalCount++
+}
+
+func (a *mirrorAccumulator) Fingerprints() mqgov.ResourceFingerprints {
+	sum := sha256.Sum256(a.bodyHashes)
+	if a.totalCount == 0 {
+		sum = sha256.Sum256(nil)
+	}
+	return mqgov.ResourceFingerprints{BodySHA256: hex.EncodeToString(sum[:]), Count: a.totalCount, Size: a.totalSize}
+}
+
+func mirrorAuditDiff(result mqgov.MessageMirrorResult) string {
+	return fmt.Sprintf("mirror source=%s target=%s count=%d body-sha256=%s dryRun=%t", result.Source.Topic, result.Target.Topic, result.Count, result.Fingerprint.BodySHA256, result.DryRun)
+}
+
+func hasMirrorTargetPattern(topic string) bool {
+	return strings.ContainsAny(topic, "*?[")
+}
+
+func protectedTopicName(meta mqgovctx.Context, topic string) bool {
+	for _, protected := range meta.Topics {
+		if protected == topic {
+			return true
+		}
+	}
+	return false
+}
+
+func isInternalMessageTopic(topic string) bool {
+	name := strings.ToLower(strings.TrimSpace(topic))
+	return strings.HasPrefix(name, "__") || strings.HasPrefix(name, "_system") || strings.Contains(name, "consumer_offsets")
 }

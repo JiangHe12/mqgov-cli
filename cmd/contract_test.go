@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/JiangHe12/opskit-core/apperrors"
+	corectx "github.com/JiangHe12/opskit-core/ctx"
 	"github.com/JiangHe12/opskit-core/safety"
 
 	"github.com/JiangHe12/mqgov-cli/internal/mqgovctx"
@@ -139,6 +140,78 @@ func TestAuditDoesNotPersistRegisteredSchemaPlaintext(t *testing.T) {
 	}
 	if !strings.Contains(text, "schemaSha256") {
 		t.Fatalf("audit log missing schema hash: %s", text)
+	}
+}
+
+func TestMessageMirrorGovernanceContract(t *testing.T) {
+	tests := []struct {
+		name     string
+		source   mqgovctx.Context
+		target   mqgovctx.Context
+		args     []string
+		wantExit int
+	}{
+		{
+			name:     "protected source denies cheap exfiltration",
+			source:   mqgovctx.Context{Base: corectx.Base{Protected: true}, Backend: "kafka", KafkaBrokers: []string{"127.0.0.1:9092"}},
+			target:   mqgovctx.Context{Backend: "fake"},
+			args:     []string{"-o", "json", "message", "mirror", "orders", "--to-context", "dst", "--to-topic", "orders", "--limit", "1", "--dry-run"},
+			wantExit: 8,
+		},
+		{
+			name:     "target write requires authorization",
+			source:   mqgovctx.Context{Backend: "kafka", KafkaBrokers: []string{"127.0.0.1:9092"}},
+			target:   mqgovctx.Context{Backend: "fake"},
+			args:     []string{"-o", "json", "message", "mirror", "orders", "--to-context", "dst", "--to-topic", "orders", "--limit", "1"},
+			wantExit: 8,
+		},
+		{
+			name:     "internal target requires allow internal produce",
+			source:   mqgovctx.Context{Backend: "kafka", KafkaBrokers: []string{"127.0.0.1:9092"}},
+			target:   mqgovctx.Context{Backend: "fake"},
+			args:     []string{"-o", "json", "--yes", "--ticket", "OPS-1", "message", "mirror", "orders", "--to-context", "dst", "--to-topic", "__consumer_offsets", "--limit", "1"},
+			wantExit: 8,
+		},
+		{
+			name:     "wildcard target rejected",
+			source:   mqgovctx.Context{Backend: "kafka", KafkaBrokers: []string{"127.0.0.1:9092"}},
+			target:   mqgovctx.Context{Backend: "fake"},
+			args:     []string{"-o", "json", "--yes", "message", "mirror", "orders", "--to-context", "dst", "--to-topic", "orders-*", "--limit", "1"},
+			wantExit: 1,
+		},
+		{
+			name:     "rabbitmq source fails closed",
+			source:   mqgovctx.Context{Backend: "rabbitmq"},
+			target:   mqgovctx.Context{Backend: "fake"},
+			args:     []string{"-o", "json", "message", "mirror", "orders", "--to-context", "dst", "--to-topic", "orders", "--limit", "1", "--dry-run"},
+			wantExit: 12,
+		},
+		{
+			name:     "rocketmq source fails closed",
+			source:   mqgovctx.Context{Backend: "rocketmq", RocketMQNameServers: []string{"127.0.0.1:9876"}},
+			target:   mqgovctx.Context{Backend: "fake"},
+			args:     []string{"-o", "json", "message", "mirror", "orders", "--to-context", "dst", "--to-topic", "orders", "--limit", "1", "--dry-run"},
+			wantExit: 12,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			configPath := filepath.Join(t.TempDir(), "config.yaml")
+			mqgovctx.SetConfigPath(configPath)
+			if err := mqgovctx.Set("src", tt.source); err != nil {
+				t.Fatalf("set source context: %v", err)
+			}
+			if err := mqgovctx.Set("dst", tt.target); err != nil {
+				t.Fatalf("set target context: %v", err)
+			}
+			if err := mqgovctx.Use("src"); err != nil {
+				t.Fatalf("use source context: %v", err)
+			}
+			out, err := runCommandForTest(t, tt.args...)
+			if got := apperrors.ExitCode(err); got != tt.wantExit {
+				t.Fatalf("ExitCode() = %d, want %d; err=%v; out=%s", got, tt.wantExit, err, out)
+			}
+		})
 	}
 }
 

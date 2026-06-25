@@ -36,6 +36,7 @@ const (
 	OperationCheckSchema    Operation = "check-schema"
 	OperationRegisterSchema Operation = "register-schema"
 	OperationDeleteSchema   Operation = "delete-schema"
+	OperationMirror         Operation = "mirror"
 )
 
 type Target struct {
@@ -95,9 +96,7 @@ func applyDestructivePins(result Result, op Operation, target Target) Result {
 	if isPurgeOrDelete(op) && !target.Plan {
 		result = pinR3(result, "purge/delete operations are destructive")
 	}
-	if op == OperationProduce && (target.InternalTopic || isInternalTopic(target.Topic)) {
-		result = pinR3(result, "produce to internal/system topic is destructive")
-	}
+	result = applyInternalProducePins(result, op, target)
 	result = applyRedrivePins(result, op, target)
 	if op == OperationRevokeACL {
 		result = pinR3(result, "ACL revoke is destructive")
@@ -107,6 +106,13 @@ func applyDestructivePins(result Result, op Operation, target Target) Result {
 	}
 	if op == OperationRegisterSchema && (target.SchemaExists || target.SchemaUnknown) {
 		result = escalate(result, "existing or uncertain schema subject is evolution")
+	}
+	return result
+}
+
+func applyInternalProducePins(result Result, op Operation, target Target) Result {
+	if (op == OperationProduce || op == OperationMirror) && (target.InternalTopic || isInternalTopic(target.Topic)) && !target.Plan {
+		return pinR3(result, "produce to internal/system topic is destructive")
 	}
 	return result
 }
@@ -125,7 +131,7 @@ func classifyBase(op Operation) Result {
 	switch op {
 	case OperationList, OperationDescribe, OperationLag, OperationPeek, OperationTail, OperationListDLQ, OperationPeekDLQ, OperationClusterInfo, OperationListACL, OperationListSchema, OperationDescribeSchema, OperationCheckSchema:
 		return Result{Risk: safety.R0, Reason: "read-only broker operation"}
-	case OperationProduce, OperationCreateTopic, OperationRegisterSchema:
+	case OperationProduce, OperationCreateTopic, OperationRegisterSchema, OperationMirror:
 		return Result{Risk: safety.R1, Reason: "non-protected topic write"}
 	case OperationAlterTopic, OperationCreateGroup, OperationDeleteGroup, OperationRedriveDLQ, OperationGrantACL:
 		return Result{Risk: safety.R2, Reason: "elevated topic/group mutation"}
@@ -171,7 +177,7 @@ func isPurgeOrDelete(op Operation) bool {
 }
 
 func isReadOnlyPlan(op Operation) bool {
-	return op == OperationResetOffset || op == OperationSeekOffset || op == OperationPurgeTopic || op == OperationPurgeDLQ || op == OperationRedriveDLQ
+	return op == OperationResetOffset || op == OperationSeekOffset || op == OperationPurgeTopic || op == OperationPurgeDLQ || op == OperationRedriveDLQ || op == OperationMirror
 }
 
 func hasPattern(value string) bool {

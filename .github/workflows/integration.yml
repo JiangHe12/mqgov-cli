@@ -187,6 +187,50 @@ jobs:
         if: always()
         run: docker compose -f docker-compose.pulsar.yml down -v || true
 
+  mirror:
+    name: real-backend integration (kafka pulsar mirror)
+    timeout-minutes: 20
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version: 'stable'
+          cache: true
+      - name: Start Redpanda and Pulsar
+        run: |
+          docker compose -f docker-compose.kafka.yml up -d
+          docker compose -f docker-compose.pulsar.yml up -d
+      - name: Wait for readiness
+        shell: bash
+        run: |
+          set +e
+          ok=0
+          for i in $(seq 1 40); do
+            if (echo > /dev/tcp/127.0.0.1/9092) 2>/dev/null; then ok=1; break; fi
+            sleep 2
+          done
+          [ "$ok" = 1 ] || { echo "kafka not ready"; docker compose -f docker-compose.kafka.yml logs; exit 1; }
+          ok=0
+          for i in $(seq 1 60); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/admin/v2/clusters)
+            if [ "$code" = "200" ]; then ok=1; break; fi
+            sleep 3
+          done
+          [ "$ok" = 1 ] || { echo "pulsar not ready"; docker compose -f docker-compose.pulsar.yml logs; exit 1; }
+          sleep 5
+      - name: Run CLI mirror integration tests
+        env:
+          KAFKA_BROKERS: 127.0.0.1:9092
+          PULSAR_SERVICE_URL: pulsar://127.0.0.1:6650
+          PULSAR_ADMIN_URL: http://127.0.0.1:8080
+        run: go test -tags=integration -count=1 -run TestMessageMirrorCrossBrokerIntegration -v ./cmd/
+      - name: Tear down
+        if: always()
+        run: |
+          docker compose -f docker-compose.kafka.yml down -v || true
+          docker compose -f docker-compose.pulsar.yml down -v || true
+
   rocketmq:
     name: real-backend integration (rocketmq)
     timeout-minutes: 15

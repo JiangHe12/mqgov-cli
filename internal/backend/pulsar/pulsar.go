@@ -136,7 +136,7 @@ func (b *Broker) Capabilities() mqgov.Capabilities {
 	return mqgov.Capabilities{
 		Backend:            "pulsar",
 		ResourceTypes:      []string{"topic", "group", "message", "offset", "acl", "dlq", "schema"},
-		Verbs:              []string{"list", "describe", "lag", "peek", "tail", "produce", "create", "alter", "delete", "purge", "reset-offset", "grant-acl", "revoke-acl", "redrive", "check-schema", "register-schema", "delete-schema"},
+		Verbs:              []string{"list", "describe", "lag", "peek", "tail", "produce", "mirror", "create", "alter", "delete", "purge", "reset-offset", "grant-acl", "revoke-acl", "redrive", "check-schema", "register-schema", "delete-schema"},
 		SupportsOffsets:    true,
 		SupportsPartitions: true,
 		SupportsACL:        true,
@@ -325,6 +325,70 @@ func (b *Broker) Tail(ctx context.Context, req mqgov.MessageTailRequest, emit fu
 	}
 	result.Impact = tailImpactSlice(impact)
 	return result, nil
+}
+
+func (b *Broker) MirrorMessages(ctx context.Context, req mqgov.MessageMirrorRequest, emit func(mqgov.Message) error) (mqgov.MessageMirrorResult, error) {
+	if req.Limit <= 0 {
+		return mqgov.MessageMirrorResult{}, apperrors.New(apperrors.CodeUsageError, "mirror limit must be positive", nil)
+	}
+	if req.Partition >= 0 {
+		return mqgov.MessageMirrorResult{}, apperrors.New(apperrors.CodeNotImplemented, "Pulsar partition-specific mirror is not supported by this backend", nil)
+	}
+	reader, err := b.mirrorReader(req)
+	if err != nil {
+		return mqgov.MessageMirrorResult{}, err
+	}
+	defer reader.Close()
+	result := mqgov.MessageMirrorResult{Source: req.Source, Target: req.Target, DryRun: req.DryRun}
+	impact := map[int]*mqgov.PartitionImpact{}
+	for int(result.Count) < req.Limit && reader.HasNext() {
+		msg, err := reader.Next(ctx)
+		if err != nil {
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				break
+			}
+			return result, backendErr(err)
+		}
+		id := msg.ID()
+		out := mqgov.Message{
+			Coordinate: mqgov.MessageCoordinate{TopicCoordinate: req.Source, Partition: int(id.PartitionIdx()), Offset: id.EntryID()},
+			Key:        []byte(msg.Key()),
+			Body:       msg.Payload(),
+			Headers:    bytesHeaders(msg.Properties()),
+		}
+		if emit != nil {
+			if err := emit(out); err != nil {
+				return result, err
+			}
+		}
+		result.Count++
+		updateTailImpact(impact, out.Coordinate.Partition, out.Coordinate.Offset)
+	}
+	result.Impact = tailImpactSlice(impact)
+	return result, nil
+}
+
+func (b *Broker) mirrorReader(req mqgov.MessageMirrorRequest) (pulsarclient.Reader, error) {
+	start, inclusive, seekTime, err := pulsarMirrorStart(req.From)
+	if err != nil {
+		return nil, err
+	}
+	reader, err := b.client.CreateReader(pulsarclient.ReaderOptions{
+		Topic:                   b.fqn(req.Source.Topic),
+		StartMessageID:          start,
+		StartMessageIDInclusive: inclusive,
+		ReceiverQueueSize:       maxInt(req.Limit, 1),
+	})
+	if err != nil {
+		return nil, backendErr(err)
+	}
+	if !seekTime.IsZero() {
+		if err := reader.SeekByTime(seekTime); err != nil {
+			reader.Close()
+			return nil, backendErr(err)
+		}
+	}
+	return reader, nil
 }
 
 func (b *Broker) AlterTopic(ctx context.Context, req mqgov.TopicAlterRequest) (mqgov.TopicDescription, error) {
@@ -1254,6 +1318,26 @@ func pulsarTailStart(from string) (pulsarclient.MessageID, bool, error) {
 		return nil, false, apperrors.New(apperrors.CodeUsageError, "Pulsar tail does not support offset:N start positions", nil)
 	default:
 		return nil, false, apperrors.New(apperrors.CodeUsageError, "unsupported tail start position", nil)
+	}
+}
+
+func pulsarMirrorStart(from string) (pulsarclient.MessageID, bool, time.Time, error) {
+	switch {
+	case from == "" || from == "earliest":
+		return pulsarclient.EarliestMessageID(), true, time.Time{}, nil
+	case from == "latest":
+		return pulsarclient.LatestMessageID(), false, time.Time{}, nil
+	case strings.HasPrefix(from, "offset:"):
+		return nil, false, time.Time{}, apperrors.New(apperrors.CodeUsageError, "Pulsar mirror does not support offset:N start positions", nil)
+	case strings.HasPrefix(from, "timestamp:"), strings.HasPrefix(from, "datetime:"):
+		value := strings.TrimPrefix(strings.TrimPrefix(from, "timestamp:"), "datetime:")
+		t, err := time.Parse(time.RFC3339, value)
+		if err != nil {
+			return nil, false, time.Time{}, apperrors.New(apperrors.CodeUsageError, "invalid mirror timestamp", nil)
+		}
+		return pulsarclient.EarliestMessageID(), true, t, nil
+	default:
+		return nil, false, time.Time{}, apperrors.New(apperrors.CodeUsageError, "unsupported mirror start position", nil)
 	}
 }
 

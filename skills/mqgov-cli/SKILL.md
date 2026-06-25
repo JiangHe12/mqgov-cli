@@ -36,6 +36,7 @@ mqgov group list -o json
 mqgov group lag <group> <topic> -o json
 mqgov message peek <topic> --partition 0 --offset 0 --count 1 -o json
 mqgov message tail <topic> --from earliest --max-messages 10 --timeout 30s -o json
+mqgov message mirror <source-topic> --to-context <target-context> --to-topic <target-topic> --limit 100 --dry-run -o json
 mqgov dlq list --topic <topic> --group <group-or-sub> -o json
 mqgov dlq peek <dlq> --count 1 -o json
 mqgov acl list --principal User:svc -o json
@@ -56,6 +57,7 @@ mqgov group reset-offset <group> <topic> --to latest --yes --ticket <ticket> --a
 mqgov topic purge <topic> --dry-run -o json
 mqgov topic purge <topic> --yes --ticket <ticket> --allow-topic-purge -o json
 mqgov topic delete <topic> --yes --ticket <ticket> --allow-topic-delete -o json
+mqgov message mirror <source-topic> --to-context <target-context> --to-topic <target-topic> --limit 100 --yes -o json
 mqgov schema register <subject-or-topic> --schema-file ./next.avsc --schema-type AVRO --yes -o json
 mqgov schema register <subject-or-topic> --schema-file ./next.avsc --schema-type AVRO --yes --ticket <ticket> -o json
 mqgov schema delete <subject-or-topic> --yes --ticket <ticket> --allow-schema-delete -o json
@@ -78,6 +80,14 @@ ACL governance:
 - Kafka uses broker ACLs with `literal`/`prefixed` patterns. RabbitMQ uses native user-vhost permission regexes with operations `configure`, `write`, and `read`; RabbitMQ rejects deny and non-regex patterns.
 - Pulsar uses native role permissions on namespaces or topics with actions `produce`, `consume`, `functions`, `sources`, `sinks`, and `packages`; Pulsar rejects deny and non-literal patterns.
 - `acl list` is R0. Normal `acl grant` is R2. Broad grants, including Kafka prefixed patterns, broad RabbitMQ regexes such as `.*`, `.+`, `.`, or `orders.*`, and Pulsar `functions`/`sources`/`sinks`/`packages`, and every `acl revoke` are R3 and require `--allow-destructive-acl`.
+
+Message mirror governance:
+
+- `message mirror SOURCE --to-context NAME --to-topic NAME --limit N` is a bounded one-shot copy only. Never use it as a daemon and never add `--follow`.
+- Mirror uses two independent authorizations: source-side non-destructive read on the source context, then target-side produce on the target context. Protected source contexts can require approval before exfiltration; protected/internal targets follow produce risk and internal targets require `--allow-internal-produce`.
+- `--dry-run` / `--plan` is an R0 preview driven by the same dry-run flag that suppresses target produce. It may read/count from the source but must not mutate the target.
+- Kafka and Pulsar can be mirror sources. RabbitMQ and RocketMQ sources fail closed with `NOT_IMPLEMENTED` because their available reads cannot guarantee non-destructive full-message reads.
+- Key/body/headers may flow only in process memory from source to target. Audit/output must stay fingerprint-only: source, target, count, and body sha256 aggregation; never raw key, body, or headers.
 
 Schema governance:
 
