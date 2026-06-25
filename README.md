@@ -38,10 +38,10 @@ It's built on the shared [`opskit-core`](https://github.com/JiangHe12/opskit-cor
 | | |
 |---|---|
 | 📨 **Four brokers** | **Kafka** (franz-go), **RabbitMQ** (AMQP + management API), **Pulsar** (client + admin REST), **RocketMQ** (rocketmq-client-go/v2). One backend-agnostic governance model; pick per context or override per command. |
-| 🧱 **topic / group / message / dlq / acl / schema / fleet** | topics: list · describe · create · alter · delete · purge. consumer groups: list · lag · reset-offset. messages: non-destructive peek · tail · produce. DLQs: list · peek · redrive · purge through native broker models. ACLs: list · grant · revoke where supported. Schemas: list · describe · check · register · delete where native schema registry support exists. Fleet: read-only status and topic inventory across configured contexts. |
+| 🧱 **topic / group / message / dlq / acl / schema / fleet** | topics: list · describe · create · alter · delete · purge. consumer groups: list · lag · reset-offset. messages: non-destructive peek · tail · bounded mirror · produce. DLQs: list · peek · redrive · purge through native broker models. ACLs: list · grant · revoke where supported. Schemas: list · describe · check · register · delete where native schema registry support exists. Fleet: read-only status and topic inventory across configured contexts. |
 | 🔐 **R0–R3 governance** | every operation is risk-classified by the fail-closed `mqclass` engine; protected contexts and internal/system topics escalate one tier; AI callers can never self-authorize. |
 | 🎯 **Real blast-radius preview** | `reset-offset --dry-run` and `purge --dry-run` compute the actual per-partition message delta from the live broker — no guessing. The preview is read-only and never mutates. |
-| 👀 **Non-destructive peek/tail** | inspect or stream messages as fingerprints without consuming them or moving any cursor (Kafka direct partition reads, Pulsar Reader, RabbitMQ get+requeue for peek only). Where a broker can't guarantee this, the operation fails closed rather than silently consuming. |
+| 👀 **Non-destructive peek/tail/mirror source** | inspect, stream, or bounded-copy messages without consuming them or moving any cursor where the broker can guarantee it (Kafka direct reads, Pulsar Reader). Where a broker can't guarantee this, the operation fails closed rather than silently consuming. |
 | 🧭 **Honest capabilities** | brokers differ — mqgov reports what each one actually supports (`capabilities -o json`) and **fails closed with `NOT_IMPLEMENTED`** for the rest, never faking it. |
 | 📜 **Tamper-evident audit** | hash-chained log of every action (sha256 fingerprints + counts, **no message bodies/keys/headers**); `audit verify` detects tampering. |
 | 🩺 **Ops & DX** | backend-bound `ctx` contexts with credstore-backed secrets, `doctor` diagnostics, shell `completion`, OpenTelemetry traces/metrics, JSON output everywhere. |
@@ -129,9 +129,9 @@ Every command is sorted into one of four **risk tiers** by the fail-closed `mqcl
 | Tier | What it covers | What you must provide |
 |:---:|---|---|
 | **R0** | Reads & previews (`topic list/describe`, `group list/lag`, `message peek`, `message tail`, `dlq list/peek`, `acl list`, `schema list/describe/check`, `fleet status/topics`, `*-dry-run`, `audit query/verify`, `doctor`) | Nothing — but it's still audited |
-| **R1** | Ordinary writes (`message produce`, `topic create`, `schema register` for a new subject) | `--yes` (or an interactive confirmation) |
-| **R2** | Elevated mutations (`topic alter`, `group create/delete`, `acl grant`, `schema register` for an existing subject, produce to a **protected** topic) | `--yes` **and** a non-empty `--ticket` |
-| **R3** | Destructive / irreversible (`group reset-offset`, `topic purge`, `topic delete`, `schema delete`, `dlq redrive`, `dlq purge`, broad `acl grant`, `acl revoke`, produce to an **internal/system** topic) | The above **plus** the exact `--allow-*` flag |
+| **R1** | Ordinary writes (`message produce`, target side of `message mirror`, `topic create`, `schema register` for a new subject) | `--yes` (or an interactive confirmation) |
+| **R2** | Elevated mutations (`topic alter`, `group create/delete`, `acl grant`, `schema register` for an existing subject, produce/mirror to a **protected** topic) | `--yes` **and** a non-empty `--ticket` |
+| **R3** | Destructive / irreversible (`group reset-offset`, `topic purge`, `topic delete`, `schema delete`, `dlq redrive`, `dlq purge`, broad `acl grant`, `acl revoke`, produce/mirror to an **internal/system** topic) | The above **plus** the exact `--allow-*` flag |
 
 The R3 allow flags: `--allow-offset-reset`, `--allow-topic-purge`, `--allow-topic-delete`, `--allow-destructive-acl`, `--allow-internal-produce`, `--allow-schema-delete`.
 
@@ -186,15 +186,19 @@ Offsets are a Kafka and Pulsar concept. On RabbitMQ and RocketMQ, `group lag` / 
 </details>
 
 <details>
-<summary><b>message</b> — peek, tail & produce</summary>
+<summary><b>message</b> — peek, tail, mirror & produce</summary>
 
 ```bash
 mqgov message peek    <topic> [--partition N] [--offset N] [--count N] -o json     # R0, non-destructive, fingerprints only
 mqgov message tail    <topic> [--partition N] [--from earliest|latest|offset:N] [--follow] [--max-messages N] [--timeout 30s] -o json
+mqgov message mirror  <source-topic> --to-context <ctx> --to-topic <topic> --limit 100 --dry-run -o json
+mqgov message mirror  <source-topic> --to-context <ctx> --to-topic <topic> --limit 100 --yes -o json
 mqgov message produce <topic> [--key <k>] [--body <text>] --yes                    # R1 (R3 + --allow-internal-produce for internal topics)
 ```
 
-`peek` and `tail` never consume a message or move a cursor, and return only sha256 fingerprints (`keySha256`, `bodySha256`, size, optional timestamp) — never the body. `tail` is bounded by `--max-messages` and `--timeout`; `--follow` streams new messages only until those bounds or cancellation. Tail is supported by Kafka and Pulsar. On RabbitMQ and RocketMQ, `tail` fails closed (`NOT_IMPLEMENTED`); on RocketMQ, `peek` also fails closed.
+`peek` and `tail` never consume a message or move a cursor, and return only sha256 fingerprints (`keySha256`, `bodySha256`, size, optional timestamp) — never the body. `tail` is bounded by `--max-messages` and `--timeout`; `--follow` streams new messages only until those bounds or cancellation.
+
+`message mirror` is a bounded one-shot copy, never a daemon. It performs two independent authorizations: a source-side non-destructive read against the source context, then a target-side produce against `--to-context`. `--dry-run` / `--plan` is an R0 preview that reads/counts but does not produce. Kafka and Pulsar can be mirror sources; RabbitMQ and RocketMQ source mirroring fail closed with `NOT_IMPLEMENTED` because their available read APIs cannot guarantee non-destructive full-message reads. Keys, bodies, and headers flow only in process memory; audit records source/target/count and body sha256 aggregation only. Kafka supports `--from earliest|latest|offset:N|timestamp:<RFC3339>` and `--partition`; Pulsar supports `earliest|latest|timestamp:<RFC3339>` and all-partition reads. Headers are copied where both backends can express string/byte headers; unsupported source concepts are not fabricated.
 </details>
 
 <details>

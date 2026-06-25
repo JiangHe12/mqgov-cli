@@ -224,6 +224,7 @@ func fleetLocalFlags(f *cliFlags, contextName string) cliFlags {
 		AllowTopicDelete:    f.AllowTopicDelete,
 		AllowDestructiveACL: f.AllowDestructiveACL,
 		AllowInternalProd:   f.AllowInternalProd,
+		AllowSchemaDelete:   f.AllowSchemaDelete,
 	}
 }
 

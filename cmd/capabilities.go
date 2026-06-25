@@ -107,6 +107,7 @@ func buildCapabilities(backendCaps mqgov.Capabilities) capabilitiesData {
 				{Noun: "message", Verb: "tail", Risk: "R0"},
 				{Noun: "message", Verb: "produce", Risk: "R1/R2 protected"},
 				{Noun: "message", Verb: "produce internal/system", Risk: "R3", AllowFlag: "allow-internal-produce"},
+				{Noun: "message", Verb: "mirror", Risk: "source R0 + target R1/R2/R3", AllowFlag: "allow-internal-produce for internal target"},
 				{Noun: "dlq", Verb: "list/peek", Risk: "R0"},
 				{Noun: "dlq", Verb: "redrive", Risk: "R3", AllowFlag: "allow-internal-produce"},
 				{Noun: "dlq", Verb: "purge", Risk: "R3", AllowFlag: "allow-topic-purge"},

@@ -11,7 +11,7 @@ mqgov-cli is the governed message-broker operations CLI for AI agents: one entry
 point for **Kafka**, **RabbitMQ**, **Pulsar**, and **RocketMQ**. It provides
 backend-bound contexts, a fail-closed message-operation risk classifier
 (`mqclass`), R0-R3 authorization with protected-context escalation,
-native broker ACL management where the backend supports it, non-destructive peek/tail where the backend can guarantee it, dead-letter-queue governance (list/peek/redrive/purge) over each broker's native DLQ model, governed schema-registry inspection and mutation (list/describe/check/register/delete), a read-only cross-broker `fleet` view that aggregates R0 reads across contexts, real per-partition blast-radius previews, tamper-evident
+native broker ACL management where the backend supports it, non-destructive peek/tail and bounded cross-context mirror where the source backend can guarantee it, dead-letter-queue governance (list/peek/redrive/purge) over each broker's native DLQ model, governed schema-registry inspection and mutation (list/describe/check/register/delete), a read-only cross-broker `fleet` view that aggregates R0 reads across contexts, real per-partition blast-radius previews, tamper-evident
 fingerprint-only audit, and redaction. It is built on the shared `opskit-core`
 governance engine.
 
@@ -62,10 +62,12 @@ go mod tidy                             # must be a no-op
   (`EffectiveRisk` + `Authorize`).
 - `mqclass` is the only message-operation risk source and must stay fail-closed
   and structure-aware: offset reset/seek, purge, topic delete, schema delete,
-  ACL revoke, broad ACL grants, and produce-to-internal are pinned R3;
+  ACL revoke, broad ACL grants, produce/mirror-to-internal are pinned R3;
   wildcard/glob targets escalate; unknown/uncertain inputs escalate, never fall
   to R0. Schema register is R1 for a new subject and R2 for an existing or
-  uncertain subject.
+  uncertain subject. Mirror source authorization uses read semantics on the
+  source context; target authorization follows produce semantics on the target
+  context.
 - `--dry-run`/`--plan` is a read-only (R0) impact preview that must NEVER mutate.
   In a command, the SAME `dryRun` flag must drive both the R0 classification and
   the non-mutating execution path — they cannot be decoupled (no "R0-auth-but-mutate").
@@ -87,7 +89,7 @@ go mod tidy                             # must be a no-op
   `OffsetManager` / `PartitionManager` / `ACLManager` / `Tailer` / `DLQManager` / `SchemaManager` interfaces, type-asserted
   and gated by `Supports*`. Unsupported capabilities fail closed with
   `NotImplemented` — never faked. Capabilities must reflect what the client
-  actually supports (e.g. RabbitMQ/RocketMQ `SupportsOffsets=false`; RabbitMQ/RocketMQ do not support non-destructive tail; Kafka, RabbitMQ, and Pulsar support ACL, RocketMQ does not; Kafka has no native DLQ discovery so DLQ list is NotImplemented while peek/redrive/purge work on an explicit DLQ topic, RocketMQ supports only DLQ list; Kafka and Pulsar support schema register/delete through native schema registries, RabbitMQ and RocketMQ do not).
+  actually supports (e.g. RabbitMQ/RocketMQ `SupportsOffsets=false`; RabbitMQ/RocketMQ do not support non-destructive tail or mirror source; Kafka and Pulsar support mirror source through non-destructive reads; Kafka, RabbitMQ, and Pulsar support ACL, RocketMQ does not; Kafka has no native DLQ discovery so DLQ list is NotImplemented while peek/redrive/purge work on an explicit DLQ topic, RocketMQ supports only DLQ list; Kafka and Pulsar support schema register/delete through native schema registries, RabbitMQ and RocketMQ do not).
 - **Backends are dumb**: they only execute broker operations. All R0-R3
   authorization stays in `cmd/` + `mqclass`; a backend must never make an
   authorization decision.

@@ -102,7 +102,7 @@ func (b *Broker) Capabilities() mqgov.Capabilities {
 	return mqgov.Capabilities{
 		Backend:            "kafka",
 		ResourceTypes:      []string{"topic", "group", "message", "offset", "acl", "dlq", "schema"},
-		Verbs:              []string{"list", "describe", "lag", "peek", "tail", "produce", "create", "alter", "delete", "purge", "reset-offset", "grant-acl", "revoke-acl", "redrive", "check-schema", "register-schema", "delete-schema"},
+		Verbs:              []string{"list", "describe", "lag", "peek", "tail", "produce", "mirror", "create", "alter", "delete", "purge", "reset-offset", "grant-acl", "revoke-acl", "redrive", "check-schema", "register-schema", "delete-schema"},
 		SupportsOffsets:    true,
 		SupportsPartitions: true,
 		SupportsACL:        true,
@@ -385,6 +385,75 @@ func (b *Broker) Tail(ctx context.Context, req mqgov.MessageTailRequest, emit fu
 	return result, nil
 }
 
+func (b *Broker) MirrorMessages(ctx context.Context, req mqgov.MessageMirrorRequest, emit func(mqgov.Message) error) (mqgov.MessageMirrorResult, error) {
+	if req.Limit <= 0 {
+		return mqgov.MessageMirrorResult{}, apperrors.New(apperrors.CodeUsageError, "mirror limit must be positive", nil)
+	}
+	starts, ends, err := b.mirrorOffsets(ctx, req)
+	if err != nil {
+		return mqgov.MessageMirrorResult{}, err
+	}
+	client, err := b.tailClient(starts)
+	if err != nil {
+		return mqgov.MessageMirrorResult{}, err
+	}
+	defer client.Close()
+	result := mqgov.MessageMirrorResult{Source: req.Source, Target: req.Target, DryRun: req.DryRun}
+	impact := map[int]*mqgov.PartitionImpact{}
+	done := tailDonePartitions(starts, ends)
+	for int(result.Count) < req.Limit {
+		if tailAllDone(done, starts[req.Source.Topic]) {
+			break
+		}
+		fetches := client.PollFetches(ctx)
+		if err := fetches.Err(); err != nil {
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				break
+			}
+			return result, backendErr(err)
+		}
+		if fetches.Empty() {
+			break
+		}
+		if err := processKafkaMirrorFetches(fetches, req, ends, done, impact, &result, emit); err != nil {
+			return result, err
+		}
+	}
+	result.Impact = tailImpactSlice(impact)
+	return result, nil
+}
+
+func processKafkaMirrorFetches(fetches kgo.Fetches, req mqgov.MessageMirrorRequest, ends kadm.ListedOffsets, done map[int32]bool, impact map[int]*mqgov.PartitionImpact, result *mqgov.MessageMirrorResult, emit func(mqgov.Message) error) error {
+	iter := fetches.RecordIter()
+	for !iter.Done() && int(result.Count) < req.Limit {
+		record := iter.Next()
+		if record == nil {
+			continue
+		}
+		if kafkaTailPastEnd(record, ends) {
+			done[record.Partition] = true
+			continue
+		}
+		msg := mqgov.Message{
+			Coordinate: mqgov.MessageCoordinate{TopicCoordinate: req.Source, Partition: int(record.Partition), Offset: record.Offset},
+			Key:        record.Key,
+			Body:       record.Value,
+			Headers:    recordHeaders(record.Headers),
+		}
+		if emit != nil {
+			if err := emit(msg); err != nil {
+				return err
+			}
+		}
+		result.Count++
+		updateTailImpact(impact, int(record.Partition), record.Offset)
+		if kafkaTailReachedEnd(record, ends) {
+			done[record.Partition] = true
+		}
+	}
+	return nil
+}
+
 func processKafkaTailFetches(fetches kgo.Fetches, req mqgov.MessageTailRequest, ends kadm.ListedOffsets, done map[int32]bool, impact map[int]*mqgov.PartitionImpact, result *mqgov.MessageTailResult, emit func(mqgov.MessageFingerprint) error) error {
 	iter := fetches.RecordIter()
 	for !iter.Done() && !tailLimitReached(req, *result) {
@@ -408,6 +477,62 @@ func processKafkaTailFetches(fetches kgo.Fetches, req mqgov.MessageTailRequest, 
 		}
 	}
 	return nil
+}
+
+func (b *Broker) mirrorOffsets(ctx context.Context, req mqgov.MessageMirrorRequest) (map[string]map[int32]kgo.Offset, kadm.ListedOffsets, error) {
+	end, err := b.admin.ListEndOffsets(ctx, req.Source.Topic)
+	if err != nil {
+		return nil, nil, backendErr(err)
+	}
+	if err := end.Error(); err != nil {
+		return nil, nil, topicNotFoundErr(err)
+	}
+	start, err := b.mirrorStartOffsets(ctx, req)
+	if err != nil {
+		return nil, nil, err
+	}
+	partitions := make(map[int32]kgo.Offset)
+	for partition, listed := range start[req.Source.Topic] {
+		if req.Partition >= 0 && int(partition) != req.Partition {
+			continue
+		}
+		if listed.Err != nil {
+			return nil, nil, backendErr(listed.Err)
+		}
+		partitions[partition] = kgo.NewOffset().At(listed.Offset)
+	}
+	if len(partitions) == 0 {
+		return nil, nil, apperrors.New(apperrors.CodeResourceNotFound, "partition not found", nil)
+	}
+	return map[string]map[int32]kgo.Offset{req.Source.Topic: partitions}, end, nil
+}
+
+func (b *Broker) mirrorStartOffsets(ctx context.Context, req mqgov.MessageMirrorRequest) (kadm.ListedOffsets, error) {
+	from := strings.TrimSpace(req.From)
+	switch {
+	case from == "" || from == "earliest":
+		offsets, err := b.admin.ListStartOffsets(ctx, req.Source.Topic)
+		return offsets, wrapListedOffsetsErr(err)
+	case from == "latest":
+		offsets, err := b.admin.ListEndOffsets(ctx, req.Source.Topic)
+		return offsets, wrapListedOffsetsErr(err)
+	case strings.HasPrefix(from, "offset:"):
+		value, err := strconv.ParseInt(strings.TrimPrefix(from, "offset:"), 10, 64)
+		if err != nil || value < 0 {
+			return nil, apperrors.New(apperrors.CodeUsageError, "invalid mirror offset", nil)
+		}
+		return b.fixedOffsets(ctx, req.Source.Topic, value)
+	case strings.HasPrefix(from, "timestamp:"), strings.HasPrefix(from, "datetime:"):
+		value := strings.TrimPrefix(strings.TrimPrefix(from, "timestamp:"), "datetime:")
+		t, err := time.Parse(time.RFC3339, value)
+		if err != nil {
+			return nil, apperrors.New(apperrors.CodeUsageError, "invalid mirror timestamp", nil)
+		}
+		offsets, err := b.admin.ListOffsetsAfterMilli(ctx, t.UnixMilli(), req.Source.Topic)
+		return offsets, wrapListedOffsetsErr(err)
+	default:
+		return nil, apperrors.New(apperrors.CodeUsageError, "unsupported mirror start position", nil)
+	}
 }
 
 func (b *Broker) AlterTopic(ctx context.Context, req mqgov.TopicAlterRequest) (mqgov.TopicDescription, error) {

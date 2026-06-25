@@ -38,7 +38,7 @@
 | | |
 |---|---|
 | 📨 **四个 broker** | **Kafka**(franz-go)、**RabbitMQ**(AMQP + 管理 API)、**Pulsar**(客户端 + admin REST)、**RocketMQ**(rocketmq-client-go/v2)。一套与后端无关的治理模型;按 context 选择或按命令覆盖。 |
-| 🧱 **topic / group / message / dlq / acl / schema / fleet** | topic:list · describe · create · alter · delete · purge。消费组:list · lag · reset-offset。消息:非破坏性 peek · tail · produce。DLQ:list · peek · redrive · purge,映射各 broker 原生模型。ACL:list · grant · revoke(按后端能力开放)。Schema:list · describe · check · register · delete(按原生 schema registry 能力开放)。Fleet:跨已配置 context 的只读状态与 topic 视图。 |
+| 🧱 **topic / group / message / dlq / acl / schema / fleet** | topic:list · describe · create · alter · delete · purge。消费组:list · lag · reset-offset。消息:非破坏性 peek · tail · 有界 mirror · produce。DLQ:list · peek · redrive · purge,映射各 broker 原生模型。ACL:list · grant · revoke(按后端能力开放)。Schema:list · describe · check · register · delete(按原生 schema registry 能力开放)。Fleet:跨已配置 context 的只读状态与 topic 视图。 |
 | 🔐 **R0–R3 治理** | 每个操作由 fail-closed 的 `mqclass` 引擎分级;保护上下文与内部/系统 topic 升一档;AI 调用方永远无法自我授权。 |
 | 🎯 **真实爆炸半径预览** | `reset-offset --dry-run` 和 `purge --dry-run` 从实时 broker 计算真实的每分区消息 delta —— 不靠猜。预览只读,绝不变更。 |
 | 👀 **非破坏性 peek/tail** | 把消息以指纹形式查看或流式读取,不消费、不移动游标(Kafka 直接分区读取、Pulsar Reader、RabbitMQ 仅 peek 使用 get+requeue)。无法保证非破坏的 broker 上,操作 **失败关闭**而非静默消费。 |
@@ -129,9 +129,9 @@ mqgov audit query --since 1h -o json
 | 档 | 涵盖 | 你必须提供 |
 |:---:|---|---|
 | **R0** | 读与预览(`topic list/describe`、`group list/lag`、`message peek`、`message tail`、`dlq list/peek`、`acl list`、`schema list/describe/check`、`fleet status/topics`、`*-dry-run`、`audit query/verify`、`doctor`) | 无 —— 但仍会审计 |
-| **R1** | 普通写(`message produce`、`topic create`、新 subject 的 `schema register`) | `--yes`(或交互确认) |
-| **R2** | 升级变更(`topic alter`、`group create/delete`、`acl grant`、已有 subject 的 `schema register`、向**保护** topic 生产) | `--yes` **且**非空 `--ticket` |
-| **R3** | 破坏性 / 不可逆(`group reset-offset`、`topic purge`、`topic delete`、`schema delete`、`dlq redrive`、`dlq purge`、宽泛 `acl grant`、`acl revoke`、向**内部/系统** topic 生产) | 以上 **再加**该操作专属的 `--allow-*` 标志 |
+| **R1** | 普通写(`message produce`、`message mirror` 目标侧、`topic create`、新 subject 的 `schema register`) | `--yes`(或交互确认) |
+| **R2** | 升级变更(`topic alter`、`group create/delete`、`acl grant`、已有 subject 的 `schema register`、向**保护** topic produce/mirror) | `--yes` **且**非空 `--ticket` |
+| **R3** | 破坏性 / 不可逆(`group reset-offset`、`topic purge`、`topic delete`、`schema delete`、`dlq redrive`、`dlq purge`、宽泛 `acl grant`、`acl revoke`、向**内部/系统** topic produce/mirror) | 以上 **再加**该操作专属的 `--allow-*` 标志 |
 
 R3 的 allow 标志:`--allow-offset-reset`、`--allow-topic-purge`、`--allow-topic-delete`、`--allow-destructive-acl`、`--allow-internal-produce`、`--allow-schema-delete`。
 
@@ -186,15 +186,19 @@ offset 是 Kafka 与 Pulsar 的概念。在 RabbitMQ 与 RocketMQ 上,`group lag
 </details>
 
 <details>
-<summary><b>message</b> —— peek、tail 与 produce</summary>
+<summary><b>message</b> —— peek、tail、mirror 与 produce</summary>
 
 ```bash
 mqgov message peek    <topic> [--partition N] [--offset N] [--count N] -o json     # R0,非破坏,仅指纹
 mqgov message tail    <topic> [--partition N] [--from earliest|latest|offset:N] [--follow] [--max-messages N] [--timeout 30s] -o json
+mqgov message mirror  <source-topic> --to-context <ctx> --to-topic <topic> --limit 100 --dry-run -o json
+mqgov message mirror  <source-topic> --to-context <ctx> --to-topic <topic> --limit 100 --yes -o json
 mqgov message produce <topic> [--key <k>] [--body <text>] --yes                    # R1(内部 topic 为 R3 + --allow-internal-produce)
 ```
 
-`peek` 和 `tail` 绝不消费消息、不移动游标,只返回 sha256 指纹(`keySha256`、`bodySha256`、size、可选 timestamp)—— 绝不返回消息体。`tail` 受 `--max-messages` 与 `--timeout` 约束;`--follow` 也只会流式读取到这些边界或取消为止。Tail 支持 Kafka 与 Pulsar;RabbitMQ 与 RocketMQ 上 `tail` 失败关闭(`NOT_IMPLEMENTED`);RocketMQ 上 `peek` 也失败关闭。
+`peek` 和 `tail` 绝不消费消息、不移动游标,只返回 sha256 指纹(`keySha256`、`bodySha256`、size、可选 timestamp)—— 绝不返回消息体。`tail` 受 `--max-messages` 与 `--timeout` 约束;`--follow` 也只会流式读取到这些边界或取消为止。
+
+`message mirror` 是有界一次性拷贝,不是 daemon。它执行两次独立授权:源 context 上的非破坏性读取,以及 `--to-context` 上的目标 produce。`--dry-run` / `--plan` 是 R0 预览,只读取/计数,不 produce。Kafka 与 Pulsar 可作为 mirror 源;RabbitMQ 与 RocketMQ 源镜像失败关闭为 `NOT_IMPLEMENTED`,因为可用读取 API 不能保证非破坏性完整消息读取。Key、Body、Headers 只在进程内存中流转;审计只记录 source/target/count 和 body sha256 聚合值。Kafka 支持 `--from earliest|latest|offset:N|timestamp:<RFC3339>` 与 `--partition`;Pulsar 支持 `earliest|latest|timestamp:<RFC3339>` 和全分区读取。headers 在源/目标都能表达时按 string/bytes 形式复制;无法表达的源端概念不会伪造。
 </details>
 
 <details>
