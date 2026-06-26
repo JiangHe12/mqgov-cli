@@ -123,6 +123,117 @@ jobs:
         if: always()
         run: docker compose -f docker-compose.kafka-acl.yml down -v || true
 
+  kafka-tls-pin:
+    name: real-backend integration (kafka tls pin)
+    timeout-minutes: 20
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version: 'stable'
+          cache: true
+      - name: Generate Redpanda TLS CA and server certificate
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p testdata/redpanda-certs
+          openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
+            -keyout testdata/redpanda-certs/ca.key \
+            -out testdata/redpanda-certs/ca.crt \
+            -subj "/CN=mqgov-redpanda-ca"
+          openssl req -newkey rsa:2048 -nodes \
+            -keyout testdata/redpanda-certs/server.key \
+            -out testdata/redpanda-certs/server.csr \
+            -subj "/CN=localhost" \
+            -addext "subjectAltName=DNS:localhost,IP:127.0.0.1"
+          openssl x509 -req -days 1 \
+            -in testdata/redpanda-certs/server.csr \
+            -CA testdata/redpanda-certs/ca.crt \
+            -CAkey testdata/redpanda-certs/ca.key \
+            -CAcreateserial \
+            -out testdata/redpanda-certs/server.crt \
+            -copy_extensions copy
+          chmod a+r testdata/redpanda-certs/*
+      - name: Start Redpanda
+        run: docker compose -f docker-compose.kafka-acl.yml up -d
+      - name: Wait for readiness
+        shell: bash
+        run: |
+          set -euo pipefail
+          rpk() { docker compose -f docker-compose.kafka-acl.yml exec -T redpanda rpk -X brokers=127.0.0.1:9092 -X tls.enabled=true -X tls.ca=/certs/ca.crt "$@"; }
+          ready=0
+          for i in $(seq 1 40); do
+            if rpk cluster info >/dev/null 2>&1; then ready=1; break; fi
+            sleep 3
+          done
+          if [ "$ready" != 1 ]; then
+            echo "redpanda TLS broker not ready"
+            docker compose -f docker-compose.kafka-acl.yml ps
+            docker compose -f docker-compose.kafka-acl.yml logs redpanda
+            exit 1
+          fi
+      - name: First TLS pin succeeds
+        env:
+          KAFKA_TLS_PIN_BROKERS: 127.0.0.1:9092
+          KAFKA_TLS_PIN_CA_CERT_FILE: ${{ github.workspace }}/testdata/redpanda-certs/ca.crt
+          KAFKA_TLS_PIN_PATH: ${{ runner.temp }}/mqgov_tls_known_hosts
+        run: go test -tags=integration -count=1 -run TestKafkaTLSPinningIntegration -v ./internal/backend/kafka/
+      - name: Same TLS pin succeeds
+        env:
+          KAFKA_TLS_PIN_BROKERS: 127.0.0.1:9092
+          KAFKA_TLS_PIN_CA_CERT_FILE: ${{ github.workspace }}/testdata/redpanda-certs/ca.crt
+          KAFKA_TLS_PIN_PATH: ${{ runner.temp }}/mqgov_tls_known_hosts
+        run: go test -tags=integration -count=1 -run TestKafkaTLSPinningIntegration -v ./internal/backend/kafka/
+      - name: Restart Redpanda with different leaf certificate
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker compose -f docker-compose.kafka-acl.yml down -v
+          openssl req -newkey rsa:2048 -nodes \
+            -keyout testdata/redpanda-certs/server.key \
+            -out testdata/redpanda-certs/server.csr \
+            -subj "/CN=localhost" \
+            -addext "subjectAltName=DNS:localhost,IP:127.0.0.1"
+          openssl x509 -req -days 1 \
+            -in testdata/redpanda-certs/server.csr \
+            -CA testdata/redpanda-certs/ca.crt \
+            -CAkey testdata/redpanda-certs/ca.key \
+            -CAcreateserial \
+            -out testdata/redpanda-certs/server.crt \
+            -copy_extensions copy
+          chmod a+r testdata/redpanda-certs/*
+          docker compose -f docker-compose.kafka-acl.yml up -d
+      - name: Wait for replacement readiness
+        shell: bash
+        run: |
+          set -euo pipefail
+          rpk() { docker compose -f docker-compose.kafka-acl.yml exec -T redpanda rpk -X brokers=127.0.0.1:9092 -X tls.enabled=true -X tls.ca=/certs/ca.crt "$@"; }
+          ready=0
+          for i in $(seq 1 40); do
+            if rpk cluster info >/dev/null 2>&1; then ready=1; break; fi
+            sleep 3
+          done
+          if [ "$ready" != 1 ]; then
+            echo "redpanda replacement TLS broker not ready"
+            docker compose -f docker-compose.kafka-acl.yml ps
+            docker compose -f docker-compose.kafka-acl.yml logs redpanda
+            exit 1
+          fi
+      - name: Changed TLS pin fails
+        env:
+          KAFKA_TLS_PIN_BROKERS: 127.0.0.1:9092
+          KAFKA_TLS_PIN_CA_CERT_FILE: ${{ github.workspace }}/testdata/redpanda-certs/ca.crt
+          KAFKA_TLS_PIN_PATH: ${{ runner.temp }}/mqgov_tls_known_hosts
+          KAFKA_TLS_PIN_EXPECT_FAILURE: "true"
+        run: go test -tags=integration -count=1 -run TestKafkaTLSPinningIntegration -v ./internal/backend/kafka/
+      - name: Dump broker logs on failure
+        if: failure()
+        run: docker compose -f docker-compose.kafka-acl.yml logs redpanda || true
+      - name: Tear down
+        if: always()
+        run: docker compose -f docker-compose.kafka-acl.yml down -v || true
+
   rabbitmq:
     name: real-backend integration (rabbitmq)
     timeout-minutes: 15

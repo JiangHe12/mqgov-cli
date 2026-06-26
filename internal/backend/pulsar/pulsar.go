@@ -22,6 +22,7 @@ import (
 	"github.com/JiangHe12/opskit-core/apperrors"
 
 	"github.com/JiangHe12/mqgov-cli/internal/mqgov"
+	"github.com/JiangHe12/mqgov-cli/internal/tlspin"
 )
 
 type Options struct {
@@ -35,6 +36,7 @@ type Options struct {
 	CACertFile     string
 	ClientCertFile string
 	ClientKeyFile  string
+	TLSPinPath     string
 	Timeout        time.Duration
 }
 
@@ -87,9 +89,16 @@ func New(opts Options) (*Broker, error) {
 	opts.Namespace = firstNonEmpty(opts.Namespace, "default")
 	opts.ServiceURL = firstNonEmpty(opts.ServiceURL, "pulsar://127.0.0.1:6650")
 	opts.AdminURL = firstNonEmpty(opts.AdminURL, "http://127.0.0.1:8080")
-	tlsConfig, err := buildTLSConfig(opts)
+	baseTLSConfig, err := buildTLSConfig(opts)
 	if err != nil {
 		return nil, err
+	}
+	var serviceTLSConfig *tls.Config
+	if baseTLSConfig != nil && strings.HasPrefix(strings.ToLower(strings.TrimSpace(opts.ServiceURL)), "pulsar+ssl://") {
+		serviceTLSConfig, err = tlspin.CloneForEndpoint(baseTLSConfig, opts.TLSPinPath, opts.ServiceURL, tlspin.NotifyStderr)
+		if err != nil {
+			return nil, err
+		}
 	}
 	clientOpts := pulsarclient.ClientOptions{
 		URL:                        opts.ServiceURL,
@@ -97,7 +106,7 @@ func New(opts Options) (*Broker, error) {
 		OperationTimeout:           timeout(opts),
 		TLSAllowInsecureConnection: false,
 		TLSValidateHostname:        true,
-		TLSConfig:                  tlsConfig,
+		TLSConfig:                  serviceTLSConfig,
 	}
 	if opts.CACertFile != "" {
 		clientOpts.TLSTrustCertsFilePath = opts.CACertFile
@@ -117,10 +126,15 @@ func New(opts Options) (*Broker, error) {
 		return nil, unreachable(err)
 	}
 	httpClient := &http.Client{Timeout: timeout(opts)}
-	if tlsConfig != nil {
-		httpClient.Transport = &http.Transport{TLSClientConfig: tlsConfig}
+	if baseTLSConfig != nil && strings.HasPrefix(strings.ToLower(strings.TrimSpace(opts.AdminURL)), "https://") {
+		adminTLSConfig, err := tlspin.CloneForEndpoint(baseTLSConfig, opts.TLSPinPath, opts.AdminURL, tlspin.NotifyStderr)
+		if err != nil {
+			client.Close()
+			return nil, err
+		}
+		httpClient.Transport = &http.Transport{TLSClientConfig: adminTLSConfig}
 	}
-	return &Broker{opts: opts, client: client, httpClient: httpClient, tlsConfig: tlsConfig}, nil
+	return &Broker{opts: opts, client: client, httpClient: httpClient, tlsConfig: serviceTLSConfig}, nil
 }
 
 func (b *Broker) Ping(ctx context.Context) error {
@@ -1373,7 +1387,7 @@ func maxInt(a, b int) int {
 }
 
 func buildTLSConfig(opts Options) (*tls.Config, error) {
-	if !opts.TLS && opts.CACertFile == "" && opts.ClientCertFile == "" && opts.ClientKeyFile == "" {
+	if !pulsarUsesTLS(opts) && opts.CACertFile == "" && opts.ClientCertFile == "" && opts.ClientKeyFile == "" {
 		return nil, nil
 	}
 	cfg := &tls.Config{MinVersion: tls.VersionTLS12}
@@ -1402,6 +1416,9 @@ func buildTLSConfig(opts Options) (*tls.Config, error) {
 }
 
 func unreachable(err error) error {
+	if appErr := tlspin.AppError(err); appErr != nil {
+		return appErr
+	}
 	return apperrors.New(apperrors.CodeBackendUnreachable, "pulsar backend unreachable", err)
 }
 
@@ -1509,4 +1526,10 @@ func abs64(value int64) int64 {
 		return -value
 	}
 	return value
+}
+
+func pulsarUsesTLS(opts Options) bool {
+	return opts.TLS ||
+		strings.HasPrefix(strings.ToLower(strings.TrimSpace(opts.ServiceURL)), "pulsar+ssl://") ||
+		strings.HasPrefix(strings.ToLower(strings.TrimSpace(opts.AdminURL)), "https://")
 }

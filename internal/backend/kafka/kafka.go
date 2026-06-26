@@ -27,6 +27,7 @@ import (
 	"github.com/JiangHe12/opskit-core/apperrors"
 
 	"github.com/JiangHe12/mqgov-cli/internal/mqgov"
+	"github.com/JiangHe12/mqgov-cli/internal/tlspin"
 )
 
 type Options struct {
@@ -43,6 +44,7 @@ type Options struct {
 	SchemaRegistryURL      string
 	SchemaRegistryUsername string
 	SchemaRegistryPassword string
+	TLSPinPath             string
 	Timeout                time.Duration
 }
 
@@ -1310,7 +1312,10 @@ func schemaRegistryHTTPClient(opts Options) (*http.Client, error) {
 			return nil, err
 		}
 		if tlsConfig == nil {
-			tlsConfig = &tls.Config{MinVersion: tls.VersionTLS12}
+			tlsConfig, err = tlspin.Attach(&tls.Config{MinVersion: tls.VersionTLS12}, opts.TLSPinPath, tlspin.NotifyStderr)
+			if err != nil {
+				return nil, err
+			}
 		}
 		client.Transport = &http.Transport{TLSClientConfig: tlsConfig}
 	}
@@ -1412,7 +1417,7 @@ func buildTLSConfig(opts Options) (*tls.Config, error) {
 		}
 		cfg.Certificates = []tls.Certificate{cert}
 	}
-	return cfg, nil
+	return tlspin.Attach(cfg, opts.TLSPinPath, tlspin.NotifyStderr)
 }
 
 func loadCertPool(path string) (*x509.CertPool, error) {
@@ -1763,6 +1768,9 @@ func aclSortKey(binding mqgov.ACLBinding) string {
 }
 
 func unreachable(causes ...error) error {
+	if appErr := tlspin.AppError(firstCause(causes)); appErr != nil {
+		return appErr
+	}
 	return apperrors.New(apperrors.CodeBackendUnreachable, "kafka backend unreachable", firstCause(causes))
 }
 
