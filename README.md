@@ -285,11 +285,13 @@ mqgov acl revoke --principal app-role --resource-type topic --resource-name orde
 ```bash
 # Backend-bound contexts (credentials go through credstore, never plaintext)
 mqgov ctx set <name> --backend kafka    --brokers <h:p,h:p> [--sasl-mechanism PLAIN] [--tls --ca-cert <f>] [--schema-registry-url <url>] [--schema-registry-username <u>] [--schema-registry-password <p>] [--protected]
-mqgov ctx set <name> --backend rabbitmq (--amqp-url <url> | --host <h> --port <p> --vhost </>) --management-url <url>
+mqgov ctx set <name> --backend rabbitmq (--amqp-url <url> | --host <h> --port <p> --vhost </>) --management-url <url> --username <u>
 mqgov ctx set <name> --backend pulsar   --service-url pulsar://<h:p> --admin-url http://<h:p> [--tenant public] [--pulsar-namespace default]
 mqgov ctx set <name> --backend rocketmq --nameservers <h:p,h:p> [--broker-addr <h:p>]
 mqgov ctx use|list|current|delete|test
 #   secrets: --password <pw|token|secretKey> and --schema-registry-password <pw> go through --credential-backend <encrypted-file|keychain|...>  (a non-plain backend is required)
+#   RabbitMQ: prefer --username plus MQGOV_PASSWORD for non-interactive runs; to persist a password, use --password with keychain or encrypted-file.
+#   If --amqp-url contains userinfo, explicit --username and password sources override it for both AMQP and management API auth.
 
 # Audit (tamper-evident, fingerprint-only)
 mqgov audit query  [--since 24h] [--type <t>] [--operator <o>] [--status <s>] [--limit 100] -o json

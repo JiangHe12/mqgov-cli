@@ -52,6 +52,7 @@ type Broker struct {
 }
 
 func New(opts Options) (*Broker, error) {
+	opts = normalizeConnectionCredentials(opts)
 	baseTLSConfig, err := buildTLSConfig(opts)
 	if err != nil {
 		return nil, err
@@ -74,6 +75,23 @@ func New(opts Options) (*Broker, error) {
 		httpClient.Transport = &http.Transport{TLSClientConfig: managementTLSConfig}
 	}
 	return &Broker{opts: opts, amqpURL: amqpURL, manageURL: managementURL, httpClient: httpClient, tlsConfig: amqpTLSConfig}, nil
+}
+
+func normalizeConnectionCredentials(opts Options) Options {
+	urlUsername, urlPassword := amqpURLUserInfo(opts.AMQPURL)
+	if opts.Username == "" {
+		opts.Username = urlUsername
+	}
+	if opts.Password == "" {
+		opts.Password = urlPassword
+	}
+	if opts.Username == "" {
+		opts.Username = "guest"
+	}
+	if opts.Password == "" {
+		opts.Password = "guest"
+	}
+	return opts
 }
 
 func (b *Broker) Ping(ctx context.Context) error {
@@ -790,7 +808,7 @@ func (b *Broker) vhost() string {
 
 func buildAMQPURL(opts Options) string {
 	if opts.AMQPURL != "" {
-		return opts.AMQPURL
+		return amqpURLWithUserInfo(opts.AMQPURL, opts.Username, opts.Password)
 	}
 	host := opts.Host
 	if host == "" {
@@ -811,6 +829,30 @@ func buildAMQPURL(opts Options) string {
 		u.User = url.UserPassword(opts.Username, opts.Password)
 	}
 	return u.String()
+}
+
+func amqpURLUserInfo(rawURL string) (string, string) {
+	if strings.TrimSpace(rawURL) == "" {
+		return "", ""
+	}
+	parsed, err := url.Parse(rawURL)
+	if err != nil || parsed.User == nil {
+		return "", ""
+	}
+	password, _ := parsed.User.Password()
+	return parsed.User.Username(), password
+}
+
+func amqpURLWithUserInfo(rawURL, username, password string) string {
+	if strings.TrimSpace(rawURL) == "" || username == "" {
+		return rawURL
+	}
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return rawURL
+	}
+	parsed.User = url.UserPassword(username, password)
+	return parsed.String()
 }
 
 func buildManagementURL(opts Options) string {

@@ -3,6 +3,7 @@ package mqgovctx
 import (
 	"context"
 	"fmt"
+	"os"
 
 	"github.com/JiangHe12/opskit-core/apperrors"
 	"github.com/JiangHe12/opskit-core/credstore"
@@ -86,6 +87,11 @@ func Use(name string) error { return store.UseContext(name) }
 func Delete(name string) error { return store.DeleteContext(name) }
 
 func ResolvePassword(ctx context.Context, name string, item Context) (string, error) {
+	if item.Password == "" {
+		if password := os.Getenv("MQGOV_PASSWORD"); password != "" {
+			return password, nil
+		}
+	}
 	return item.ResolvePasswordContext(ctx, name)
 }
 

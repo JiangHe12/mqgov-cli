@@ -85,6 +85,11 @@ go mod tidy                             # must be a no-op
   Pulsar TLS connections pin the server leaf SPKI-SHA256 on first use in
   `.mqgov-cli/tls_known_hosts` and hard-fail on any later SPKI mismatch;
   RocketMQ currently has no TLS client path to pin.
+- RabbitMQ credentials use the same username/password for AMQP and the
+  management API. Prefer `ctx set --backend rabbitmq --username <user>` plus
+  `MQGOV_PASSWORD` at command runtime when no credential is stored; persistent
+  passwords must use a non-plain credstore backend. If `--amqp-url` also embeds
+  userinfo, explicit `--username` and password sources take precedence.
 
 ## Backends — the dumb-adapter contract
 
