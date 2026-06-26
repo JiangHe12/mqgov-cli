@@ -64,8 +64,8 @@ func ctxSetCmd(f *cliFlags) *cobra.Command { //nolint:gocyclo // Backend-specifi
 			if !supportedContextBackend(f.Backend) {
 				return apperrors.New(apperrors.CodeNotImplemented, "backend is not supported", nil)
 			}
-			if (opts.password != "" || opts.kafkaSchemaRegistryPassword != "") && (opts.credentialBackend == "" || opts.credentialBackend == "plain-yaml") {
-				return apperrors.New(apperrors.CodeUsageError, "credentials must use a non-plain credential backend", nil)
+			if err := credstore.RequireSecureBackend(opts.credentialBackend, opts.password != "" || opts.kafkaSchemaRegistryPassword != ""); err != nil {
+				return err
 			}
 			item := mqgovctx.Context{
 				Base: corectx.Base{

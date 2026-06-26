@@ -13,8 +13,8 @@ github.com/Azure/go-ansiterm v0.0.0-20210617225240-d185dfc1b5a1/go.mod h1:xomTg6
 github.com/BurntSushi/toml v1.1.0/go.mod h1:CxXYINrC8qIiEnFrOxCa7Jy5BFHlXnUU2pbicEuybxQ=
 github.com/DataDog/zstd v1.5.0 h1:+K/VEwIAaPcHiMtQvpLD4lqW7f0Gk3xdYZmI1hD+CXo=
 github.com/DataDog/zstd v1.5.0/go.mod h1:g4AWEaM3yOg3HYfnJ3YIawPnVdXJh9QME85blwSAmyw=
-github.com/JiangHe12/opskit-core v1.1.0 h1:BJnOxpLKtfwVEKPMN2UP+W0oiRnkYyRqSGWftmwi8lc=
-github.com/JiangHe12/opskit-core v1.1.0/go.mod h1:IKu3gwrhfT7dZ19jM4i6k+i5YEJxU6g0n3LOAe6tIqY=
+github.com/JiangHe12/opskit-core v1.1.1 h1:7dwJibQYGDtgcVCNSAMTaC8sIPIthERxMmGJo8fWEmc=
+github.com/JiangHe12/opskit-core v1.1.1/go.mod h1:IKu3gwrhfT7dZ19jM4i6k+i5YEJxU6g0n3LOAe6tIqY=
 github.com/Microsoft/go-winio v0.6.2 h1:F2VQgta7ecxGYO8k3ZZz3RS8fVIXVxONVUPlNERoyfY=
 github.com/Microsoft/go-winio v0.6.2/go.mod h1:yd8OoFMLzJbo9gZq8j5qaps8bJ9aShtEA8Ipt1oGCvU=
 github.com/RoaringBitmap/roaring/v2 v2.8.0 h1:y1rdtixfXvaITKzkfiKvScI0hlBJHe9sfzJp8cgeM7w=
