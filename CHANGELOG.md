@@ -2,6 +2,11 @@
 
 All notable changes to this project are documented in this file.
 
+## v0.5.2
+
+### Changed
+- Reuse opskit-core's shared secure-backend guard for stored credentials; behavior is unchanged.
+
 ## v0.5.1
 
 _RabbitMQ credential-supply fixes._
