@@ -65,19 +65,20 @@ func newFleetStatusCmd(f *cliFlags) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			opTarget := fleetOperationTarget(contexts)
 			results := make([]fleetStatusItem, 0, len(contexts))
 			for _, item := range contexts {
 				results = append(results, fleetStatusForContext(cmd, f, item))
 			}
 			appendFleetAudit(f, contexts, fleetStatusAudit(results))
 			if f.Output == "json" {
-				return newPrinter(f).JSONList("FleetStatus", results, len(results), 1, len(results), false)
+				return targetJSONList(f, "FleetStatus", results, len(results), len(results), opTarget)
 			}
 			rows := make([][]string, 0, len(results))
 			for _, item := range results {
 				rows = append(rows, []string{item.Context, item.Status, item.Backend, item.Cluster, item.Namespace, strconv.FormatBool(item.Capabilities.SupportsACL), strconv.FormatBool(item.Capabilities.SupportsSchema), item.Error})
 			}
-			newPrinter(f).Table([]string{"CONTEXT", "STATUS", "BACKEND", "CLUSTER", "NAMESPACE", "ACL", "SCHEMA", "ERROR"}, rows)
+			targetTable(f, []string{"CONTEXT", "STATUS", "BACKEND", "CLUSTER", "NAMESPACE", "ACL", "SCHEMA", "ERROR"}, rows, opTarget)
 			return nil
 		},
 	}
@@ -98,13 +99,14 @@ func newFleetTopicsCmd(f *cliFlags) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			opTarget := fleetOperationTarget(contexts)
 			results := make([]fleetTopicItem, 0, len(contexts))
 			for _, item := range contexts {
 				results = append(results, fleetTopicsForContext(cmd, f, item, pattern, limit))
 			}
 			appendFleetAudit(f, contexts, fleetTopicsAudit(results))
 			if f.Output == "json" {
-				return newPrinter(f).JSONList("FleetTopics", results, len(results), 1, len(results), false)
+				return targetJSONList(f, "FleetTopics", results, len(results), len(results), opTarget)
 			}
 			rows := make([][]string, 0)
 			for _, item := range results {
@@ -116,7 +118,7 @@ func newFleetTopicsCmd(f *cliFlags) *cobra.Command {
 					rows = append(rows, []string{item.Context, item.Status, item.Backend, topic.Coordinate.Topic, strconv.Itoa(topic.Partitions), ""})
 				}
 			}
-			newPrinter(f).Table([]string{"CONTEXT", "STATUS", "BACKEND", "TOPIC", "PARTITIONS", "ERROR"}, rows)
+			targetTable(f, []string{"CONTEXT", "STATUS", "BACKEND", "TOPIC", "PARTITIONS", "ERROR"}, rows, opTarget)
 			return nil
 		},
 	}

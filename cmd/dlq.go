@@ -31,6 +31,7 @@ func newDLQListCmd(f *cliFlags) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			opTarget := operationTargetFromBroker(f, backend)
 			if !backend.Capabilities().SupportsDLQList {
 				return apperrors.New(apperrors.CodeNotImplemented, "backend does not support DLQ listing", nil)
 			}
@@ -47,13 +48,13 @@ func newDLQListCmd(f *cliFlags) *cobra.Command {
 			}
 			appendAuditWarn(f, auditEventDLQ, meta, audit.EventTarget{ResourceType: "dlq"}, audit.StatusSuccess, fmt.Sprintf("list count=%d", len(items)), nil)
 			if f.Output == "json" {
-				return newPrinter(f).JSONList("DLQList", items, len(items), 1, len(items), false)
+				return targetJSONList(f, "DLQList", items, len(items), len(items), opTarget)
 			}
 			rows := make([][]string, 0, len(items))
 			for _, item := range items {
 				rows = append(rows, []string{item.Coordinate.Topic, item.SourceTopic, item.ConsumerGroup, item.NativeModel, strconv.FormatInt(item.Messages, 10)})
 			}
-			newPrinter(f).Table([]string{"DLQ", "SOURCE", "GROUP", "NATIVE MODEL", "MESSAGES"}, rows)
+			targetTable(f, []string{"DLQ", "SOURCE", "GROUP", "NATIVE MODEL", "MESSAGES"}, rows, opTarget)
 			return nil
 		},
 	}
@@ -78,6 +79,7 @@ func newDLQPeekCmd(f *cliFlags) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			opTarget := operationTargetFromBroker(f, backend)
 			if !backend.Capabilities().SupportsDLQPeek {
 				return apperrors.New(apperrors.CodeNotImplemented, "backend does not support non-destructive DLQ peek", nil)
 			}
@@ -94,7 +96,7 @@ func newDLQPeekCmd(f *cliFlags) *cobra.Command {
 				return err
 			}
 			appendAuditWarn(f, auditEventDLQ, meta, audit.EventTarget{ResourceType: "dlq", Resource: dlq}, audit.StatusSuccess, fmt.Sprintf("peek count=%d", result.Count), nil)
-			return newPrinter(f).JSONData("DLQPeekResult", result)
+			return targetJSONData(f, "DLQPeekResult", result, opTarget, operationTargetRead)
 		},
 	}
 	cmd.Flags().StringVar(&topic, "topic", "", "Source topic hint")
@@ -119,6 +121,7 @@ func newDLQRedriveCmd(f *cliFlags) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			opTarget := operationTargetFromBroker(f, backend)
 			if !backend.Capabilities().SupportsDLQRedrive {
 				return apperrors.New(apperrors.CodeNotImplemented, "backend does not support DLQ redrive", nil)
 			}
@@ -145,7 +148,7 @@ func newDLQRedriveCmd(f *cliFlags) *cobra.Command {
 				return err
 			}
 			appendAuditWarn(f, auditEventDLQ, meta, audit.EventTarget{ResourceType: "dlq", Resource: dlq}, audit.StatusSuccess, fmt.Sprintf("redrive count=%d", result.Fingerprint.Count), nil)
-			return newPrinter(f).JSONData("DLQRedriveResult", result)
+			return targetJSONData(f, "DLQRedriveResult", result, opTarget, operationTargetWrite)
 		},
 	}
 	cmd.Flags().StringVar(&topic, "topic", "", "Source topic hint")
@@ -167,6 +170,7 @@ func newDLQPurgeCmd(f *cliFlags) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			opTarget := operationTargetFromBroker(f, backend)
 			if !backend.Capabilities().SupportsDLQPurge {
 				return apperrors.New(apperrors.CodeNotImplemented, "backend does not support DLQ purge", nil)
 			}
@@ -189,7 +193,7 @@ func newDLQPurgeCmd(f *cliFlags) *cobra.Command {
 				return err
 			}
 			appendAuditWarn(f, auditEventDLQ, meta, audit.EventTarget{ResourceType: "dlq", Resource: dlq}, audit.StatusSuccess, fmt.Sprintf("purge count=%d", result.Fingerprint.Count), nil)
-			return newPrinter(f).JSONData("DLQPurgeResult", result)
+			return targetJSONData(f, "DLQPurgeResult", result, opTarget, operationTargetWrite)
 		},
 	}
 	cmd.Flags().StringVar(&topic, "topic", "", "Source topic hint")

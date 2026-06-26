@@ -39,6 +39,7 @@ func newMessagePeekCmd(f *cliFlags) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			opTarget := operationTargetFromBroker(f, backend)
 			topic := args[0]
 			if err := classifyAndAuthorize(f, meta, mqclass.OperationPeek, mqclass.Target{Topic: topic}, ""); err != nil {
 				return err
@@ -48,7 +49,7 @@ func newMessagePeekCmd(f *cliFlags) *cobra.Command {
 				return err
 			}
 			appendAuditWarn(f, auditEventMessage, meta, audit.EventTarget{ResourceType: "message", Resource: topic}, audit.StatusSuccess, fmt.Sprintf("peek count=%d", result.Count), nil)
-			return newPrinter(f).JSONData("MessagePeekResult", result)
+			return targetJSONData(f, "MessagePeekResult", result, opTarget, operationTargetRead)
 		},
 	}
 	cmd.Flags().IntVar(&partition, "partition", 0, "Partition")
@@ -72,6 +73,7 @@ func newMessageTailCmd(f *cliFlags) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			opTarget := operationTargetFromBroker(f, backend)
 			tailer, ok := mqgov.SupportsTail(backend)
 			if !ok {
 				return apperrors.New(apperrors.CodeNotImplemented, "backend does not support non-destructive message tail", nil)
@@ -88,8 +90,9 @@ func newMessageTailCmd(f *cliFlags) *cobra.Command {
 			runCtx, cancel := context.WithTimeout(cmd.Context(), timeout)
 			defer cancel()
 			req := mqgov.MessageTailRequest{Coordinate: topicCoord(f, meta, topic), Partition: partition, From: from, Follow: follow, MaxMessages: maxMessages}
+			printOperationTarget(newPrinter(f), opTarget, operationTargetRead)
 			result, tailErr := tailer.Tail(runCtx, req, func(fp mqgov.MessageFingerprint) error {
-				return printTailFingerprint(f, fp)
+				return printTailFingerprint(f, fp, opTarget)
 			})
 			auditStatus := audit.StatusSuccess
 			var auditErr error
@@ -101,7 +104,7 @@ func newMessageTailCmd(f *cliFlags) *cobra.Command {
 			if auditErr != nil {
 				return tailErr
 			}
-			return printTailResult(f, result)
+			return printTailResult(f, result, opTarget)
 		},
 	}
 	cmd.Flags().IntVar(&partition, "partition", -1, "Partition to tail (-1 = all partitions when supported)")
@@ -112,17 +115,17 @@ func newMessageTailCmd(f *cliFlags) *cobra.Command {
 	return cmd
 }
 
-func printTailFingerprint(f *cliFlags, fp mqgov.MessageFingerprint) error {
+func printTailFingerprint(f *cliFlags, fp mqgov.MessageFingerprint, target operationTarget) error {
 	if f.Output == "json" {
-		return newPrinter(f).JSONData("MessageFingerprint", fp)
+		return newPrinter(f).JSONData("MessageFingerprint", targetDataForOutput(f, fp, target))
 	}
 	newPrinter(f).Info(fmt.Sprintf("partition=%d offset=%d key-sha256=%s body-sha256=%s size=%d timestamp=%s", fp.Partition, fp.Offset, fp.KeySHA256, fp.BodySHA256, fp.Size, fp.Timestamp))
 	return nil
 }
 
-func printTailResult(f *cliFlags, result mqgov.MessageTailResult) error {
+func printTailResult(f *cliFlags, result mqgov.MessageTailResult, target operationTarget) error {
 	if f.Output == "json" {
-		return newPrinter(f).JSONData("MessageTailResult", result)
+		return newPrinter(f).JSONData("MessageTailResult", targetDataForOutput(f, result, target))
 	}
 	newPrinter(f).Info(fmt.Sprintf("tail complete count=%d totalSize=%d", result.Count, result.TotalSize))
 	return nil
@@ -144,6 +147,7 @@ func newMessageProduceCmd(f *cliFlags) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			opTarget := operationTargetFromBroker(f, backend)
 			topic := args[0]
 			desc, _ := backend.DescribeTopic(cmd.Context(), topicCoord(f, meta, topic))
 			target := mqclass.Target{Topic: topic, ProtectedTopic: isProtectedTopic(meta, topic, desc), InternalTopic: desc.Internal}
@@ -160,7 +164,7 @@ func newMessageProduceCmd(f *cliFlags) *cobra.Command {
 				return err
 			}
 			appendAuditWarn(f, auditEventMessage, meta, audit.EventTarget{ResourceType: "message", Resource: topic}, audit.StatusSuccess, fmt.Sprintf("produce key-sha256=%s body-sha256=%s size=%d", result.Fingerprint.KeySHA256, result.Fingerprint.BodySHA256, result.Fingerprint.Size), nil)
-			return newPrinter(f).JSONData("MessageProduceResult", result)
+			return targetJSONData(f, "MessageProduceResult", result, opTarget, operationTargetWrite)
 		},
 	}
 	cmd.Flags().StringVar(&key, "key", "", "Message key")
@@ -208,6 +212,7 @@ func newMessageMirrorCmd(f *cliFlags) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			opTarget := operationTargetFromBroker(targetFlags, targetBackend)
 			dryRun := f.DryRun || f.Plan
 			targetDesc, _ := targetBackend.DescribeTopic(cmd.Context(), topicCoord(targetFlags, targetMeta, toTopic))
 			target := mqclass.Target{Topic: toTopic, ProtectedTopic: isProtectedTopic(targetMeta, toTopic, targetDesc), InternalTopic: targetDesc.Internal, Plan: dryRun}
@@ -241,7 +246,7 @@ func newMessageMirrorCmd(f *cliFlags) *cobra.Command {
 				return err
 			}
 			appendAuditWarn(f, auditEventMessage, sourceMeta, audit.EventTarget{ResourceType: "message", Resource: sourceTopic + "->" + toContext + "/" + toTopic}, audit.StatusSuccess, mirrorAuditDiff(result), nil)
-			return newPrinter(f).JSONData("MessageMirrorResult", result)
+			return targetJSONData(f, "MessageMirrorResult", result, opTarget, operationTargetWrite)
 		},
 	}
 	cmd.Flags().StringVar(&toContext, "to-context", "", "Target context name")

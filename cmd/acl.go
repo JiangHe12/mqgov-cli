@@ -41,6 +41,7 @@ func newACLListCmd(f *cliFlags) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			opTarget := operationTargetFromBroker(f, backend)
 			manager, ok := mqgov.SupportsACL(backend)
 			if !ok {
 				return apperrors.New(apperrors.CodeNotImplemented, "backend does not support ACL management", nil)
@@ -56,13 +57,13 @@ func newACLListCmd(f *cliFlags) *cobra.Command {
 			}
 			appendAuditWarn(f, auditEventACL, meta, audit.EventTarget{ResourceType: "acl"}, audit.StatusSuccess, fmt.Sprintf("list count=%d filter=%s", len(items), aclFilterDiff(filter)), nil)
 			if f.Output == "json" {
-				return newPrinter(f).JSONList("ACLList", items, len(items), 1, len(items), false)
+				return targetJSONList(f, "ACLList", items, len(items), len(items), opTarget)
 			}
 			rows := make([][]string, 0, len(items))
 			for _, item := range items {
 				rows = append(rows, []string{item.Principal, item.Host, item.Vhost, item.ResourceType, item.ResourceName, item.PatternType, item.Operation, item.Permission})
 			}
-			newPrinter(f).Table([]string{"PRINCIPAL", "HOST", "VHOST", "RESOURCE TYPE", "RESOURCE NAME", "PATTERN", "OPERATION", "PERMISSION"}, rows)
+			targetTable(f, []string{"PRINCIPAL", "HOST", "VHOST", "RESOURCE TYPE", "RESOURCE NAME", "PATTERN", "OPERATION", "PERMISSION"}, rows, opTarget)
 			return nil
 		},
 	}
@@ -84,6 +85,7 @@ func newACLGrantCmd(f *cliFlags) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			opTarget := operationTargetFromBroker(f, backend)
 			manager, ok := mqgov.SupportsACL(backend)
 			if !ok {
 				return apperrors.New(apperrors.CodeNotImplemented, "backend does not support ACL management", nil)
@@ -102,7 +104,7 @@ func newACLGrantCmd(f *cliFlags) *cobra.Command {
 				return err
 			}
 			appendAuditWarn(f, auditEventACL, meta, aclAuditTarget(binding), audit.StatusSuccess, aclBindingDiff(binding), nil)
-			return newPrinter(f).JSONData("ACLBinding", binding)
+			return targetJSONData(f, "ACLBinding", binding, opTarget, operationTargetWrite)
 		},
 	}
 	addACLBindingFlags(cmd, &flags)
@@ -120,6 +122,7 @@ func newACLRevokeCmd(f *cliFlags) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			opTarget := operationTargetFromBroker(f, backend)
 			manager, ok := mqgov.SupportsACL(backend)
 			if !ok {
 				return apperrors.New(apperrors.CodeNotImplemented, "backend does not support ACL management", nil)
@@ -133,7 +136,7 @@ func newACLRevokeCmd(f *cliFlags) *cobra.Command {
 				return err
 			}
 			appendAuditWarn(f, auditEventACL, meta, aclAuditTarget(binding), audit.StatusSuccess, aclBindingDiff(binding), nil)
-			return newPrinter(f).JSONData("ACLBinding", binding)
+			return targetJSONData(f, "ACLBinding", binding, opTarget, operationTargetWrite)
 		},
 	}
 	addACLBindingFlags(cmd, &flags)

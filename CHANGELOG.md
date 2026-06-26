@@ -2,6 +2,11 @@
 
 All notable changes to this project are documented in this file.
 
+## v0.5.3
+
+### Added
+- Operation commands now show their target context/backend/cluster/namespace in table/plain output and JSON data.target.
+
 ## v0.5.2
 
 ### Changed

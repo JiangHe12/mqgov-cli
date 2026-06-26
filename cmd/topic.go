@@ -31,6 +31,7 @@ func newTopicListCmd(f *cliFlags) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			opTarget := operationTargetFromBroker(f, backend)
 			if err := classifyAndAuthorize(f, meta, mqclass.OperationList, mqclass.Target{Topic: pattern}, ""); err != nil {
 				return err
 			}
@@ -40,13 +41,13 @@ func newTopicListCmd(f *cliFlags) *cobra.Command {
 			}
 			appendAuditWarn(f, auditEventTopic, meta, audit.EventTarget{ResourceType: "topic"}, audit.StatusSuccess, fmt.Sprintf("list count=%d", len(items)), nil)
 			if f.Output == "json" {
-				return newPrinter(f).JSONList("TopicList", items, len(items), 1, len(items), false)
+				return targetJSONList(f, "TopicList", items, len(items), len(items), opTarget)
 			}
 			rows := make([][]string, 0, len(items))
 			for _, item := range items {
 				rows = append(rows, []string{item.Coordinate.Topic, strconv.Itoa(item.Partitions), strconv.FormatBool(item.Protected), strconv.FormatBool(item.Internal)})
 			}
-			newPrinter(f).Table([]string{"TOPIC", "PARTITIONS", "PROTECTED", "INTERNAL"}, rows)
+			targetTable(f, []string{"TOPIC", "PARTITIONS", "PROTECTED", "INTERNAL"}, rows, opTarget)
 			return nil
 		},
 	}
@@ -64,6 +65,7 @@ func newTopicDescribeCmd(f *cliFlags) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			opTarget := operationTargetFromBroker(f, backend)
 			topic := args[0]
 			if err := classifyAndAuthorize(f, meta, mqclass.OperationDescribe, mqclass.Target{Topic: topic}, ""); err != nil {
 				return err
@@ -73,7 +75,7 @@ func newTopicDescribeCmd(f *cliFlags) *cobra.Command {
 				return err
 			}
 			appendAuditWarn(f, auditEventTopic, meta, audit.EventTarget{ResourceType: "topic", Resource: topic}, audit.StatusSuccess, "describe", nil)
-			return newPrinter(f).JSONData("TopicDescription", desc)
+			return targetJSONData(f, "TopicDescription", desc, opTarget, operationTargetRead)
 		},
 	}
 }
@@ -89,6 +91,7 @@ func newTopicCreateCmd(f *cliFlags) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			opTarget := operationTargetFromBroker(f, backend)
 			topic := args[0]
 			target := mqclass.Target{Topic: topic, ProtectedTopic: isProtectedTopic(meta, topic, mqgov.TopicDescription{})}
 			if err := classifyAndAuthorize(f, meta, mqclass.OperationCreateTopic, target, ""); err != nil {
@@ -100,7 +103,7 @@ func newTopicCreateCmd(f *cliFlags) *cobra.Command {
 				return err
 			}
 			appendAuditWarn(f, auditEventTopic, meta, audit.EventTarget{ResourceType: "topic", Resource: topic}, audit.StatusSuccess, "create", nil)
-			return newPrinter(f).JSONData("TopicDescription", desc)
+			return targetJSONData(f, "TopicDescription", desc, opTarget, operationTargetWrite)
 		},
 	}
 	cmd.Flags().IntVar(&partitions, "partitions", 1, "Partition count")
@@ -118,6 +121,7 @@ func newTopicAlterCmd(f *cliFlags) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			opTarget := operationTargetFromBroker(f, backend)
 			manager, ok := mqgov.SupportsPartitions(backend)
 			if !ok {
 				return apperrors.New(apperrors.CodeNotImplemented, "backend does not support partition management", nil)
@@ -134,7 +138,7 @@ func newTopicAlterCmd(f *cliFlags) *cobra.Command {
 				return err
 			}
 			appendAuditWarn(f, auditEventTopic, meta, audit.EventTarget{ResourceType: "topic", Resource: topic}, audit.StatusSuccess, "alter", nil)
-			return newPrinter(f).JSONData("TopicDescription", changed)
+			return targetJSONData(f, "TopicDescription", changed, opTarget, operationTargetWrite)
 		},
 	}
 	cmd.Flags().IntVar(&partitions, "partitions", 0, "New partition count")
@@ -151,6 +155,7 @@ func newTopicDeleteCmd(f *cliFlags) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			opTarget := operationTargetFromBroker(f, backend)
 			topic := args[0]
 			desc, _ := backend.DescribeTopic(cmd.Context(), topicCoord(f, meta, topic))
 			target := mqclass.Target{Topic: topic, ProtectedTopic: isProtectedTopic(meta, topic, desc), InternalTopic: desc.Internal}
@@ -162,7 +167,7 @@ func newTopicDeleteCmd(f *cliFlags) *cobra.Command {
 				return err
 			}
 			appendAuditWarn(f, auditEventTopic, meta, audit.EventTarget{ResourceType: "topic", Resource: topic}, audit.StatusSuccess, "delete", nil)
-			return newPrinter(f).JSONData("DeleteResult", map[string]string{"topic": topic, "status": audit.StatusSuccess})
+			return targetJSONData(f, "DeleteResult", map[string]string{"topic": topic, "status": audit.StatusSuccess}, opTarget, operationTargetWrite)
 		},
 	}
 }
@@ -178,6 +183,7 @@ func newTopicPurgeCmd(f *cliFlags) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			opTarget := operationTargetFromBroker(f, backend)
 			manager, ok := mqgov.SupportsPartitions(backend)
 			if !ok {
 				return apperrors.New(apperrors.CodeNotImplemented, "backend does not support topic purge", nil)
@@ -202,7 +208,7 @@ func newTopicPurgeCmd(f *cliFlags) *cobra.Command {
 				return err
 			}
 			appendAuditWarn(f, auditEventTopic, meta, audit.EventTarget{ResourceType: "topic", Resource: topic}, audit.StatusSuccess, fmt.Sprintf("purge count=%d", result.Fingerprint.Count), nil)
-			return newPrinter(f).JSONData("TopicPurgeResult", result)
+			return targetJSONData(f, "TopicPurgeResult", result, opTarget, operationTargetWrite)
 		},
 	}
 	cmd.Flags().BoolVar(&dlq, "dlq", false, "Purge DLQ")
