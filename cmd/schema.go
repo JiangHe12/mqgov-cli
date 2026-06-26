@@ -32,6 +32,7 @@ func newSchemaListCmd(f *cliFlags) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			opTarget := operationTargetFromBroker(f, backend)
 			manager, err := schemaManager(backend)
 			if err != nil {
 				return err
@@ -46,13 +47,13 @@ func newSchemaListCmd(f *cliFlags) *cobra.Command {
 			}
 			appendAuditWarn(f, auditEventSchema, meta, audit.EventTarget{ResourceType: "schema"}, audit.StatusSuccess, fmt.Sprintf("list count=%d", len(items)), nil)
 			if f.Output == "json" {
-				return newPrinter(f).JSONList("SchemaList", items, len(items), 1, len(items), false)
+				return targetJSONList(f, "SchemaList", items, len(items), len(items), opTarget)
 			}
 			rows := make([][]string, 0, len(items))
 			for _, item := range items {
 				rows = append(rows, []string{item.Subject})
 			}
-			newPrinter(f).Table([]string{"SUBJECT"}, rows)
+			targetTable(f, []string{"SUBJECT"}, rows, opTarget)
 			return nil
 		},
 	}
@@ -72,6 +73,7 @@ func newSchemaDescribeCmd(f *cliFlags) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			opTarget := operationTargetFromBroker(f, backend)
 			manager, err := schemaManager(backend)
 			if err != nil {
 				return err
@@ -86,7 +88,7 @@ func newSchemaDescribeCmd(f *cliFlags) *cobra.Command {
 				return err
 			}
 			appendAuditWarn(f, auditEventSchema, meta, audit.EventTarget{ResourceType: "schema", Resource: subject}, audit.StatusSuccess, schemaMetaDiff(result), nil)
-			return newPrinter(f).JSONData("SchemaDescription", result)
+			return targetJSONData(f, "SchemaDescription", result, opTarget, operationTargetRead)
 		},
 	}
 	cmd.Flags().StringVar(&version, "version", "latest", "Schema version or latest")
@@ -107,6 +109,7 @@ func newSchemaCheckCmd(f *cliFlags) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			opTarget := operationTargetFromBroker(f, backend)
 			manager, err := schemaManager(backend)
 			if err != nil {
 				return err
@@ -125,7 +128,7 @@ func newSchemaCheckCmd(f *cliFlags) *cobra.Command {
 				return err
 			}
 			appendAuditWarn(f, auditEventSchema, meta, audit.EventTarget{ResourceType: "schema", Resource: subject}, audit.StatusSuccess, fmt.Sprintf("check compatible=%t schemaSha256=%s", result.Compatible, result.SchemaHash), nil)
-			return newPrinter(f).JSONData("SchemaCheckResult", result)
+			return targetJSONData(f, "SchemaCheckResult", result, opTarget, operationTargetRead)
 		},
 	}
 	cmd.Flags().StringVar(&version, "version", "latest", "Schema version or latest")
@@ -148,6 +151,7 @@ func newSchemaRegisterCmd(f *cliFlags) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			opTarget := operationTargetFromBroker(f, backend)
 			manager, err := schemaManager(backend)
 			if err != nil {
 				return err
@@ -189,7 +193,7 @@ func newSchemaRegisterCmd(f *cliFlags) *cobra.Command {
 				return err
 			}
 			appendAuditWarn(f, auditEventSchema, meta, audit.EventTarget{ResourceType: "schema", Resource: subject}, audit.StatusSuccess, schemaRegisterDiff(result), nil)
-			return newPrinter(f).JSONData("SchemaDescription", result)
+			return targetJSONData(f, "SchemaDescription", result, opTarget, operationTargetWrite)
 		},
 	}
 	cmd.Flags().StringVar(&schemaType, "schema-type", "", "Schema type, for example AVRO, JSON, PROTOBUF, or STRING")
@@ -210,6 +214,7 @@ func newSchemaDeleteCmd(f *cliFlags) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			opTarget := operationTargetFromBroker(f, backend)
 			manager, err := schemaManager(backend)
 			if err != nil {
 				return err
@@ -229,7 +234,7 @@ func newSchemaDeleteCmd(f *cliFlags) *cobra.Command {
 				return err
 			}
 			appendAuditWarn(f, auditEventSchema, meta, audit.EventTarget{ResourceType: "schema", Resource: subject}, audit.StatusSuccess, schemaDeleteResultDiff(result, desc), nil)
-			return newPrinter(f).JSONData("SchemaDeleteResult", result)
+			return targetJSONData(f, "SchemaDeleteResult", result, opTarget, operationTargetWrite)
 		},
 	}
 	cmd.Flags().StringVar(&version, "version", "", "Schema version to delete; omit to delete the subject")

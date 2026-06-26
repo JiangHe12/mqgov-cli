@@ -31,6 +31,7 @@ func newGroupListCmd(f *cliFlags) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			opTarget := operationTargetFromBroker(f, backend)
 			if err := classifyAndAuthorize(f, meta, mqclass.OperationList, mqclass.Target{Group: pattern}, ""); err != nil {
 				return err
 			}
@@ -40,13 +41,13 @@ func newGroupListCmd(f *cliFlags) *cobra.Command {
 			}
 			appendAuditWarn(f, auditEventGroup, meta, audit.EventTarget{ResourceType: "group"}, audit.StatusSuccess, fmt.Sprintf("list count=%d", len(items)), nil)
 			if f.Output == "json" {
-				return newPrinter(f).JSONList("GroupList", items, len(items), 1, len(items), false)
+				return targetJSONList(f, "GroupList", items, len(items), len(items), opTarget)
 			}
 			rows := make([][]string, 0, len(items))
 			for _, item := range items {
 				rows = append(rows, []string{item.Coordinate.Group, strconv.Itoa(item.Members), item.State})
 			}
-			newPrinter(f).Table([]string{"GROUP", "MEMBERS", "STATE"}, rows)
+			targetTable(f, []string{"GROUP", "MEMBERS", "STATE"}, rows, opTarget)
 			return nil
 		},
 	}
@@ -64,6 +65,7 @@ func newGroupCreateCmd(f *cliFlags) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			opTarget := operationTargetFromBroker(f, backend)
 			group := args[0]
 			if err := classifyAndAuthorize(f, meta, mqclass.OperationCreateGroup, mqclass.Target{Group: group}, ""); err != nil {
 				return err
@@ -74,7 +76,7 @@ func newGroupCreateCmd(f *cliFlags) *cobra.Command {
 				return err
 			}
 			appendAuditWarn(f, auditEventGroup, meta, audit.EventTarget{ResourceType: "group", Resource: group}, audit.StatusSuccess, "create", nil)
-			return newPrinter(f).JSONData("GroupDescription", desc)
+			return targetJSONData(f, "GroupDescription", desc, opTarget, operationTargetWrite)
 		},
 	}
 }
@@ -89,6 +91,7 @@ func newGroupDeleteCmd(f *cliFlags) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			opTarget := operationTargetFromBroker(f, backend)
 			group := args[0]
 			if err := classifyAndAuthorize(f, meta, mqclass.OperationDeleteGroup, mqclass.Target{Group: group}, ""); err != nil {
 				return err
@@ -98,7 +101,7 @@ func newGroupDeleteCmd(f *cliFlags) *cobra.Command {
 				return err
 			}
 			appendAuditWarn(f, auditEventGroup, meta, audit.EventTarget{ResourceType: "group", Resource: group}, audit.StatusSuccess, "delete", nil)
-			return newPrinter(f).JSONData("DeleteResult", map[string]string{"group": group, "status": audit.StatusSuccess})
+			return targetJSONData(f, "DeleteResult", map[string]string{"group": group, "status": audit.StatusSuccess}, opTarget, operationTargetWrite)
 		},
 	}
 }
@@ -113,6 +116,7 @@ func newGroupLagCmd(f *cliFlags) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			opTarget := operationTargetFromBroker(f, backend)
 			manager, ok := mqgov.SupportsOffsets(backend)
 			if !ok {
 				return apperrors.New(apperrors.CodeNotImplemented, "backend does not support offsets", nil)
@@ -126,7 +130,7 @@ func newGroupLagCmd(f *cliFlags) *cobra.Command {
 				return err
 			}
 			appendAuditWarn(f, auditEventOffset, meta, audit.EventTarget{ResourceType: "offset", Resource: group + "/" + topic}, audit.StatusSuccess, fmt.Sprintf("lag count=%d", plan.Total), nil)
-			return newPrinter(f).JSONData("LagResult", plan)
+			return targetJSONData(f, "LagResult", plan, opTarget, operationTargetRead)
 		},
 	}
 }
@@ -142,6 +146,7 @@ func newGroupResetOffsetCmd(f *cliFlags) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			opTarget := operationTargetFromBroker(f, backend)
 			manager, ok := mqgov.SupportsOffsets(backend)
 			if !ok {
 				return apperrors.New(apperrors.CodeNotImplemented, "backend does not support offsets", nil)
@@ -167,7 +172,7 @@ func newGroupResetOffsetCmd(f *cliFlags) *cobra.Command {
 				return err
 			}
 			appendAuditWarn(f, auditEventOffset, meta, audit.EventTarget{ResourceType: "offset", Resource: group + "/" + topic}, audit.StatusSuccess, fmt.Sprintf("reset-offset count=%d", plan.Total), nil)
-			return newPrinter(f).JSONData("OffsetPlan", plan)
+			return targetJSONData(f, "OffsetPlan", plan, opTarget, operationTargetWrite)
 		},
 	}
 	cmd.Flags().StringVar(&to, "to", "earliest", "Target offset: earliest | latest | offset:N | datetime:<RFC3339> | shift:±N (some targets are backend-specific and unsupported backends return clear errors)")
