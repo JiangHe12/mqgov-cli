@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -1279,7 +1280,7 @@ func kgoOptions(opts Options) ([]kgo.Opt, error) {
 		return nil, err
 	}
 	if tlsConfig != nil {
-		kopts = append(kopts, kgo.DialTLSConfig(tlsConfig))
+		kopts = append(kopts, kgo.Dialer(kafkaTLSDialer(tlsConfig, opts.TLSPinPath, kafkaDialTimeout(opts))))
 	}
 	mechanism, err := saslMechanism(opts)
 	if err != nil {
@@ -1312,10 +1313,11 @@ func schemaRegistryHTTPClient(opts Options) (*http.Client, error) {
 			return nil, err
 		}
 		if tlsConfig == nil {
-			tlsConfig, err = tlspin.Attach(&tls.Config{MinVersion: tls.VersionTLS12}, opts.TLSPinPath, tlspin.NotifyStderr)
-			if err != nil {
-				return nil, err
-			}
+			tlsConfig = &tls.Config{MinVersion: tls.VersionTLS12}
+		}
+		tlsConfig, err = tlspin.CloneForEndpoint(tlsConfig, opts.TLSPinPath, opts.SchemaRegistryURL, tlspin.NotifyStderr)
+		if err != nil {
+			return nil, err
 		}
 		client.Transport = &http.Transport{TLSClientConfig: tlsConfig}
 	}
@@ -1417,7 +1419,29 @@ func buildTLSConfig(opts Options) (*tls.Config, error) {
 		}
 		cfg.Certificates = []tls.Certificate{cert}
 	}
-	return tlspin.Attach(cfg, opts.TLSPinPath, tlspin.NotifyStderr)
+	return cfg, nil
+}
+
+func kafkaTLSDialer(base *tls.Config, pinPath string, dialTimeout time.Duration) func(context.Context, string, string) (net.Conn, error) {
+	dialer := &net.Dialer{Timeout: dialTimeout}
+	return func(ctx context.Context, network, host string) (net.Conn, error) {
+		cfg, err := kafkaTLSConfigForHost(base, pinPath, host)
+		if err != nil {
+			return nil, err
+		}
+		return (&tls.Dialer{NetDialer: dialer, Config: cfg}).DialContext(ctx, network, host)
+	}
+}
+
+func kafkaTLSConfigForHost(base *tls.Config, pinPath, host string) (*tls.Config, error) {
+	return tlspin.CloneForEndpoint(base, pinPath, host, tlspin.NotifyStderr)
+}
+
+func kafkaDialTimeout(opts Options) time.Duration {
+	if opts.Timeout > 0 {
+		return opts.Timeout
+	}
+	return 10 * time.Second
 }
 
 func loadCertPool(path string) (*x509.CertPool, error) {

@@ -1,9 +1,14 @@
 package kafka
 
 import (
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/JiangHe12/opskit-core/apperrors"
@@ -60,6 +65,37 @@ func TestSchemaRegistryCredentialsRequireHTTPS(t *testing.T) {
 		t.Fatalf("New(https with credentials) error = %v", err)
 	}
 	withTLS.client.Close()
+}
+
+func TestKafkaTLSConfigPinsDialHostWhenServerNameEmpty(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	defer server.Close()
+
+	path := filepath.Join(t.TempDir(), "tls_known_hosts")
+	base := &tls.Config{MinVersion: tls.VersionTLS12}
+	cfg, err := kafkaTLSConfigForHost(base, path, "broker.example:9093")
+	if err != nil {
+		t.Fatalf("kafkaTLSConfigForHost() error = %v", err)
+	}
+	if base.ServerName != "" {
+		t.Fatalf("base ServerName = %q, want unchanged", base.ServerName)
+	}
+	if cfg.ServerName != "broker.example" {
+		t.Fatalf("ServerName = %q, want broker.example", cfg.ServerName)
+	}
+	if cfg.InsecureSkipVerify {
+		t.Fatal("InsecureSkipVerify = true, want false")
+	}
+	if err := cfg.VerifyConnection(tls.ConnectionState{PeerCertificates: []*x509.Certificate{server.Certificate()}}); err != nil {
+		t.Fatalf("VerifyConnection(empty ServerName) error = %v", err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile(pin) error = %v", err)
+	}
+	if !strings.HasPrefix(string(data), "broker.example:9093\t") {
+		t.Fatalf("pin file = %q, want broker.example:9093 key", data)
+	}
 }
 
 func TestSchemaRegistryRequests(t *testing.T) {
