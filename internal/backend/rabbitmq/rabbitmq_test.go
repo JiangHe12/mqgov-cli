@@ -32,6 +32,68 @@ func TestSupportsSchemaFalse(t *testing.T) {
 	}
 }
 
+func TestRabbitMQCredentialsBuildAMQPAndManagementAuth(t *testing.T) {
+	backend, err := New(Options{
+		Host:     "rabbit.example",
+		Port:     5678,
+		VHost:    "team",
+		Username: "svc",
+		Password: "secret",
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	if backend.amqpURL != "amqp://svc:secret@rabbit.example:5678/team" {
+		t.Fatalf("amqpURL = %q, want explicit username/password", backend.amqpURL)
+	}
+	if backend.opts.Username != "svc" || backend.opts.Password != "secret" {
+		t.Fatalf("management credentials = %q/%q, want svc/secret", backend.opts.Username, backend.opts.Password)
+	}
+}
+
+func TestRabbitMQExplicitCredentialsOverrideAMQPURLUserInfo(t *testing.T) {
+	backend, err := New(Options{
+		AMQPURL:  "amqp://url-user:url-pass@rabbit.example:5672/%2F",
+		Username: "flag-user",
+		Password: "env-pass",
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	if !strings.Contains(backend.amqpURL, "flag-user:env-pass@rabbit.example:5672") {
+		t.Fatalf("amqpURL = %q, want explicit credentials to override URL userinfo", backend.amqpURL)
+	}
+	if backend.opts.Username != "flag-user" || backend.opts.Password != "env-pass" {
+		t.Fatalf("management credentials = %q/%q, want flag-user/env-pass", backend.opts.Username, backend.opts.Password)
+	}
+}
+
+func TestRabbitMQAMQPURLUserInfoFeedsManagementCredentials(t *testing.T) {
+	backend, err := New(Options{AMQPURL: "amqp://url-user:url-pass@rabbit.example:5672/%2F"})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	if backend.opts.Username != "url-user" || backend.opts.Password != "url-pass" {
+		t.Fatalf("management credentials = %q/%q, want AMQP URL userinfo", backend.opts.Username, backend.opts.Password)
+	}
+	if !strings.Contains(backend.amqpURL, "url-user:url-pass@rabbit.example:5672") {
+		t.Fatalf("amqpURL = %q, want URL userinfo preserved", backend.amqpURL)
+	}
+}
+
+func TestRabbitMQDefaultsGuestCredentials(t *testing.T) {
+	backend, err := New(Options{Host: "rabbit.example"})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	if backend.opts.Username != "guest" || backend.opts.Password != "guest" {
+		t.Fatalf("default credentials = %q/%q, want guest/guest", backend.opts.Username, backend.opts.Password)
+	}
+	if !strings.Contains(backend.amqpURL, "guest:guest@rabbit.example:5672") {
+		t.Fatalf("amqpURL = %q, want guest credentials", backend.amqpURL)
+	}
+}
+
 func TestRabbitMQACLGrantListRevoke(t *testing.T) {
 	permissions := map[string]rabbitMQPermission{}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

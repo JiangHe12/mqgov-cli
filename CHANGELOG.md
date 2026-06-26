@@ -2,6 +2,22 @@
 
 All notable changes to this project are documented in this file.
 
+## v0.5.1
+
+_RabbitMQ credential-supply fixes._
+
+### Added
+- `ctx set --backend rabbitmq --username` to set the RabbitMQ user with the
+  discrete `--host`/`--port`/`--vhost` flags, instead of being forced to embed it
+  in `--amqp-url`.
+
+### Fixed
+- `MQGOV_PASSWORD` is now honored at connection time when a context has no stored
+  credential (current context and `--context` overrides), giving a consistent
+  non-interactive password path. RabbitMQ AMQP and management API now use one
+  unified username/password: explicit `--username`/password (or `MQGOV_PASSWORD`)
+  overrides `--amqp-url` userinfo, with `guest/guest` as the default.
+
 ## v0.5.0
 
 _Broker and schema-registry TLS certificate trust-on-first-use pinning._

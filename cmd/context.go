@@ -28,6 +28,7 @@ type ctxSetOptions struct {
 	kafkaSchemaRegistryPassword string
 	rabbitAMQPURL               string
 	rabbitManagement            string
+	rabbitUsername              string
 	rabbitHost                  string
 	rabbitPort                  int
 	rabbitVHost                 string
@@ -108,6 +109,7 @@ func ctxSetCmd(f *cliFlags) *cobra.Command { //nolint:gocyclo // Backend-specifi
 	cmd.Flags().StringVar(&opts.kafkaSchemaRegistryPassword, "schema-registry-password", "", "Kafka Schema Registry password to store in credstore")
 	cmd.Flags().StringVar(&opts.rabbitAMQPURL, "amqp-url", "", "RabbitMQ AMQP URL")
 	cmd.Flags().StringVar(&opts.rabbitManagement, "management-url", "", "RabbitMQ management URL")
+	cmd.Flags().StringVar(&opts.rabbitUsername, "username", "", "RabbitMQ username")
 	cmd.Flags().StringVar(&opts.rabbitHost, "host", "", "RabbitMQ host")
 	cmd.Flags().IntVar(&opts.rabbitPort, "port", 0, "RabbitMQ port")
 	cmd.Flags().StringVar(&opts.rabbitVHost, "vhost", "", "RabbitMQ virtual host")
@@ -146,6 +148,9 @@ func applyBackendContextOptions(item *mqgovctx.Context, opts ctxSetOptions) {
 		item.KafkaSchemaRegistryURL = opts.kafkaSchemaRegistryURL
 		item.KafkaSchemaRegistryUsername = opts.kafkaSchemaRegistryUsername
 	case "rabbitmq":
+		if opts.rabbitUsername != "" {
+			item.Username = opts.rabbitUsername
+		}
 		item.RabbitMQAMQPURL = opts.rabbitAMQPURL
 		item.RabbitMQManagementURL = opts.rabbitManagement
 		item.RabbitMQHost = opts.rabbitHost

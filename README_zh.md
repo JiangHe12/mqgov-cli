@@ -285,11 +285,13 @@ mqgov acl revoke --principal app-role --resource-type topic --resource-name orde
 ```bash
 # 后端绑定的上下文(凭据经 credstore,绝不明文)
 mqgov ctx set <name> --backend kafka    --brokers <h:p,h:p> [--sasl-mechanism PLAIN] [--tls --ca-cert <f>] [--schema-registry-url <url>] [--schema-registry-username <u>] [--schema-registry-password <p>] [--protected]
-mqgov ctx set <name> --backend rabbitmq (--amqp-url <url> | --host <h> --port <p> --vhost </>) --management-url <url>
+mqgov ctx set <name> --backend rabbitmq (--amqp-url <url> | --host <h> --port <p> --vhost </>) --management-url <url> --username <u>
 mqgov ctx set <name> --backend pulsar   --service-url pulsar://<h:p> --admin-url http://<h:p> [--tenant public] [--pulsar-namespace default]
 mqgov ctx set <name> --backend rocketmq --nameservers <h:p,h:p> [--broker-addr <h:p>]
 mqgov ctx use|list|current|delete|test
 #   密钥:--password <pw|token|secretKey> 与 --schema-registry-password <pw> 都经 --credential-backend <encrypted-file|keychain|...>(必须用非 plain 后端)
+#   RabbitMQ:非交互运行优先用 --username + MQGOV_PASSWORD;若要落盘密码,用 --password 配 keychain 或 encrypted-file。
+#   如果 --amqp-url 含 userinfo,显式 --username 和密码来源会覆盖它,AMQP 与 management API 使用同一套认证。
 
 # 审计(防篡改,仅指纹)
 mqgov audit query  [--since 24h] [--type <t>] [--operator <o>] [--status <s>] [--limit 100] -o json

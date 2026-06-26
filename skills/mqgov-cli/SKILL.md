@@ -21,12 +21,14 @@ Common setup:
 ```bash
 mqgov ctx set dev --backend kafka --brokers localhost:9092 --cluster dev
 mqgov ctx set dev-sr --backend kafka --brokers localhost:9092 --schema-registry-url https://schema-registry.example --schema-registry-username <user> --schema-registry-password <password> --credential-backend encrypted-file
-mqgov ctx set dev-rabbit --backend rabbitmq --amqp-url amqp://guest:guest@localhost:5672/ --management-url http://localhost:15672
+mqgov ctx set dev-rabbit --backend rabbitmq --host localhost --port 5672 --vhost / --management-url http://localhost:15672 --username guest
 mqgov ctx set dev-pulsar --backend pulsar --service-url pulsar://localhost:6650 --admin-url http://localhost:8080 --tenant public --pulsar-namespace default
 mqgov ctx set dev-rocket --backend rocketmq --nameservers localhost:9876 --broker-addr localhost:10911
 mqgov ctx use dev
 mqgov ctx test -o json
 ```
+
+For RabbitMQ, provide `MQGOV_PASSWORD` when running commands if the context has no stored credential. To persist a password, use `--password` with `--credential-backend keychain` or `--credential-backend encrypted-file`. Explicit `--username` and password sources override userinfo embedded in `--amqp-url` and are used for both AMQP and management API auth.
 
 Reads:
 
