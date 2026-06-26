@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -28,6 +29,7 @@ func TestKafkaACLIntegration(t *testing.T) {
 		SASLMechanism: getenvDefault("KAFKA_ACL_SASL_MECHANISM", "SCRAM-SHA-256"),
 		TLS:           os.Getenv("KAFKA_ACL_TLS") == "true",
 		CACertFile:    os.Getenv("KAFKA_ACL_CA_CERT_FILE"),
+		TLSPinPath:    filepath.Join(t.TempDir(), "tls_known_hosts"),
 		Timeout:       10 * time.Second,
 	})
 	if err != nil {

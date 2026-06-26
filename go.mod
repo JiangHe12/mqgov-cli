@@ -3,7 +3,7 @@ module github.com/JiangHe12/mqgov-cli
 go 1.26.0
 
 require (
-	github.com/JiangHe12/opskit-core v1.0.5
+	github.com/JiangHe12/opskit-core v1.1.0
 	github.com/apache/pulsar-client-go v0.20.0
 	github.com/apache/rocketmq-client-go/v2 v2.1.2
 	github.com/fatih/color v1.19.0

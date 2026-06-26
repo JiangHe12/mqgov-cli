@@ -14,6 +14,7 @@ Hard rules:
 - Message body, key, and headers must not be copied into audit summaries or tickets. Use fingerprints and counts.
 - Check `mqgov capabilities -o json` before assuming a backend supports offsets, partitions, ACL, DLQ verbs, peek, or tail.
 - Unsupported backend operations fail closed with `NOT_IMPLEMENTED`.
+- TLS for Kafka, RabbitMQ, and Pulsar pins the server leaf SPKI-SHA256 on first use in `.mqgov-cli/tls_known_hosts`; never suggest insecure-skip-verify or deleting pins without human certificate-rotation review.
 
 Common setup:
 
@@ -95,7 +96,7 @@ Schema governance:
 - `schema register` is R1 for a new subject (`--yes`) and R2 for an existing subject (`--yes --ticket`). Registering to an existing subject is schema evolution; there is no separate evolve verb.
 - Existing-subject register first runs the backend compatibility check. If incompatible, stop; do not register.
 - `schema delete` is R3 and requires `--yes --ticket --allow-schema-delete`. Never invent or self-fill that allow flag.
-- Kafka uses Confluent Schema Registry when the Kafka context has `--schema-registry-url`; optional `--schema-registry-username` and `--schema-registry-password` use credstore. Pulsar uses its built-in admin REST schema endpoints and existing token/TLS settings.
+- Kafka uses Confluent Schema Registry when the Kafka context has `--schema-registry-url`; optional `--schema-registry-username` and `--schema-registry-password` use credstore. HTTPS Schema Registry connections use the same TLS SPKI TOFU pin store as broker TLS. Pulsar uses its built-in admin REST schema endpoints and existing token/TLS settings.
 - Kafka supports Confluent SR soft delete and hard delete with `--permanent`. Pulsar has no soft/hard distinction: this backend supports permanent subject delete only and returns `NOT_IMPLEMENTED` for soft delete or version delete.
 - RabbitMQ and RocketMQ return `NOT_IMPLEMENTED` for schema verbs. Audit may include subject, version, compatibility, and schema hashes, but never schema text or registry credentials.
 

@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -34,6 +35,7 @@ func TestPulsarIntegration(t *testing.T) {
 		CACertFile:     os.Getenv("PULSAR_CA_CERT_FILE"),
 		ClientCertFile: os.Getenv("PULSAR_CLIENT_CERT_FILE"),
 		ClientKeyFile:  os.Getenv("PULSAR_CLIENT_KEY_FILE"),
+		TLSPinPath:     filepath.Join(t.TempDir(), "tls_known_hosts"),
 		Timeout:        15 * time.Second,
 	})
 	if err != nil {

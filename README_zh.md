@@ -44,6 +44,7 @@
 | 👀 **非破坏性 peek/tail** | 把消息以指纹形式查看或流式读取,不消费、不移动游标(Kafka 直接分区读取、Pulsar Reader、RabbitMQ 仅 peek 使用 get+requeue)。无法保证非破坏的 broker 上,操作 **失败关闭**而非静默消费。 |
 | 🧭 **诚实的能力声明** | broker 各不相同 —— mqgov 如实报告每个 broker 实际支持什么(`capabilities -o json`),其余一律 **`NOT_IMPLEMENTED` 失败关闭**,绝不伪造。 |
 | 📜 **防篡改审计** | 每个操作哈希链记录(sha256 指纹 + 计数,**不含消息体/key/header**);`audit verify` 检测篡改。 |
+| 🔒 **TLS 证书 TOFU** | Kafka、RabbitMQ、Pulsar 的 TLS 连接首次使用时绑定服务端 leaf 证书 SPKI-SHA256 到 `.mqgov-cli/tls_known_hosts`;后续 SPKI 不一致即连接硬失败。 |
 | 🩺 **运维与体验** | 后端绑定的 `ctx` 上下文(密钥经 credstore)、`doctor` 诊断、shell `completion`、OpenTelemetry 链路/指标、处处 JSON 输出。 |
 | 🔏 **可信供应链** | 二进制 **cosign 签名**,npm 包带 **provenance**,安装器校验 **SHA-256**。 |
 
@@ -328,7 +329,7 @@ mqgov install claude --skills     # 也支持:codex、opencode、copilot、curso
 - **npm provenance** —— npm 包经 CI 用 OpenID Connect 发布,带 [provenance 证明](https://docs.npmjs.com/generating-provenance-statements),关联到本仓库与此工作流。
 - **校验安装** —— npm postinstall 经白名单主机下载二进制,并在安装前对照已签名的 `checksums.txt` 校验 SHA-256。
 - **防篡改审计** —— `mqgov audit verify --strict` 重走哈希链,报告任何缺口或改动。
-- **传输不裸奔** —— 仅 SASL/TLS 与 mTLS;mqgov 绝不提供 insecure-skip-verify 后门。
+- **传输不裸奔** —— 仅 SASL/TLS 与 mTLS;mqgov 绝不提供 insecure-skip-verify 后门。Kafka、RabbitMQ、Pulsar 的 TLS broker/admin/Schema Registry 连接在正常 CA 校验之上增加 TOFU SPKI-SHA256 pinning;pin 存在 `.mqgov-cli/tls_known_hosts`。
 
 ---
 

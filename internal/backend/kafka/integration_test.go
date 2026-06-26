@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -33,6 +34,7 @@ func TestKafkaIntegration(t *testing.T) {
 		ClientCertFile:    os.Getenv("KAFKA_CLIENT_CERT_FILE"),
 		ClientKeyFile:     os.Getenv("KAFKA_CLIENT_KEY_FILE"),
 		SchemaRegistryURL: os.Getenv("KAFKA_SCHEMA_REGISTRY_URL"),
+		TLSPinPath:        filepath.Join(t.TempDir(), "tls_known_hosts"),
 		Timeout:           10 * time.Second,
 	})
 	if err != nil {

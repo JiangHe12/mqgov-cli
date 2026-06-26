@@ -81,7 +81,10 @@ go mod tidy                             # must be a no-op
   fail closed (`NotImplemented`) — never silently consume on an R0 read.
 - No insecure transport: SASL/TLS and mTLS via credstore; never an
   insecure-skip-verify option. A backend that does not support requested TLS
-  fails closed; it never silently connects in plaintext.
+  fails closed; it never silently connects in plaintext. Kafka, RabbitMQ, and
+  Pulsar TLS connections pin the server leaf SPKI-SHA256 on first use in
+  `.mqgov-cli/tls_known_hosts` and hard-fail on any later SPKI mismatch;
+  RocketMQ currently has no TLS client path to pin.
 
 ## Backends — the dumb-adapter contract
 

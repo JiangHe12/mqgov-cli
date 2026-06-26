@@ -22,6 +22,7 @@ import (
 	"github.com/JiangHe12/opskit-core/apperrors"
 
 	"github.com/JiangHe12/mqgov-cli/internal/mqgov"
+	"github.com/JiangHe12/mqgov-cli/internal/tlspin"
 )
 
 type Options struct {
@@ -38,6 +39,7 @@ type Options struct {
 	CACertFile     string
 	ClientCertFile string
 	ClientKeyFile  string
+	TLSPinPath     string
 	Timeout        time.Duration
 }
 
@@ -50,17 +52,28 @@ type Broker struct {
 }
 
 func New(opts Options) (*Broker, error) {
-	tlsConfig, err := buildTLSConfig(opts)
+	baseTLSConfig, err := buildTLSConfig(opts)
 	if err != nil {
 		return nil, err
 	}
 	amqpURL := buildAMQPURL(opts)
 	managementURL := buildManagementURL(opts)
-	httpClient := &http.Client{Timeout: timeout(opts)}
-	if tlsConfig != nil {
-		httpClient.Transport = &http.Transport{TLSClientConfig: tlsConfig}
+	var amqpTLSConfig *tls.Config
+	if baseTLSConfig != nil && rabbitMQAMQPUsesTLS(opts, amqpURL) {
+		amqpTLSConfig, err = tlspin.CloneForEndpoint(baseTLSConfig, opts.TLSPinPath, amqpURL, tlspin.NotifyStderr)
+		if err != nil {
+			return nil, err
+		}
 	}
-	return &Broker{opts: opts, amqpURL: amqpURL, manageURL: managementURL, httpClient: httpClient, tlsConfig: tlsConfig}, nil
+	httpClient := &http.Client{Timeout: timeout(opts)}
+	if baseTLSConfig != nil && strings.HasPrefix(strings.ToLower(strings.TrimSpace(managementURL)), "https://") {
+		managementTLSConfig, err := tlspin.CloneForEndpoint(baseTLSConfig, opts.TLSPinPath, managementURL, tlspin.NotifyStderr)
+		if err != nil {
+			return nil, err
+		}
+		httpClient.Transport = &http.Transport{TLSClientConfig: managementTLSConfig}
+	}
+	return &Broker{opts: opts, amqpURL: amqpURL, manageURL: managementURL, httpClient: httpClient, tlsConfig: amqpTLSConfig}, nil
 }
 
 func (b *Broker) Ping(ctx context.Context) error {
@@ -347,7 +360,7 @@ func (b *Broker) PurgeDLQ(ctx context.Context, req mqgov.DLQPurgeRequest) (mqgov
 }
 
 func (b *Broker) dial() (*amqp.Connection, error) {
-	if b.tlsConfig != nil {
+	if b.tlsConfig != nil && rabbitMQAMQPUsesTLS(b.opts, b.amqpURL) {
 		return amqp.DialTLS(b.amqpURL, b.tlsConfig)
 	}
 	return amqp.DialConfig(b.amqpURL, amqp.Config{Heartbeat: 10 * time.Second})
@@ -819,7 +832,7 @@ func buildManagementURL(opts Options) string {
 }
 
 func buildTLSConfig(opts Options) (*tls.Config, error) {
-	if !opts.TLS && opts.CACertFile == "" && opts.ClientCertFile == "" && opts.ClientKeyFile == "" {
+	if !rabbitMQUsesTLS(opts) && opts.CACertFile == "" && opts.ClientCertFile == "" && opts.ClientKeyFile == "" {
 		return nil, nil
 	}
 	cfg := &tls.Config{MinVersion: tls.VersionTLS12}
@@ -885,6 +898,9 @@ func classifyAMQPError(err error) error {
 }
 
 func unreachable(err error) error {
+	if appErr := tlspin.AppError(err); appErr != nil {
+		return appErr
+	}
 	return apperrors.New(apperrors.CodeBackendUnreachable, "rabbitmq backend unreachable", err)
 }
 
@@ -911,4 +927,13 @@ func netJoin(host string, port int) string {
 		return "[" + host + "]:" + strconv.Itoa(port)
 	}
 	return host + ":" + strconv.Itoa(port)
+}
+
+func rabbitMQUsesTLS(opts Options) bool {
+	return rabbitMQAMQPUsesTLS(opts, opts.AMQPURL) ||
+		strings.HasPrefix(strings.ToLower(strings.TrimSpace(opts.ManagementURL)), "https://")
+}
+
+func rabbitMQAMQPUsesTLS(opts Options, amqpURL string) bool {
+	return opts.TLS || strings.HasPrefix(strings.ToLower(strings.TrimSpace(amqpURL)), "amqps://")
 }

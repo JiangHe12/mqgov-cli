@@ -2,6 +2,24 @@
 
 All notable changes to this project are documented in this file.
 
+## v0.5.0
+
+_Broker and schema-registry TLS certificate trust-on-first-use pinning._
+
+### Added
+
+- Added TLS certificate trust-on-first-use (TOFU) pinning for Kafka, RabbitMQ,
+  and Pulsar connections (broker and HTTP/admin/schema-registry surfaces). On the
+  first TLS connection the server leaf certificate's SPKI-SHA256 is pinned in
+  `.mqgov-cli/tls_known_hosts`; any later SPKI mismatch hard-fails the connection
+  with `AUTH_FAILED`. Pinning runs on top of normal certificate-chain
+  verification (never `InsecureSkipVerify`) and is default-on whenever a
+  connection uses TLS. RocketMQ has no TLS client path to pin.
+
+### Changed
+
+- Bumped `opskit-core` to v1.1.0 for the shared `trust` pin store.
+
 ## v0.4.0
 
 _Governed schema-registry mutation and bounded cross-broker message mirroring._

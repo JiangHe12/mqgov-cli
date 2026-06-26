@@ -44,6 +44,7 @@ It's built on the shared [`opskit-core`](https://github.com/JiangHe12/opskit-cor
 | 👀 **Non-destructive peek/tail/mirror source** | inspect, stream, or bounded-copy messages without consuming them or moving any cursor where the broker can guarantee it (Kafka direct reads, Pulsar Reader). Where a broker can't guarantee this, the operation fails closed rather than silently consuming. |
 | 🧭 **Honest capabilities** | brokers differ — mqgov reports what each one actually supports (`capabilities -o json`) and **fails closed with `NOT_IMPLEMENTED`** for the rest, never faking it. |
 | 📜 **Tamper-evident audit** | hash-chained log of every action (sha256 fingerprints + counts, **no message bodies/keys/headers**); `audit verify` detects tampering. |
+| 🔒 **TLS certificate TOFU** | Kafka, RabbitMQ, and Pulsar TLS connections pin the server leaf SPKI-SHA256 on first use in `.mqgov-cli/tls_known_hosts`; a later SPKI mismatch is a hard connection failure. |
 | 🩺 **Ops & DX** | backend-bound `ctx` contexts with credstore-backed secrets, `doctor` diagnostics, shell `completion`, OpenTelemetry traces/metrics, JSON output everywhere. |
 | 🔏 **Trusted supply chain** | binaries are **cosign-signed**, the npm package ships with **provenance**, and the installer verifies a **SHA-256** checksum. |
 
@@ -328,7 +329,7 @@ mqgov install claude --skills     # also: codex, opencode, copilot, cursor, wind
 - **npm provenance** — the npm package is published from CI via OpenID Connect with [provenance attestations](https://docs.npmjs.com/generating-provenance-statements) linking it to this exact repo and workflow.
 - **Verified installs** — the npm postinstall downloads the binary over an allow-listed host and checks its SHA-256 against the signed `checksums.txt` before installing.
 - **Tamper-evident audit** — `mqgov audit verify --strict` re-walks the hash chain and reports any gap or modification.
-- **No insecure transport** — SASL/TLS and mTLS only; mqgov never offers an insecure-skip-verify escape hatch.
+- **No insecure transport** — SASL/TLS and mTLS only; mqgov never offers an insecure-skip-verify escape hatch. TLS broker/admin/Schema Registry connections for Kafka, RabbitMQ, and Pulsar add TOFU SPKI-SHA256 pinning on top of normal CA validation; pins live in `.mqgov-cli/tls_known_hosts`.
 
 ---
 

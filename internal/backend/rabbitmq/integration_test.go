@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -41,6 +42,7 @@ func TestRabbitMQIntegration(t *testing.T) {
 		CACertFile:     os.Getenv("RABBITMQ_CA_CERT_FILE"),
 		ClientCertFile: os.Getenv("RABBITMQ_CLIENT_CERT_FILE"),
 		ClientKeyFile:  os.Getenv("RABBITMQ_CLIENT_KEY_FILE"),
+		TLSPinPath:     filepath.Join(t.TempDir(), "tls_known_hosts"),
 		Timeout:        10 * time.Second,
 	})
 	if err != nil {
