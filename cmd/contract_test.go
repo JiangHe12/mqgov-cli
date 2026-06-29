@@ -229,6 +229,18 @@ func TestAuthorizeProtectedContextEscalatesR1ToTicket(t *testing.T) {
 	}
 }
 
+func TestRootVersionFlagUsesPackageName(t *testing.T) {
+	SetVersionInfo("v0.0.0-test", "deadbeef", "2026-06-29")
+	t.Cleanup(func() { SetVersionInfo("dev", "unknown", "unknown") })
+	output, err := runCommandForTest(t, "--version")
+	if err != nil {
+		t.Fatalf("Execute() error = %v, output=%s", err, output)
+	}
+	if want := "mqgov-cli version v0.0.0-test\n"; output != want {
+		t.Fatalf("--version output = %q, want %q", output, want)
+	}
+}
+
 func runCommandForTest(t *testing.T, args ...string) (string, error) {
 	t.Helper()
 	t.Setenv("NO_COLOR", "1")

@@ -1,6 +1,6 @@
 {
   "name": "mqgov-cli",
-  "version": "0.5.3",
+  "version": "0.5.4",
   "description": "Governed message-broker operations CLI for AI agents (Kafka, RabbitMQ, Pulsar, RocketMQ)",
   "bin": {
     "mqgov": "bin/mqgov-cli.js",

@@ -137,7 +137,7 @@ func NewRootCmd() *cobra.Command {
 func newRootCmdWith(f *cliFlags) *cobra.Command {
 	v, _, _ := getVersionInfo()
 	cmd := &cobra.Command{
-		Use:           "mqgov",
+		Use:           "mqgov-cli",
 		Short:         "Governed message middleware CLI",
 		Version:       v,
 		SilenceUsage:  true,

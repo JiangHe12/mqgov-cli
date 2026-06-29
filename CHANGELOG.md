@@ -2,6 +2,12 @@
 
 All notable changes to this project are documented in this file.
 
+## v0.5.4
+
+### Changed
+- Fixed release version injection by bridging main package build variables into `cmd`.
+- Aligned root `--version` output with the family format by using the full CLI name.
+
 ## v0.5.3
 
 ### Added
