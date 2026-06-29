@@ -2,6 +2,11 @@
 
 All notable changes to this project are documented in this file.
 
+## v0.5.8
+
+### Changed
+- **BREAKING**: `capabilities -o json` schema was restructured for family alignment; domain-specific fields moved to `data.domain`.
+
 ## v0.5.7
 
 ### Added

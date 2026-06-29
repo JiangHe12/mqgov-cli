@@ -13,8 +13,8 @@ import (
 
 type capabilitiesData struct {
 	Tool      capTool      `json:"tool"`
-	Backend   capBackend   `json:"backend"`
 	Supported capSupported `json:"supported"`
+	Domain    capDomain    `json:"domain"`
 }
 
 type capTool struct {
@@ -38,9 +38,13 @@ type capBackend struct {
 }
 
 type capSupported struct {
+	ContextAPIVersions []string `json:"contextApiVersions"`
+	AuditAPIVersions   []string `json:"auditApiVersions"`
+}
+
+type capDomain struct {
+	Backend            capBackend   `json:"backend"`
 	Commands           []capCommand `json:"commands"`
-	ContextAPIVersions []string     `json:"contextApiVersions"`
-	AuditAPIVersions   []string     `json:"auditApiVersions"`
 	OutputFormats      []string     `json:"outputFormats"`
 	ErrorCodes         []string     `json:"errorCodes"`
 	ExitCodes          []int        `json:"exitCodes"`
@@ -74,8 +78,8 @@ func newCapabilitiesCmd(f *cliFlags) *cobra.Command {
 				}
 				return nil
 			}
-			rows := make([][]string, 0, len(data.Supported.Commands))
-			for _, cmd := range data.Supported.Commands {
+			rows := make([][]string, 0, len(data.Domain.Commands))
+			for _, cmd := range data.Domain.Commands {
 				rows = append(rows, []string{cmd.Noun, cmd.Verb, cmd.Risk, cmd.AllowFlag})
 			}
 			newPrinter(f).Table([]string{"NOUN", "VERB", "RISK", "ALLOW FLAG"}, rows)
@@ -106,20 +110,24 @@ func buildCapabilities(backendCaps mqgov.Capabilities) capabilitiesData {
 	v, c, _ := getVersionInfo()
 	return capabilitiesData{
 		Tool: capTool{Name: "mqgov-cli", Version: v, Commit: c},
-		Backend: capBackend{
-			Name:               backendCaps.Backend,
-			ResourceTypes:      backendCaps.ResourceTypes,
-			Verbs:              backendCaps.Verbs,
-			SupportsOffsets:    backendCaps.SupportsOffsets,
-			SupportsPartitions: backendCaps.SupportsPartitions,
-			SupportsACL:        backendCaps.SupportsACL,
-			SupportsDLQList:    backendCaps.SupportsDLQList,
-			SupportsDLQPeek:    backendCaps.SupportsDLQPeek,
-			SupportsDLQRedrive: backendCaps.SupportsDLQRedrive,
-			SupportsDLQPurge:   backendCaps.SupportsDLQPurge,
-			SupportsSchema:     backendCaps.SupportsSchema,
-		},
 		Supported: capSupported{
+			ContextAPIVersions: []string{"mqgov-cli.io/context/v1"},
+			AuditAPIVersions:   []string{auditAPIVersion},
+		},
+		Domain: capDomain{
+			Backend: capBackend{
+				Name:               backendCaps.Backend,
+				ResourceTypes:      backendCaps.ResourceTypes,
+				Verbs:              backendCaps.Verbs,
+				SupportsOffsets:    backendCaps.SupportsOffsets,
+				SupportsPartitions: backendCaps.SupportsPartitions,
+				SupportsACL:        backendCaps.SupportsACL,
+				SupportsDLQList:    backendCaps.SupportsDLQList,
+				SupportsDLQPeek:    backendCaps.SupportsDLQPeek,
+				SupportsDLQRedrive: backendCaps.SupportsDLQRedrive,
+				SupportsDLQPurge:   backendCaps.SupportsDLQPurge,
+				SupportsSchema:     backendCaps.SupportsSchema,
+			},
 			Commands: []capCommand{
 				{Noun: "topic", Verb: "list/describe", Risk: "R0"},
 				{Noun: "topic", Verb: "create", Risk: "R1/R2 protected"},
@@ -146,8 +154,6 @@ func buildCapabilities(backendCaps mqgov.Capabilities) capabilitiesData {
 				{Noun: "schema", Verb: "delete", Risk: "R3", AllowFlag: "allow-schema-delete"},
 				{Noun: "fleet", Verb: "status/topics", Risk: "R0"},
 			},
-			ContextAPIVersions: []string{"mqgov-cli.io/context/v1"},
-			AuditAPIVersions:   []string{auditAPIVersion},
 			OutputFormats:      []string{"table", "json", "plain"},
 			ErrorCodes:         errorCodeStrings(),
 			ExitCodes:          apperrors.AllExitCodes(),

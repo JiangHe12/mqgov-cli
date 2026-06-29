@@ -1,8 +1,11 @@
 package cmd
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
+
+	"github.com/JiangHe12/mqgov-cli/internal/mqgov"
 )
 
 func TestVersionPlain(t *testing.T) {
@@ -29,6 +32,53 @@ func TestCapabilitiesPlain(t *testing.T) {
 	}
 	if strings.Contains(out, "{") || strings.Contains(out, "\t") {
 		t.Fatalf("capabilities plain should be a command list, got %q", out)
+	}
+}
+
+func TestCapabilitiesJSONFamilySchema(t *testing.T) {
+	data := buildCapabilities(mqgov.Capabilities{
+		Backend:       "fake",
+		ResourceTypes: []string{"topic"},
+		Verbs:         []string{"list"},
+	})
+	payload, err := json.Marshal(data)
+	if err != nil {
+		t.Fatalf("Marshal(capabilities) error = %v", err)
+	}
+	var top map[string]json.RawMessage
+	if err := json.Unmarshal(payload, &top); err != nil {
+		t.Fatalf("capabilities output is not JSON: %v\n%s", err, string(payload))
+	}
+	var env struct {
+		Supported struct {
+			ContextAPIVersions []string        `json:"contextApiVersions"`
+			AuditAPIVersions   []string        `json:"auditApiVersions"`
+			Commands           json.RawMessage `json:"commands"`
+		} `json:"supported"`
+		Domain struct {
+			Backend       json.RawMessage `json:"backend"`
+			OutputFormats []string        `json:"outputFormats"`
+			ErrorCodes    []string        `json:"errorCodes"`
+			ExitCodes     []int           `json:"exitCodes"`
+		} `json:"domain"`
+	}
+	if err := json.Unmarshal(payload, &env); err != nil {
+		t.Fatalf("Unmarshal(capabilities) error = %v\n%s", err, string(payload))
+	}
+	if strings.Join(env.Supported.ContextAPIVersions, ",") != "mqgov-cli.io/context/v1" {
+		t.Fatalf("context API versions = %#v", env.Supported.ContextAPIVersions)
+	}
+	if strings.Join(env.Supported.AuditAPIVersions, ",") != auditAPIVersion {
+		t.Fatalf("audit API versions = %#v", env.Supported.AuditAPIVersions)
+	}
+	if len(env.Supported.Commands) != 0 || top["backend"] != nil {
+		t.Fatalf("domain fields leaked outside domain: %s", string(payload))
+	}
+	if len(env.Domain.Backend) == 0 {
+		t.Fatalf("domain missing backend: %+v", env.Domain)
+	}
+	if strings.Join(env.Domain.OutputFormats, ",") != "table,json,plain" || len(env.Domain.ErrorCodes) == 0 || len(env.Domain.ExitCodes) == 0 {
+		t.Fatalf("domain metadata incomplete: %+v", env.Domain)
 	}
 }
 
