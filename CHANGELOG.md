@@ -2,6 +2,11 @@
 
 All notable changes to this project are documented in this file.
 
+## v0.5.7
+
+### Added
+- Global flags: `--debug`, `--trace`, `--no-color`.
+
 ## v0.5.6
 
 ### Added

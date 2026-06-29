@@ -68,6 +68,9 @@ type cliFlags struct {
 	Timeout             time.Duration
 	Output              string
 	PlainHead           bool
+	Debug               bool
+	Trace               bool
+	NoColor             bool
 	AuditMaxSize        int64
 	DryRun              bool
 	Plan                bool
@@ -143,6 +146,7 @@ func newRootCmdWith(f *cliFlags) *cobra.Command {
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		PersistentPreRunE: func(c *cobra.Command, _ []string) error {
+			applyGlobalFlags(f)
 			f.commandCtx = c.Context()
 			f.commandName = strings.ReplaceAll(c.CommandPath(), " ", ".")
 			f.commandTime = time.Now()
@@ -171,6 +175,9 @@ func newRootCmdWith(f *cliFlags) *cobra.Command {
 	cmd.PersistentFlags().DurationVar(&f.Timeout, "timeout", defaultCommandTimeout, "Request timeout")
 	cmd.PersistentFlags().StringVarP(&f.Output, "output", "o", "table", "Output format: table | json | plain")
 	cmd.PersistentFlags().BoolVar(&f.PlainHead, "plain-header", false, "Show headers in plain output")
+	cmd.PersistentFlags().BoolVar(&f.Debug, "debug", false, "Enable debug logging")
+	cmd.PersistentFlags().BoolVar(&f.Trace, "trace", false, "Enable trace logging (implies --debug)")
+	cmd.PersistentFlags().BoolVar(&f.NoColor, "no-color", false, "Disable colored output")
 	cmd.PersistentFlags().Int64Var(&f.AuditMaxSize, "audit-max-size", audit.DefaultMaxSizeBytes, "Active audit log rotation size in bytes")
 	cmd.PersistentFlags().BoolVar(&f.DryRun, "dry-run", false, "Plan only, do not mutate")
 	cmd.PersistentFlags().BoolVar(&f.Plan, "plan", false, "Alias for --dry-run plan output")
@@ -190,6 +197,16 @@ func newRootCmdWith(f *cliFlags) *cobra.Command {
 	cmd.PersistentFlags().BoolVar(&f.OTLPInsec, "otel-insecure", false, "Disable TLS for OTLP exporter")
 	cmd.AddCommand(newTopicCmd(f), newGroupCmd(f), newMessageCmd(f), newDLQCmd(f), newACLCmd(f), newSchemaCmd(f), newFleetCmd(f), newContextCmd(f), newAuditCmd(f), newInstallCmd(f), newCapabilitiesCmd(f), newDoctorCmd(f), newVersionCmd(f))
 	return cmd
+}
+
+func applyGlobalFlags(f *cliFlags) {
+	if f.Trace {
+		f.Debug = true
+	}
+	if f.NoColor {
+		_ = os.Setenv("NO_COLOR", "1")
+		color.NoColor = true
+	}
 }
 
 func Execute() {
