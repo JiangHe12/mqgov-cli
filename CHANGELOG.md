@@ -2,6 +2,11 @@
 
 All notable changes to this project are documented in this file.
 
+## v0.5.5
+
+### Changed
+- Simplified `version -o plain` and `capabilities -o plain` output to the script-friendly family format.
+
 ## v0.5.4
 
 ### Changed

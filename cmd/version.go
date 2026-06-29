@@ -17,6 +17,10 @@ func newVersionCmd(f *cliFlags) *cobra.Command {
 			if f.Output == "json" {
 				return newPrinter(f).JSONData("VersionInfo", data)
 			}
+			if f.Output == "plain" {
+				_, _ = fmt.Fprintln(newPrinter(f).Out, v)
+				return nil
+			}
 			_, _ = fmt.Fprintf(newPrinter(f).Out, "mqgov-cli %s (commit: %s, built: %s)\n", v, c, b)
 			return nil
 		},
