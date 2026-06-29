@@ -65,7 +65,7 @@ var store = corectx.NewStore(func(c *Context) *corectx.Base {
 func Configure() {
 	corectx.Configure(corectx.Options{APIVersion: SupportedContextAPIVersion, ConfigDirName: ".mqgov-cli"})
 	credstore.Configure(credstore.Options{
-		MasterPasswordEnv:     "MQGOV_CLI_CREDENTIAL_PASSPHRASE",
+		MasterPasswordEnv:     configureEnvWithDeprecatedAlias(credentialPassphraseEnv, deprecatedCredentialPassphraseEnv),
 		PromptName:            "mqgov-cli",
 		ConfigDirName:         ".mqgov-cli",
 		KeychainService:       "mqgov-cli",

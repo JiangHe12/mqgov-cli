@@ -75,7 +75,7 @@ func runAuditQuery(f *cliFlags, opts auditQueryOptions) error {
 		Operator:   opts.operator,
 		Status:     opts.status,
 		Limit:      opts.limit,
-		PrivateKey: os.Getenv("MQGOV_CLI_AUDIT_PRIVATE_KEY"),
+		PrivateKey: envWithDeprecatedAlias(mqgovAuditPrivateKeyEnv, deprecatedMqgovAuditPrivateKeyEnv),
 	}
 	if opts.since != "" {
 		t, err := audit.ParseTime(opts.since, time.Now().UTC())

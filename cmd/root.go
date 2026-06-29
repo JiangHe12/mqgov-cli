@@ -110,8 +110,15 @@ func init() {
 	mqgovctx.Configure()
 	apperrors.Configure(apperrors.Options{APIVersion: apiVersion})
 	printer.Configure(printer.Options{APIVersion: apiVersion, JSONEnvelopeByDefault: true})
-	audit.Configure(audit.Config{APIVersion: auditAPIVersion, ConfigDirName: ".mqgov-cli", PrivateKeyEnvVar: "MQGOV_CLI_AUDIT_PRIVATE_KEY"})
-	safety.Configure(safety.Config{Prompt: "Proceed with mqgov write? [y/N] ", OperatorEnvVar: "MQGOV_CLI_OPERATOR"})
+	audit.Configure(audit.Config{
+		APIVersion:       auditAPIVersion,
+		ConfigDirName:    ".mqgov-cli",
+		PrivateKeyEnvVar: configureEnvWithDeprecatedAlias(mqgovAuditPrivateKeyEnv, deprecatedMqgovAuditPrivateKeyEnv),
+	})
+	safety.Configure(safety.Config{
+		Prompt:         "Proceed with mqgov write? [y/N] ",
+		OperatorEnvVar: configureEnvWithDeprecatedAlias(mqgovOperatorEnv, deprecatedMqgovOperatorEnv),
+	})
 	telemetry.Configure(telemetry.Config{ServiceName: "mqgov-cli", AttributePrefix: "mqgov", MetricNamePrefix: "mqgov", DomainAttributeName: "resource"})
 }
 
@@ -518,7 +525,7 @@ func currentOperator(f *cliFlags) string {
 	if f.Operator != "" {
 		return f.Operator
 	}
-	if env := os.Getenv("MQGOV_CLI_OPERATOR"); env != "" {
+	if env := envWithDeprecatedAlias(mqgovOperatorEnv, deprecatedMqgovOperatorEnv); env != "" {
 		return env
 	}
 	if u, err := osuser.Current(); err == nil && u != nil && u.Username != "" {

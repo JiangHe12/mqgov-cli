@@ -34,7 +34,7 @@ func TestCtxSetRejectsPlainCredential(t *testing.T) {
 func TestCtxSetStoresCredentialReference(t *testing.T) {
 	configPath := filepath.Join(t.TempDir(), "config.yaml")
 	mqgovctx.SetConfigPath(configPath)
-	t.Setenv("MQGOV_CLI_CREDENTIAL_PASSPHRASE", "test-passphrase")
+	t.Setenv("MQGOV_CREDENTIAL_PASSPHRASE", "test-passphrase")
 
 	out, err := runCommandForTest(t,
 		"-o", "json",
@@ -69,7 +69,7 @@ func TestCtxSetStoresCredentialReference(t *testing.T) {
 func TestCtxSetStoresKafkaSchemaRegistryCredentialReference(t *testing.T) {
 	configPath := filepath.Join(t.TempDir(), "config.yaml")
 	mqgovctx.SetConfigPath(configPath)
-	t.Setenv("MQGOV_CLI_CREDENTIAL_PASSPHRASE", "test-passphrase")
+	t.Setenv("MQGOV_CREDENTIAL_PASSPHRASE", "test-passphrase")
 
 	out, err := runCommandForTest(t,
 		"-o", "json",

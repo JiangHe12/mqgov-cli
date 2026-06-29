@@ -82,7 +82,7 @@ npm install -g mqgov-cli
 
 - **直接下载** —— 从 [Releases 页](https://github.com/JiangHe12/mqgov-cli/releases)抓取对应平台二进制,用 `checksums.txt`(cosign 签名)校验,放到 `PATH`,重命名为 `mqgov`。
 - **从源码** —— `go install github.com/JiangHe12/mqgov-cli@latest`(Go 1.26+)。
-- **镜像 / 离线** —— 设 `MQGOV_CLI_DOWNLOAD_MIRROR=<base-url>` 从你自己的镜像拉取。
+- **镜像 / 离线** —— 设 `MQGOV_DOWNLOAD_MIRROR=<base-url>` 从你自己的镜像拉取。旧的 `MQGOV_CLI_DOWNLOAD_MIRROR` 仍兼容但已 deprecated。
 
 验证安装:
 

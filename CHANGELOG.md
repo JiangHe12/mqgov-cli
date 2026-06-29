@@ -2,6 +2,11 @@
 
 All notable changes to this project are documented in this file.
 
+## v0.5.9
+
+### Changed
+- CLI-owned environment variables now prefer the family-standard `MQGOV_*` names: `MQGOV_AUDIT_PRIVATE_KEY`, `MQGOV_CREDENTIAL_PASSPHRASE`, `MQGOV_OPERATOR`, `MQGOV_DOWNLOAD_MIRROR`, and `MQGOV_SKIP_VERIFY`. Deprecated `MQGOV_CLI_*` aliases remain supported for compatibility.
+
 ## v0.5.8
 
 ### Changed
