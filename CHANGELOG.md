@@ -2,6 +2,12 @@
 
 All notable changes to this project are documented in this file.
 
+## v0.5.6
+
+### Added
+- `ctx export`, `ctx import`, `ctx role`, and `ctx migrate-credentials` subcommands.
+- `audit prune` subcommand for rotated audit log cleanup.
+
 ## v0.5.5
 
 ### Changed

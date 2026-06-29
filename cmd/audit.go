@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
+	"sort"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -26,9 +28,25 @@ type auditVerifyOptions struct {
 	strict bool
 }
 
+type auditPruneOptions struct {
+	path           string
+	before         string
+	olderThanDays  int
+	keepLast       int
+	dryRun         bool
+	dryRunExplicit bool
+	confirm        bool
+}
+
+type auditPruneResult struct {
+	DryRun       bool     `json:"dryRun"`
+	DeletedFiles []string `json:"deletedFiles"`
+	Count        int      `json:"count"`
+}
+
 func newAuditCmd(f *cliFlags) *cobra.Command {
 	cmd := &cobra.Command{Use: "audit", Short: "Inspect mqgov audit log", Args: requireSubcommand, RunE: runParentHelp}
-	cmd.AddCommand(auditQueryCmd(f), auditVerifyCmd(f))
+	cmd.AddCommand(auditQueryCmd(f), auditVerifyCmd(f), auditPruneCmd(f))
 	return cmd
 }
 
@@ -175,6 +193,172 @@ func printAuditVerifyResult(f *cliFlags, result audit.VerifyResult) error {
 		p.Table([]string{"PATH", "TOTAL", "VALID", "MALFORMED", "SCHEMA_ERRORS"}, rows)
 		p.Info(fmt.Sprintf("total=%d valid=%d malformed=%d schemaErrors=%d timestampOrderViolations=%d lockPresent=%t",
 			result.Total, result.Valid, result.Malformed, result.SchemaErrors, result.TimestampOrderViolations, result.Lock.Present))
+		return nil
+	}
+}
+
+func auditPruneCmd(f *cliFlags) *cobra.Command {
+	opts := auditPruneOptions{keepLast: -1, dryRun: true}
+	cmd := &cobra.Command{
+		Use:   "prune",
+		Short: "Prune rotated audit logs",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			opts.dryRunExplicit = cmd.Flags().Changed("dry-run")
+			return runAuditPrune(f, opts)
+		},
+	}
+	cmd.Flags().StringVar(&opts.path, "path", "", "Override audit log path")
+	cmd.Flags().StringVar(&opts.before, "before", "", "Prune rotated logs before this time (30d / RFC3339 / YYYY-MM-DD)")
+	cmd.Flags().IntVar(&opts.olderThanDays, "older-than", 0, "Prune rotated logs older than N days")
+	cmd.Flags().IntVar(&opts.keepLast, "keep-last", -1, "Keep the newest N rotated logs (0 = delete all rotated logs)")
+	cmd.Flags().BoolVar(&opts.dryRun, "dry-run", true, "Preview matched rotated logs without deleting")
+	cmd.Flags().BoolVar(&opts.confirm, "confirm", false, "Actually delete matched rotated logs")
+	return cmd
+}
+
+func runAuditPrune(f *cliFlags, opts auditPruneOptions) error {
+	confirm := opts.confirm || f.Yes
+	if opts.dryRunExplicit && opts.dryRun && confirm {
+		return apperrors.New(apperrors.CodeUsageError, "audit prune accepts only one of --dry-run or --yes/--confirm", nil)
+	}
+	if countAuditPruneSelectors(opts) != 1 {
+		return apperrors.New(apperrors.CodeUsageError, "audit prune requires exactly one of --before, --older-than, or --keep-last", nil)
+	}
+	if opts.keepLast < -1 {
+		return apperrors.New(apperrors.CodeUsageError, "--keep-last must be >= 0", nil)
+	}
+	if opts.olderThanDays < 0 {
+		return apperrors.New(apperrors.CodeUsageError, "--older-than must be >= 0", nil)
+	}
+	path, err := auditPath(opts.path)
+	if err != nil {
+		return err
+	}
+	candidates, err := auditPruneCandidates(path, opts)
+	if err != nil {
+		return err
+	}
+	if confirm {
+		for _, filePath := range candidates {
+			if err := os.Remove(filePath); err != nil {
+				return apperrors.New(apperrors.CodeLocalIOError, "failed to delete rotated audit log", err)
+			}
+		}
+		if len(candidates) > 0 {
+			evt := audit.Event{
+				EventType:  audit.EventAuditPrune,
+				Operator:   currentOperator(f),
+				Context:    audit.EventContext{Name: f.contextName()},
+				Status:     audit.StatusSuccess,
+				AuditPrune: &audit.AuditPruneDetail{DeletedFiles: candidates, Count: len(candidates)},
+			}
+			if err := audit.AppendWithOptions(path, evt, auditOptions(f)); err != nil {
+				return err
+			}
+		}
+	}
+	return printAuditPruneResult(f, auditPruneResult{DryRun: !confirm, DeletedFiles: candidates, Count: len(candidates)})
+}
+
+func countAuditPruneSelectors(opts auditPruneOptions) int {
+	count := 0
+	if opts.before != "" {
+		count++
+	}
+	if opts.olderThanDays > 0 {
+		count++
+	}
+	if opts.keepLast >= 0 {
+		count++
+	}
+	return count
+}
+
+func auditPruneCandidates(path string, opts auditPruneOptions) ([]string, error) {
+	rotated, err := audit.RotatedFiles(path)
+	if err != nil {
+		return nil, err
+	}
+	sortRotatedAuditFiles(path, rotated)
+	if opts.keepLast >= 0 {
+		if opts.keepLast >= len(rotated) {
+			return []string{}, nil
+		}
+		return append([]string{}, rotated[:len(rotated)-opts.keepLast]...), nil
+	}
+	cutoff, err := auditPruneCutoff(opts, time.Now().UTC())
+	if err != nil {
+		return nil, err
+	}
+	out := make([]string, 0, len(rotated))
+	for _, filePath := range rotated {
+		ts, ok := audit.RotatedFileTimestamp(path, filePath)
+		if ok && ts.Before(cutoff) {
+			out = append(out, filePath)
+		}
+	}
+	return out, nil
+}
+
+func sortRotatedAuditFiles(activePath string, files []string) {
+	sort.SliceStable(files, func(i, j int) bool {
+		ti, iok := audit.RotatedFileTimestamp(activePath, files[i])
+		tj, jok := audit.RotatedFileTimestamp(activePath, files[j])
+		if iok && jok && !ti.Equal(tj) {
+			return ti.Before(tj)
+		}
+		return files[i] < files[j]
+	})
+}
+
+func auditPruneCutoff(opts auditPruneOptions, now time.Time) (time.Time, error) {
+	if opts.olderThanDays > 0 {
+		return now.Add(-time.Duration(opts.olderThanDays) * 24 * time.Hour), nil
+	}
+	return parseAuditPruneBefore(opts.before, now)
+}
+
+func parseAuditPruneBefore(value string, now time.Time) (time.Time, error) {
+	if t, err := audit.ParseTime(value, now); err == nil {
+		return t, nil
+	}
+	t, err := time.Parse("2006-01-02", value)
+	if err != nil {
+		return time.Time{}, apperrors.New(apperrors.CodeUsageError, "invalid --before: expected relative (30d), RFC3339, or YYYY-MM-DD", nil)
+	}
+	return t, nil
+}
+
+func printAuditPruneResult(f *cliFlags, result auditPruneResult) error {
+	p := newPrinter(f)
+	switch f.Output {
+	case "json":
+		return p.JSONData("AuditPruneResult", result)
+	case "plain":
+		for _, filePath := range result.DeletedFiles {
+			p.Info(filePath)
+		}
+		return nil
+	default:
+		rows := make([][]string, 0, len(result.DeletedFiles))
+		action := "would-delete"
+		if !result.DryRun {
+			action = "deleted"
+		}
+		files := append([]string{}, result.DeletedFiles...)
+		sort.Strings(files)
+		for _, filePath := range files {
+			rows = append(rows, []string{action, filepath.Base(filePath), filePath})
+		}
+		if len(rows) == 0 {
+			p.Info("(no rotated audit logs matched)")
+			return nil
+		}
+		p.Table([]string{"ACTION", "FILE", "PATH"}, rows)
+		if result.DryRun {
+			p.Info(fmt.Sprintf("(dry-run: pass --yes or --confirm to delete %d rotated audit logs)", result.Count))
+		}
 		return nil
 	}
 }

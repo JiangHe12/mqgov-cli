@@ -129,7 +129,7 @@ mqgov audit query --since 1h -o json
 
 | 档 | 涵盖 | 你必须提供 |
 |:---:|---|---|
-| **R0** | 读与预览(`topic list/describe`、`group list/lag`、`message peek`、`message tail`、`dlq list/peek`、`acl list`、`schema list/describe/check`、`fleet status/topics`、`*-dry-run`、`audit query/verify`、`doctor`) | 无 —— 但仍会审计 |
+| **R0** | 读与预览(`topic list/describe`、`group list/lag`、`message peek`、`message tail`、`dlq list/peek`、`acl list`、`schema list/describe/check`、`fleet status/topics`、`*-dry-run`、`audit query/verify/prune`、`doctor`) | 无 —— 但仍会审计 |
 | **R1** | 普通写(`message produce`、`message mirror` 目标侧、`topic create`、新 subject 的 `schema register`) | `--yes`(或交互确认) |
 | **R2** | 升级变更(`topic alter`、`group create/delete`、`acl grant`、已有 subject 的 `schema register`、向**保护** topic produce/mirror) | `--yes` **且**非空 `--ticket` |
 | **R3** | 破坏性 / 不可逆(`group reset-offset`、`topic purge`、`topic delete`、`schema delete`、`dlq redrive`、`dlq purge`、宽泛 `acl grant`、`acl revoke`、向**内部/系统** topic produce/mirror) | 以上 **再加**该操作专属的 `--allow-*` 标志 |
@@ -288,14 +288,17 @@ mqgov ctx set <name> --backend kafka    --brokers <h:p,h:p> [--sasl-mechanism PL
 mqgov ctx set <name> --backend rabbitmq (--amqp-url <url> | --host <h> --port <p> --vhost </>) --management-url <url> --username <u>
 mqgov ctx set <name> --backend pulsar   --service-url pulsar://<h:p> --admin-url http://<h:p> [--tenant public] [--pulsar-namespace default]
 mqgov ctx set <name> --backend rocketmq --nameservers <h:p,h:p> [--broker-addr <h:p>]
-mqgov ctx use|list|current|delete|test
+mqgov ctx use|list|current|delete|export|import|role|migrate-credentials|test
+mqgov ctx role set|unset|list <context>
 #   密钥:--password <pw|token|secretKey> 与 --schema-registry-password <pw> 都经 --credential-backend <encrypted-file|keychain|...>(必须用非 plain 后端)
+#   ctx export 默认脱敏凭据;迁移明文凭据时,先运行 ctx migrate-credentials --dry-run,再运行 ctx migrate-credentials --yes。
 #   RabbitMQ:非交互运行优先用 --username + MQGOV_PASSWORD;若要落盘密码,用 --password 配 keychain 或 encrypted-file。
 #   如果 --amqp-url 含 userinfo,显式 --username 和密码来源会覆盖它,AMQP 与 management API 使用同一套认证。
 
 # 审计(防篡改,仅指纹)
 mqgov audit query  [--since 24h] [--type <t>] [--operator <o>] [--status <s>] [--limit 100] -o json
 mqgov audit verify [--strict] -o json
+mqgov audit prune  (--before <…> | --older-than <days> | --keep-last <n>) [--yes|--confirm]  # 不确认则 dry-run
 
 # 诊断与生态
 mqgov doctor -o json            # 只读健康检查(输出已脱敏)

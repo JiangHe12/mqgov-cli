@@ -129,7 +129,7 @@ Every command is sorted into one of four **risk tiers** by the fail-closed `mqcl
 
 | Tier | What it covers | What you must provide |
 |:---:|---|---|
-| **R0** | Reads & previews (`topic list/describe`, `group list/lag`, `message peek`, `message tail`, `dlq list/peek`, `acl list`, `schema list/describe/check`, `fleet status/topics`, `*-dry-run`, `audit query/verify`, `doctor`) | Nothing — but it's still audited |
+| **R0** | Reads & previews (`topic list/describe`, `group list/lag`, `message peek`, `message tail`, `dlq list/peek`, `acl list`, `schema list/describe/check`, `fleet status/topics`, `*-dry-run`, `audit query/verify/prune`, `doctor`) | Nothing — but it's still audited |
 | **R1** | Ordinary writes (`message produce`, target side of `message mirror`, `topic create`, `schema register` for a new subject) | `--yes` (or an interactive confirmation) |
 | **R2** | Elevated mutations (`topic alter`, `group create/delete`, `acl grant`, `schema register` for an existing subject, produce/mirror to a **protected** topic) | `--yes` **and** a non-empty `--ticket` |
 | **R3** | Destructive / irreversible (`group reset-offset`, `topic purge`, `topic delete`, `schema delete`, `dlq redrive`, `dlq purge`, broad `acl grant`, `acl revoke`, produce/mirror to an **internal/system** topic) | The above **plus** the exact `--allow-*` flag |
@@ -288,14 +288,17 @@ mqgov ctx set <name> --backend kafka    --brokers <h:p,h:p> [--sasl-mechanism PL
 mqgov ctx set <name> --backend rabbitmq (--amqp-url <url> | --host <h> --port <p> --vhost </>) --management-url <url> --username <u>
 mqgov ctx set <name> --backend pulsar   --service-url pulsar://<h:p> --admin-url http://<h:p> [--tenant public] [--pulsar-namespace default]
 mqgov ctx set <name> --backend rocketmq --nameservers <h:p,h:p> [--broker-addr <h:p>]
-mqgov ctx use|list|current|delete|test
+mqgov ctx use|list|current|delete|export|import|role|migrate-credentials|test
+mqgov ctx role set|unset|list <context>
 #   secrets: --password <pw|token|secretKey> and --schema-registry-password <pw> go through --credential-backend <encrypted-file|keychain|...>  (a non-plain backend is required)
+#   ctx export redacts credentials by default; run ctx migrate-credentials --dry-run before ctx migrate-credentials --yes.
 #   RabbitMQ: prefer --username plus MQGOV_PASSWORD for non-interactive runs; to persist a password, use --password with keychain or encrypted-file.
 #   If --amqp-url contains userinfo, explicit --username and password sources override it for both AMQP and management API auth.
 
 # Audit (tamper-evident, fingerprint-only)
 mqgov audit query  [--since 24h] [--type <t>] [--operator <o>] [--status <s>] [--limit 100] -o json
 mqgov audit verify [--strict] -o json
+mqgov audit prune  (--before <…> | --older-than <days> | --keep-last <n>) [--yes|--confirm]  # dry-run unless confirmed
 
 # Diagnostics & ecosystem
 mqgov doctor -o json            # read-only health check (redacted output)

@@ -11,6 +11,7 @@ import (
 	"github.com/JiangHe12/opskit-core/apperrors"
 	"github.com/JiangHe12/opskit-core/credstore"
 	corectx "github.com/JiangHe12/opskit-core/ctx"
+	"github.com/JiangHe12/opskit-core/safety"
 
 	"github.com/JiangHe12/mqgov-cli/internal/mqgovctx"
 )
@@ -143,6 +144,150 @@ func TestCtxSetStoresRabbitMQUsername(t *testing.T) {
 	}
 	if item.RabbitMQHost != "127.0.0.1" || item.RabbitMQPort != 5672 || item.RabbitMQVHost != "/" {
 		t.Fatalf("RabbitMQ context fields = %+v", item)
+	}
+}
+
+func TestCtxAddedSubcommandHelp(t *testing.T) {
+	tests := [][]string{
+		{"ctx", "export", "--help"},
+		{"ctx", "import", "--help"},
+		{"ctx", "role", "--help"},
+		{"ctx", "migrate-credentials", "--help"},
+	}
+	for _, args := range tests {
+		out, err := runCommandForTest(t, args...)
+		if err != nil {
+			t.Fatalf("%v error = %v; out=%s", args, err, out)
+		}
+		if !strings.Contains(out, "Usage:") {
+			t.Fatalf("%v help missing Usage: %s", args, out)
+		}
+	}
+}
+
+func TestCtxExportRedactsCredentialsByDefault(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	mqgovctx.SetConfigPath(configPath)
+	t.Cleanup(func() { mqgovctx.SetConfigPath("") })
+	if err := mqgovctx.Set("dev", mqgovctx.Context{
+		Base:                        corectx.Base{Password: "secret", CredentialBackend: "plain-yaml"},
+		Backend:                     "kafka",
+		KafkaBrokers:                []string{"127.0.0.1:9092"},
+		KafkaSchemaRegistryPassword: "sr-secret",
+		RabbitMQAMQPURL:             "amqp://user:url-pass@localhost:5672/",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := runCommandForTest(t, "--config", configPath, "ctx", "export", "dev")
+	if err != nil {
+		t.Fatalf("ctx export error = %v; out=%s", err, out)
+	}
+	for _, forbidden := range []string{"secret", "sr-secret", "url-pass"} {
+		if strings.Contains(out, forbidden) {
+			t.Fatalf("ctx export leaked %q: %s", forbidden, out)
+		}
+	}
+	if !strings.Contains(out, redactedCredential) || !strings.Contains(out, "[REDACTED]") {
+		t.Fatalf("ctx export missing redaction markers: %s", out)
+	}
+}
+
+func TestCtxExportAllOutputAndImportInputOverwrite(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.yaml")
+	mqgovctx.SetConfigPath(configPath)
+	t.Cleanup(func() { mqgovctx.SetConfigPath("") })
+	if err := mqgovctx.Set("dev", mqgovctx.Context{Backend: "kafka", KafkaBrokers: []string{"127.0.0.1:9092"}}); err != nil {
+		t.Fatal(err)
+	}
+	exportPath := filepath.Join(dir, "contexts.yaml")
+	if out, err := runCommandForTest(t, "--config", configPath, "ctx", "export", "--all", "--output", exportPath); err != nil {
+		t.Fatalf("ctx export --all error = %v; out=%s", err, out)
+	}
+	data, err := os.ReadFile(exportPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "contexts:") || !strings.Contains(string(data), "dev:") {
+		t.Fatalf("export --all output missing contexts: %s", data)
+	}
+
+	importPath := filepath.Join(dir, "imported.yaml")
+	out, err := runCommandForTest(t, "--config", importPath, "-o", "json", "--yes", "ctx", "import", "--input", exportPath, "--overwrite")
+	if err != nil {
+		t.Fatalf("ctx import --input error = %v; out=%s", err, out)
+	}
+	if !strings.Contains(out, `"kind": "ContextImportResult"`) || !strings.Contains(out, `"count": 1`) {
+		t.Fatalf("import output = %s", out)
+	}
+	cfg, err := mqgovctx.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Contexts["dev"].Backend != "kafka" {
+		t.Fatalf("imported context = %+v", cfg.Contexts["dev"])
+	}
+}
+
+func TestCtxRoleLifecycle(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	mqgovctx.SetConfigPath(configPath)
+	t.Cleanup(func() { mqgovctx.SetConfigPath("") })
+	if err := mqgovctx.Set("dev", mqgovctx.Context{Backend: "fake"}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := runCtxRoleSet(newDefaultFlags(), "dev", roleOptions{targetOperator: "alice", role: safety.RoleReader}); err != nil {
+		t.Fatalf("runCtxRoleSet error = %v", err)
+	}
+	cfg, err := mqgovctx.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Contexts["dev"].Roles["alice"] != safety.RoleReader {
+		t.Fatalf("roles = %#v", cfg.Contexts["dev"].Roles)
+	}
+	if err := runCtxRoleUnset(newDefaultFlags(), "dev", roleOptions{targetOperator: "alice"}); err != nil {
+		t.Fatalf("runCtxRoleUnset error = %v", err)
+	}
+	cfg, err = mqgovctx.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Contexts["dev"].Roles != nil {
+		t.Fatalf("roles after unset = %#v, want nil", cfg.Contexts["dev"].Roles)
+	}
+}
+
+func TestCtxMigrateCredentialsDryRunCountsPrimaryAndSchemaRegistry(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	mqgovctx.SetConfigPath(configPath)
+	t.Cleanup(func() { mqgovctx.SetConfigPath("") })
+	if err := mqgovctx.Set("dev", mqgovctx.Context{
+		Base:                        corectx.Base{Password: "secret"},
+		Backend:                     "kafka",
+		KafkaBrokers:                []string{"127.0.0.1:9092"},
+		KafkaSchemaRegistryPassword: "sr-secret",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := runCommandForTest(t, "--config", configPath, "-o", "json", "ctx", "migrate-credentials", "--dry-run")
+	if err != nil {
+		t.Fatalf("ctx migrate-credentials --dry-run error = %v; out=%s", err, out)
+	}
+	for _, want := range []string{`"kind": "CredentialMigration"`, `"dryRun": true`, `"credentials": 2`, `"dev"`} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("migrate dry-run output missing %q: %s", want, out)
+		}
+	}
+	cfg, err := mqgovctx.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Contexts["dev"].Password != "secret" || cfg.Contexts["dev"].KafkaSchemaRegistryPassword != "sr-secret" {
+		t.Fatalf("dry-run mutated credentials: %+v", cfg.Contexts["dev"])
 	}
 }
 

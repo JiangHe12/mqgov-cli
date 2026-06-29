@@ -25,6 +25,11 @@ mqgov ctx set dev-rabbit --backend rabbitmq --host localhost --port 5672 --vhost
 mqgov ctx set dev-pulsar --backend pulsar --service-url pulsar://localhost:6650 --admin-url http://localhost:8080 --tenant public --pulsar-namespace default
 mqgov ctx set dev-rocket --backend rocketmq --nameservers localhost:9876 --broker-addr localhost:10911
 mqgov ctx use dev
+mqgov ctx export dev > dev.ctx.yaml
+mqgov ctx import -f dev.ctx.yaml --yes
+mqgov ctx role set dev --target-operator <operator> --role reader|writer|admin
+mqgov ctx migrate-credentials --dry-run
+mqgov ctx migrate-credentials --yes
 mqgov ctx test -o json
 ```
 
@@ -119,6 +124,8 @@ Audit:
 ```bash
 mqgov audit query --since 24h --limit 100 -o json
 mqgov audit verify --strict -o json
+mqgov audit prune --older-than 30 --dry-run -o json
+mqgov audit prune --older-than 30 --yes -o json
 ```
 
 `message tail` is fingerprint-only and non-destructive. It is supported by Kafka and Pulsar. RabbitMQ and RocketMQ return `NOT_IMPLEMENTED` for tail; RocketMQ also returns `NOT_IMPLEMENTED` for peek.
