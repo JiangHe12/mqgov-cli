@@ -21,7 +21,7 @@ func TestMutationSpoolRejectsReplaceableAncestor(t *testing.T) {
 	if err := verifyMutationSpoolParent(parent); err == nil {
 		t.Fatal("verifyMutationSpoolParent() accepted a replaceable ancestor")
 	}
-	if err := os.Chmod(root, 0o1777); err != nil {
+	if err := os.Chmod(root, 0o777|os.ModeSticky); err != nil {
 		t.Fatalf("Chmod(01777) error = %v", err)
 	}
 	if err := verifyMutationSpoolParent(parent); err != nil {
