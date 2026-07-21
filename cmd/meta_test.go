@@ -91,12 +91,50 @@ func TestCapabilitiesJSONFamilySchema(t *testing.T) {
 	}
 }
 
+func TestCapabilitiesReportsBackendSpecificTopicGovernance(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		backend     string
+		createRisk  string
+		createAllow string
+		deleteRisk  string
+		deleteAllow string
+	}{
+		{backend: "kafka", createRisk: "R1/R2 protected", deleteRisk: "R3", deleteAllow: "allow-topic-delete"},
+		{backend: "rocketmq", createRisk: "R2/R3 protected", createAllow: "allow-topic-upsert", deleteRisk: "NotImplemented"},
+	}
+	for _, test := range tests {
+		t.Run(test.backend, func(t *testing.T) {
+			t.Parallel()
+			data := buildCapabilities(mqgov.Capabilities{Backend: test.backend})
+			var create, deleteCommand capCommand
+			for _, command := range data.Domain.Commands {
+				if command.Noun != "topic" {
+					continue
+				}
+				switch command.Verb {
+				case "create":
+					create = command
+				case "delete":
+					deleteCommand = command
+				}
+			}
+			if create.Risk != test.createRisk || create.AllowFlag != test.createAllow {
+				t.Fatalf("topic create capability = %+v, want risk=%q allow=%q", create, test.createRisk, test.createAllow)
+			}
+			if deleteCommand.Risk != test.deleteRisk || deleteCommand.AllowFlag != test.deleteAllow {
+				t.Fatalf("topic delete capability = %+v, want risk=%q allow=%q", deleteCommand, test.deleteRisk, test.deleteAllow)
+			}
+		})
+	}
+}
+
 func TestGlobalFlagsHelp(t *testing.T) {
 	out, err := runCommandForTest(t, "--help")
 	if err != nil {
 		t.Fatalf("Execute() error = %v", err)
 	}
-	for _, flag := range []string{"--debug", "--trace", "--no-color", "--allow-audit-prune"} {
+	for _, flag := range []string{"--debug", "--trace", "--no-color", "--allow-topic-upsert", "--allow-audit-prune"} {
 		if !strings.Contains(out, flag) {
 			t.Fatalf("help missing %s:\n%s", flag, out)
 		}

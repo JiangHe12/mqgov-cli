@@ -1,6 +1,6 @@
 services:
   rabbitmq:
-    image: rabbitmq:3-management
+    image: rabbitmq:3.13.7-management@sha256:e582c0bc7766f3342496d8485efb5a1df782b5ce3886ad017e2eaae442311f69
     ports:
       - "5672:5672"
       - "15672:15672"

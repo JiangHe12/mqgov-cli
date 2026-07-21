@@ -1,18 +1,33 @@
 name: Integration
 
-# Real-backend integration tests (//go:build integration), run against live
-# Kafka (Redpanda), RabbitMQ, Pulsar and RocketMQ containers started on the
-# runner from the repo's docker-compose files. Kept SEPARATE from the PR/push CI
-# and the release pipeline so a slow broker boot or a transient flake never
-# blocks everyday commits or a release. Runs nightly and on manual dispatch only.
+# Real-backend integration tests (//go:build integration), run against pinned
+# Kafka (Redpanda), RabbitMQ, Pulsar and RocketMQ containers. The complete suite
+# is reused by the release workflow and also runs nightly/on manual dispatch.
+# PR/push CI remains separate.
 
 on:
   schedule:
     - cron: '0 6 * * *'   # daily 06:00 UTC
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      include_rocketmq:
+        description: Run the RocketMQ integration job
+        required: false
+        default: true
+        type: boolean
+  workflow_call:
+    inputs:
+      include_rocketmq:
+        description: Run the RocketMQ integration job
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
+
+env:
+  MQGOV_INTEGRATION_REQUIRED: "true"
 
 jobs:
   kafka:
@@ -49,7 +64,7 @@ jobs:
         env:
           KAFKA_BROKERS: 127.0.0.1:9092
           KAFKA_SCHEMA_REGISTRY_URL: http://127.0.0.1:8081
-        run: go test -tags=integration -count=1 -v ./internal/backend/kafka/
+        run: go test -tags=integration -count=1 -run '^(TestKafkaIntegration|TestKafkaSchemaRegistryIntegration)$' -v ./internal/backend/kafka/
       - name: Tear down
         if: always()
         run: docker compose -f docker-compose.kafka.yml down -v || true
@@ -344,6 +359,7 @@ jobs:
 
   rocketmq:
     name: real-backend integration (rocketmq)
+    if: ${{ github.event_name == 'schedule' || inputs.include_rocketmq }}
     timeout-minutes: 15
     runs-on: ubuntu-latest
     steps:

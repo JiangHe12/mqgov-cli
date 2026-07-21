@@ -3,8 +3,10 @@ package pulsar
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -129,6 +131,10 @@ func TestPulsarTLSDefaultsUseSecureEndpoints(t *testing.T) {
 
 func TestPulsarCompatibilityFailsClosed(t *testing.T) {
 	t.Parallel()
+	officialResponse, err := os.ReadFile("testdata/compatibility_response.json")
+	if err != nil {
+		t.Fatalf("read official compatibility fixture: %v", err)
+	}
 
 	tests := []struct {
 		name       string
@@ -136,12 +142,19 @@ func TestPulsarCompatibilityFailsClosed(t *testing.T) {
 		compatible bool
 		wantErr    bool
 	}{
-		{name: "compatible", body: `{"compatible":true}`, compatible: true},
-		{name: "incompatible alias", body: `{"is_compatible":false}`, compatible: false},
+		{name: "official Java Bean response", body: string(officialResponse), compatible: true},
+		{name: "official field response", body: `{"isCompatibility":false,"schemaCompatibilityStrategy":"FULL"}`, compatible: false},
+		{name: "compatible legacy alias", body: `{"compatible":true}`, compatible: true},
+		{name: "snake case legacy alias", body: `{"is_compatible":false}`, compatible: false},
+		{name: "all aliases agree", body: `{"compatibility":true,"isCompatibility":true,"compatible":true,"is_compatible":true}`, compatible: true},
+		{name: "duplicate alias agrees", body: `{"compatibility":true,"compatibility":true}`, compatible: true},
 		{name: "empty", body: "", wantErr: true},
 		{name: "malformed", body: `{`, wantErr: true},
 		{name: "missing compatibility field", body: `{"message":"accepted"}`, wantErr: true},
-		{name: "conflicting fields", body: `{"compatible":true,"is_compatible":false}`, wantErr: true},
+		{name: "null compatibility field", body: `{"compatibility":null}`, wantErr: true},
+		{name: "non boolean compatibility field", body: `{"compatibility":"true"}`, wantErr: true},
+		{name: "duplicate alias conflicts", body: `{"compatibility":false,"compatibility":true}`, wantErr: true},
+		{name: "case folded duplicate conflicts", body: `{"compatibility":false,"Compatibility":true}`, wantErr: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -160,6 +173,23 @@ func TestPulsarCompatibilityFailsClosed(t *testing.T) {
 				t.Fatalf("pulsarCompatibility() compatible = %t, want %t", compatible, tt.compatible)
 			}
 		})
+	}
+}
+
+func TestPulsarCompatibilityRejectsEveryAliasConflict(t *testing.T) {
+	t.Parallel()
+	aliases := []string{"compatibility", "isCompatibility", "compatible", "is_compatible"}
+	for i := range aliases {
+		for j := i + 1; j < len(aliases); j++ {
+			left, right := aliases[i], aliases[j]
+			t.Run(left+"_vs_"+right, func(t *testing.T) {
+				t.Parallel()
+				body := fmt.Sprintf(`{"%s":true,"%s":false}`, left, right)
+				if _, _, err := pulsarCompatibility([]byte(body)); err == nil {
+					t.Fatal("pulsarCompatibility() error = nil, want conflicting aliases to fail closed")
+				}
+			})
+		}
 	}
 }
 

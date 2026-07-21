@@ -35,9 +35,17 @@ type Options struct {
 }
 
 type Broker struct {
-	opts            Options
-	producerFactory func() (rocketmqclient.Producer, error)
+	opts                       Options
+	producerFactory            func() (rocketmqclient.Producer, error)
+	adminFactory               func() (topicAdmin, error)
+	adminFactoryForNameServers func([]string) (topicAdmin, error)
+	topicPropagationInterval   time.Duration
 }
+
+const (
+	defaultTopicPropagationTimeout  = 10 * time.Second
+	defaultTopicPropagationInterval = 200 * time.Millisecond
+)
 
 type topicAdmin interface {
 	CreateTopic(ctx context.Context, opts ...rmqadmin.OptionCreate) error
@@ -49,6 +57,7 @@ type topicAdmin interface {
 
 func New(opts Options) (*Broker, error) {
 	opts.NameServers = cleanedNameServers(opts.NameServers)
+	opts.Namespace = strings.TrimSpace(opts.Namespace)
 	if len(opts.NameServers) == 0 {
 		return nil, apperrors.New(apperrors.CodeUsageError, "RocketMQ name server addresses not specified", nil)
 	}
@@ -57,6 +66,9 @@ func New(opts Options) (*Broker, error) {
 	}
 	if (opts.AccessKey == "") != (opts.SecretKey == "") {
 		return nil, apperrors.New(apperrors.CodeUsageError, "RocketMQ ACL requires both access key and secret key", nil)
+	}
+	if opts.Namespace != "" {
+		return nil, apperrors.New(apperrors.CodeNotImplemented, "RocketMQ namespace is not supported consistently by the v2 admin client", nil)
 	}
 	return &Broker{opts: opts}, nil
 }
@@ -87,7 +99,7 @@ func (b *Broker) Capabilities() mqgov.Capabilities {
 	return mqgov.Capabilities{
 		Backend:            "rocketmq",
 		ResourceTypes:      []string{"topic", "message", "dlq"},
-		Verbs:              []string{"list", "describe", "produce", "create", "delete"},
+		Verbs:              []string{"list", "describe", "produce", "create"},
 		SupportsOffsets:    false,
 		SupportsPartitions: false,
 		SupportsACL:        false,
@@ -145,9 +157,10 @@ func (b *Broker) CreateTopic(ctx context.Context, req mqgov.TopicCreateRequest) 
 	if b.opts.BrokerAddr == "" {
 		return mqgov.TopicDescription{}, apperrors.New(apperrors.CodeUsageError, "RocketMQ broker address is required to create topics", nil)
 	}
-	if _, err := b.DescribeTopic(ctx, req.Coordinate); err == nil {
-		return mqgov.TopicDescription{}, apperrors.New(apperrors.CodeResourceAlreadyExists, "topic already exists", nil)
-	} else if apperrors.AsAppError(err).Code != apperrors.CodeResourceNotFound {
+	if err := b.ensureTopicAbsentBeforeCreate(ctx, req.Coordinate); err != nil {
+		return mqgov.TopicDescription{}, err
+	}
+	if err := ctx.Err(); err != nil {
 		return mqgov.TopicDescription{}, err
 	}
 	admin, err := b.newAdmin()
@@ -155,6 +168,9 @@ func (b *Broker) CreateTopic(ctx context.Context, req mqgov.TopicCreateRequest) 
 		return mqgov.TopicDescription{}, err
 	}
 	defer func() { _ = admin.Close() }()
+	if err := ctx.Err(); err != nil {
+		return mqgov.TopicDescription{}, err
+	}
 	queues := req.Partitions
 	if queues <= 0 {
 		queues = 8
@@ -166,28 +182,196 @@ func (b *Broker) CreateTopic(ctx context.Context, req mqgov.TopicCreateRequest) 
 		rmqadmin.WithWriteQueueNums(queues),
 	)
 	if err != nil {
-		return mqgov.TopicDescription{}, classifyErr(err)
+		return mqgov.TopicDescription{}, apperrors.New(
+			apperrors.CodePartialFailure,
+			"RocketMQ topic create request outcome is uncertain",
+			classifyErr(err),
+		)
 	}
-	return b.DescribeTopic(ctx, req.Coordinate)
+	description, err := b.waitForTopicPropagation(ctx, admin, req.Coordinate, queues)
+	if err != nil {
+		return mqgov.TopicDescription{}, apperrors.New(
+			apperrors.CodePartialFailure,
+			"RocketMQ topic create request returned without a client-reported error but confirmation failed",
+			err,
+		)
+	}
+	return description, nil
 }
 
-func (b *Broker) DeleteTopic(ctx context.Context, coord mqgov.TopicCoordinate) error {
-	if _, err := b.DescribeTopic(ctx, coord); err != nil {
+func (b *Broker) ensureTopicAbsentBeforeCreate(ctx context.Context, coord mqgov.TopicCoordinate) error {
+	if err := ctx.Err(); err != nil {
 		return err
 	}
-	admin, err := b.newAdmin()
+	if b.adminFactory != nil {
+		return ensureRocketMQTopicAbsent(ctx, b, coord)
+	}
+	if len(b.opts.NameServers) <= 1 {
+		return b.ensureTopicAbsentOnNameServer(ctx, b.opts.NameServers, coord)
+	}
+	for _, nameServer := range b.opts.NameServers {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if err := b.ensureTopicAbsentOnNameServer(ctx, []string{nameServer}, coord); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (b *Broker) ensureTopicAbsentOnNameServer(ctx context.Context, nameServers []string, coord mqgov.TopicCoordinate) error {
+	admin, err := b.newAdminForNameServers(nameServers)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = admin.Close() }()
-	opts := []rmqadmin.OptionDelete{rmqadmin.WithTopicDelete(coord.Topic), rmqadmin.WithNameSrvAddr(b.opts.NameServers)}
-	if b.opts.BrokerAddr != "" {
-		opts = append(opts, rmqadmin.WithBrokerAddrDelete(b.opts.BrokerAddr))
+	absent, err := rocketMQTopicAbsent(ctx, admin, coord.Topic)
+	if err != nil {
+		return err
 	}
-	if err := admin.DeleteTopic(ctx, opts...); err != nil {
-		return classifyErr(err)
+	if !absent {
+		return apperrors.New(apperrors.CodeResourceAlreadyExists, "topic already exists", nil)
 	}
 	return nil
+}
+
+func ensureRocketMQTopicAbsent(ctx context.Context, backend *Broker, coord mqgov.TopicCoordinate) error {
+	if _, err := backend.DescribeTopic(ctx, coord); err == nil {
+		return apperrors.New(apperrors.CodeResourceAlreadyExists, "topic already exists", nil)
+	} else if apperrors.AsAppError(err).Code != apperrors.CodeResourceNotFound {
+		return err
+	}
+	return nil
+}
+
+func (b *Broker) waitForTopicPropagation(
+	ctx context.Context,
+	admin topicAdmin,
+	coord mqgov.TopicCoordinate,
+	queues int,
+) (mqgov.TopicDescription, error) {
+	timeout := b.opts.Timeout
+	if timeout <= 0 {
+		timeout = defaultTopicPropagationTimeout
+	}
+	interval := b.topicPropagationInterval
+	if interval <= 0 {
+		interval = defaultTopicPropagationInterval
+	}
+	waitCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	for {
+		description, confirmed, err := b.confirmTopicOnEveryNameServer(waitCtx, admin, coord, queues)
+		if err == nil && confirmed {
+			return description, nil
+		}
+		if waitCtx.Err() != nil {
+			if ctx.Err() != nil {
+				return mqgov.TopicDescription{}, ctx.Err()
+			}
+			return mqgov.TopicDescription{}, apperrors.New(
+				apperrors.CodeResourceNotFound,
+				"RocketMQ topic was not visible before the confirmation timeout",
+				waitCtx.Err(),
+			)
+		}
+		if err != nil {
+			return mqgov.TopicDescription{}, err
+		}
+
+		timer := time.NewTimer(interval)
+		select {
+		case <-waitCtx.Done():
+			timer.Stop()
+			if ctx.Err() != nil {
+				return mqgov.TopicDescription{}, ctx.Err()
+			}
+			return mqgov.TopicDescription{}, apperrors.New(
+				apperrors.CodeResourceNotFound,
+				"RocketMQ topic was not visible before the confirmation timeout",
+				waitCtx.Err(),
+			)
+		case <-timer.C:
+		}
+	}
+}
+
+func (b *Broker) confirmTopicOnEveryNameServer(
+	ctx context.Context,
+	fallbackAdmin topicAdmin,
+	coord mqgov.TopicCoordinate,
+	expectedQueues int,
+) (mqgov.TopicDescription, bool, error) {
+	if b.adminFactory != nil {
+		return b.confirmTopicWithAdmin(ctx, fallbackAdmin, coord, expectedQueues)
+	}
+	var confirmed mqgov.TopicDescription
+	for _, nameServer := range b.opts.NameServers {
+		if err := ctx.Err(); err != nil {
+			return mqgov.TopicDescription{}, false, err
+		}
+		admin, err := b.newAdminForNameServers([]string{nameServer})
+		if err != nil {
+			return mqgov.TopicDescription{}, false, err
+		}
+		description, visible, confirmErr := b.confirmTopicWithAdmin(ctx, admin, coord, expectedQueues)
+		_ = admin.Close()
+		if confirmErr != nil || !visible {
+			return mqgov.TopicDescription{}, false, confirmErr
+		}
+		confirmed = description
+	}
+	if len(b.opts.NameServers) == 0 {
+		return mqgov.TopicDescription{}, false, apperrors.New(apperrors.CodeUsageError, "RocketMQ name server addresses not specified", nil)
+	}
+	return confirmed, true, nil
+}
+
+func (b *Broker) confirmTopicWithAdmin(
+	ctx context.Context,
+	admin topicAdmin,
+	coord mqgov.TopicCoordinate,
+	expectedQueues int,
+) (mqgov.TopicDescription, bool, error) {
+	description, err := b.describeTopicWithAdmin(ctx, admin, coord)
+	if err != nil {
+		if apperrors.AsAppError(err).Code == apperrors.CodeResourceNotFound {
+			return mqgov.TopicDescription{}, false, nil
+		}
+		return mqgov.TopicDescription{}, false, err
+	}
+	if description.Partitions != expectedQueues {
+		return mqgov.TopicDescription{}, false, apperrors.New(
+			apperrors.CodeConflict,
+			"RocketMQ topic queue count does not match the requested count",
+			nil,
+		)
+	}
+	return description, true, nil
+}
+
+func (*Broker) DeleteTopic(context.Context, mqgov.TopicCoordinate) error {
+	return notImplemented("RocketMQ topic delete is disabled because the v2 admin client cannot prove broker-side deletion")
+}
+
+func rocketMQTopicAbsent(ctx context.Context, admin topicAdmin, topic string) (bool, error) {
+	queues, err := admin.FetchPublishMessageQueues(ctx, topic)
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return false, ctxErr
+	}
+	if err == nil {
+		if len(queues) == 0 {
+			return false, apperrors.New(apperrors.CodeBackendError, "RocketMQ topic route response is empty", nil)
+		}
+		return false, nil
+	}
+	classified := classifyErr(err)
+	if apperrors.AsAppError(classified).Code == apperrors.CodeResourceNotFound {
+		return true, nil
+	}
+	return false, classified
 }
 
 func (b *Broker) ListGroups(context.Context, mqgov.GroupListOptions) ([]mqgov.GroupDescription, error) {
@@ -277,9 +461,19 @@ func (b *Broker) topicQueues(ctx context.Context, topic string) ([]*primitive.Me
 		return nil, err
 	}
 	defer func() { _ = admin.Close() }()
+	return topicQueuesWithAdmin(ctx, admin, topic)
+}
+
+func topicQueuesWithAdmin(ctx context.Context, admin topicAdmin, topic string) ([]*primitive.MessageQueue, error) {
 	queues, err := admin.FetchPublishMessageQueues(ctx, topic)
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return nil, ctxErr
+	}
 	if err != nil {
 		return nil, classifyErr(err)
+	}
+	if len(queues) == 0 {
+		return nil, apperrors.New(apperrors.CodeBackendError, "RocketMQ topic route response is empty", nil)
 	}
 	sort.Slice(queues, func(i, j int) bool {
 		if queues[i].BrokerName == queues[j].BrokerName {
@@ -290,13 +484,33 @@ func (b *Broker) topicQueues(ctx context.Context, topic string) ([]*primitive.Me
 	return queues, nil
 }
 
+func (b *Broker) describeTopicWithAdmin(ctx context.Context, admin topicAdmin, coord mqgov.TopicCoordinate) (mqgov.TopicDescription, error) {
+	queues, err := topicQueuesWithAdmin(ctx, admin, coord.Topic)
+	if err != nil {
+		return mqgov.TopicDescription{}, err
+	}
+	return mqgov.TopicDescription{
+		Coordinate: mqgov.TopicCoordinate{Cluster: b.opts.Cluster, Namespace: b.opts.Namespace, Topic: coord.Topic},
+		Partitions: len(queues),
+		Internal:   isInternalTopic(coord.Topic),
+		Config:     map[string]string{"queues": strconv.Itoa(len(queues))},
+	}, nil
+}
+
 func (b *Broker) newAdmin() (topicAdmin, error) {
-	opts := []rmqadmin.AdminOption{rmqadmin.WithResolver(primitive.NewPassthroughResolver(b.opts.NameServers))}
+	if b.adminFactory != nil {
+		return b.adminFactory()
+	}
+	return b.newAdminForNameServers(b.opts.NameServers)
+}
+
+func (b *Broker) newAdminForNameServers(nameServers []string) (topicAdmin, error) {
+	if b.adminFactoryForNameServers != nil {
+		return b.adminFactoryForNameServers(append([]string(nil), nameServers...))
+	}
+	opts := []rmqadmin.AdminOption{rmqadmin.WithResolver(primitive.NewPassthroughResolver(nameServers))}
 	if creds := b.credentials(); !creds.IsEmpty() {
 		opts = append(opts, rmqadmin.WithCredentials(creds))
-	}
-	if b.opts.Namespace != "" {
-		opts = append(opts, rmqadmin.WithNamespace(b.opts.Namespace))
 	}
 	admin, err := rmqadmin.NewAdmin(opts...)
 	if err != nil {
@@ -343,7 +557,7 @@ func classifyErr(err error) error {
 	if errors.As(err, &appErr) {
 		return err
 	}
-	if errors.Is(err, rmqerrors.ErrTopicNotExist) || errors.Is(err, rmqerrors.ErrNotExisted) || strings.Contains(strings.ToLower(err.Error()), "topic not exist") {
+	if errors.Is(err, rmqerrors.ErrTopicNotExist) || errors.Is(err, rmqerrors.ErrNotExisted) {
 		return apperrors.New(apperrors.CodeResourceNotFound, "topic not found", err)
 	}
 	if isNetworkErr(err) {

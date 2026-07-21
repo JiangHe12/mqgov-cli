@@ -42,11 +42,12 @@ go mod tidy                             # must be a no-op
 ```
 
 - Real-backend integration tests (`//go:build integration`, env-gated, skipped by
-  default) cover Kafka/RabbitMQ/Pulsar/RocketMQ; they run in the nightly
-  `integration.yml` workflow against the bundled `docker-compose.*.yml`, not on push/PR.
-- A passing env-gated integration test that SKIPs (endpoint env unset) is reported
-  as "ok" — it never ran. Dogfood the real backend yourself; a green default test
-  suite does not prove the backend works.
+  default) run against pinned images from the bundled `docker-compose.*.yml`. The
+  complete Kafka/ACL/TLS/RabbitMQ/Pulsar/RocketMQ/mirror suite is a release gate
+  and also runs nightly/on manual dispatch, not on push/PR.
+- The integration workflow sets `MQGOV_INTEGRATION_REQUIRED=true`, so a missing
+  endpoint fails instead of becoming a green skip. Locally, unset endpoints still
+  skip by default; a green default test suite does not prove the backend works.
 - README / SKILL.md command examples are NOT covered by CI: run the real binary
   and confirm every cited flag exists (`mqgov <cmd> --help`) before shipping docs.
 
@@ -54,7 +55,7 @@ go mod tidy                             # must be a no-op
 
 - R0 reads are free but audited. R1 needs `--yes`. R2 also needs a non-empty
   `--ticket`. R3 also needs the exact command-specific `--allow-*` flag
-  (`--allow-offset-reset`, `--allow-topic-purge`, `--allow-topic-delete`,
+  (`--allow-offset-reset`, `--allow-topic-purge`, `--allow-topic-delete`, `--allow-topic-upsert`,
   `--allow-destructive-acl`, `--allow-internal-produce`,
   `--allow-schema-delete`, `--allow-context-change`,
   `--allow-context-delete`, `--allow-role-change`, `--allow-audit-prune`).
@@ -126,6 +127,14 @@ go mod tidy                             # must be a no-op
 - Resolve exact topic metadata once before authorization, then reuse the bound
   coordinate and protected/internal classification for execution. Metadata
   lookup errors or mismatched coordinates fail closed before mutation intent.
+- RocketMQ's public topic-create RPC is update-or-create rather than atomic
+  create-only. Classify it as R2 (`CreateMayAlter`) and check every configured
+  name server for an existing topic before dispatch; the preflight improves
+  diagnostics but is not the authorization boundary because a TOCTOU remains.
+  Confirm the actual requested queue count through every name server before
+  reporting success. RocketMQ topic delete and namespace configuration stay
+  fail-closed `NOT_IMPLEMENTED`: the v2 admin client cannot prove broker-side
+  deletion and does not apply namespace wrapping consistently.
 - **Backends are dumb**: they only execute broker operations. All R0-R3
   authorization stays in `cmd/` + `mqclass`; a backend must never make an
   authorization decision.
@@ -181,5 +190,7 @@ or dependency / Go-version bump must be reflected first (confirm examples with
 For reference, a release bumps `package.json`, adds an exact `## vX.Y.Z`
 `CHANGELOG.md` heading, passes Build & Verify (`npm pack --dry-run` lists exactly
 `LICENSE`, `README.md`, `package.json`, `bin/mqgov-cli.js`, `scripts/install.js`),
-then pushes tag `vX.Y.Z`. **npm publish is locked to the CI trusted publisher via
+then pushes a signed annotated tag `vX.Y.Z`. Release preflight verifies the tag
+signature through the GitHub API and requires the tag, package version, and changelog
+heading to match. **npm publish is locked to the CI trusted publisher via
 OIDC; local/token `npm publish` is disabled — never attempt a manual publish.**

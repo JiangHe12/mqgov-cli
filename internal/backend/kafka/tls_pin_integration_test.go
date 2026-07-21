@@ -16,7 +16,7 @@ import (
 func TestKafkaTLSPinningIntegration(t *testing.T) {
 	brokers := os.Getenv("KAFKA_TLS_PIN_BROKERS")
 	if strings.TrimSpace(brokers) == "" {
-		t.Skip("KAFKA_TLS_PIN_BROKERS not set")
+		skipOrFailIntegration(t, "KAFKA_TLS_PIN_BROKERS not set")
 	}
 	pinPath := os.Getenv("KAFKA_TLS_PIN_PATH")
 	if pinPath == "" {

@@ -19,7 +19,7 @@ import (
 func TestKafkaIntegration(t *testing.T) {
 	brokers := os.Getenv("KAFKA_BROKERS")
 	if strings.TrimSpace(brokers) == "" {
-		t.Skip("KAFKA_BROKERS not set")
+		skipOrFailIntegration(t, "KAFKA_BROKERS not set")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
@@ -179,7 +179,7 @@ func TestKafkaSchemaRegistryIntegration(t *testing.T) {
 	brokers := os.Getenv("KAFKA_BROKERS")
 	srURL := os.Getenv("KAFKA_SCHEMA_REGISTRY_URL")
 	if strings.TrimSpace(brokers) == "" || strings.TrimSpace(srURL) == "" {
-		t.Skip("KAFKA_BROKERS and KAFKA_SCHEMA_REGISTRY_URL not set")
+		skipOrFailIntegration(t, "KAFKA_BROKERS and KAFKA_SCHEMA_REGISTRY_URL not set")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
@@ -254,6 +254,14 @@ func TestKafkaSchemaRegistryIntegration(t *testing.T) {
 	if deletedSubject.Subject != subject || len(deletedSubject.Versions) == 0 {
 		t.Fatalf("DeleteSchema(subject) = %+v, want deleted versions", deletedSubject)
 	}
+}
+
+func skipOrFailIntegration(t *testing.T, reason string) {
+	t.Helper()
+	if strings.EqualFold(strings.TrimSpace(os.Getenv("MQGOV_INTEGRATION_REQUIRED")), "true") {
+		t.Fatalf("%s while MQGOV_INTEGRATION_REQUIRED=true", reason)
+	}
+	t.Skip(reason)
 }
 
 func collectTail(t *testing.T, ctx context.Context, tailer mqgov.Tailer, req mqgov.MessageTailRequest) []mqgov.MessageFingerprint {

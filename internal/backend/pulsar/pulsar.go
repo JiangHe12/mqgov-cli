@@ -1292,26 +1292,106 @@ func pulsarCompatibility(body []byte) (bool, string, error) {
 	if trimmed == "" {
 		return false, "", fmt.Errorf("pulsar compatibility response is empty")
 	}
+	if err := validatePulsarCompatibilityAliases(body); err != nil {
+		return false, "", err
+	}
 	var result struct {
-		Compatible   *bool    `json:"compatible"`
-		IsCompatible *bool    `json:"is_compatible"`
-		Message      string   `json:"message"`
-		Messages     []string `json:"messages"`
+		Compatibility   *bool    `json:"compatibility"`
+		IsCompatibility *bool    `json:"isCompatibility"`
+		Compatible      *bool    `json:"compatible"`
+		IsCompatible    *bool    `json:"is_compatible"`
+		Message         string   `json:"message"`
+		Messages        []string `json:"messages"`
 	}
 	if err := json.Unmarshal(body, &result); err != nil {
 		return false, "", fmt.Errorf("decode Pulsar compatibility response: %w", err)
 	}
-	if result.Compatible == nil && result.IsCompatible == nil {
+	candidates := []struct {
+		name  string
+		value *bool
+	}{
+		{name: "compatibility", value: result.Compatibility},
+		{name: "isCompatibility", value: result.IsCompatibility},
+		{name: "compatible", value: result.Compatible},
+		{name: "is_compatible", value: result.IsCompatible},
+	}
+	var compatible *bool
+	var source string
+	for _, candidate := range candidates {
+		if candidate.value == nil {
+			continue
+		}
+		if compatible != nil && *compatible != *candidate.value {
+			return false, "", fmt.Errorf("pulsar compatibility response contains conflicting results in %q and %q", source, candidate.name)
+		}
+		if compatible == nil {
+			compatible = candidate.value
+			source = candidate.name
+		}
+	}
+	if compatible == nil {
 		return false, "", fmt.Errorf("pulsar compatibility response is missing a compatibility result")
 	}
-	if result.Compatible != nil && result.IsCompatible != nil && *result.Compatible != *result.IsCompatible {
-		return false, "", fmt.Errorf("pulsar compatibility response contains conflicting results")
-	}
-	compatible := result.Compatible
-	if compatible == nil {
-		compatible = result.IsCompatible
-	}
 	return *compatible, firstNonEmpty(result.Message, strings.Join(result.Messages, "; ")), nil
+}
+
+func validatePulsarCompatibilityAliases(body []byte) error {
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	token, err := decoder.Token()
+	if err != nil {
+		return fmt.Errorf("decode Pulsar compatibility response: %w", err)
+	}
+	object, ok := token.(json.Delim)
+	if !ok || object != '{' {
+		return nil
+	}
+
+	seen := make(map[string]bool)
+	for decoder.More() {
+		keyToken, err := decoder.Token()
+		if err != nil {
+			return fmt.Errorf("decode Pulsar compatibility response: %w", err)
+		}
+		key, ok := keyToken.(string)
+		if !ok {
+			return fmt.Errorf("decode Pulsar compatibility response: object key is not a string")
+		}
+		var raw json.RawMessage
+		if err := decoder.Decode(&raw); err != nil {
+			return fmt.Errorf("decode Pulsar compatibility response: %w", err)
+		}
+		alias, recognized := pulsarCompatibilityAlias(key)
+		if !recognized {
+			continue
+		}
+
+		var value bool
+		switch string(bytes.TrimSpace(raw)) {
+		case "true":
+			value = true
+		case "false":
+			value = false
+		default:
+			return fmt.Errorf("pulsar compatibility response field %q is not a boolean", key)
+		}
+		if previous, duplicate := seen[alias]; duplicate && previous != value {
+			return fmt.Errorf("pulsar compatibility response contains conflicting duplicate results in %q", alias)
+		}
+		seen[alias] = value
+	}
+	if _, err := decoder.Token(); err != nil {
+		return fmt.Errorf("decode Pulsar compatibility response: %w", err)
+	}
+	return nil
+}
+
+func pulsarCompatibilityAlias(name string) (string, bool) {
+	for _, alias := range []string{"compatibility", "isCompatibility", "compatible", "is_compatible"} {
+		if strings.EqualFold(name, alias) {
+			return alias, true
+		}
+	}
+	return "", false
 }
 
 func pulsarSchemaVersionString(version any) string {

@@ -1,6 +1,6 @@
 services:
   pulsar:
-    image: apachepulsar/pulsar:latest
+    image: apachepulsar/pulsar@sha256:71b014dd8a841469ad8f6c92053affdbc4b4a55361be919722d0c4896b480f39
     command: bin/pulsar standalone
     ports:
       - "6650:6650"

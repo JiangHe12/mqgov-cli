@@ -28,6 +28,8 @@ func TestClassifyGovernanceInvariants(t *testing.T) {
 		{name: "produce R1", op: OperationProduce, target: Target{Topic: "orders"}, want: safety.R1},
 		{name: "mirror R1 follows target produce", op: OperationMirror, target: Target{Topic: "orders"}, want: safety.R1},
 		{name: "create topic R1", op: OperationCreateTopic, target: Target{Topic: "orders"}, want: safety.R1},
+		{name: "upsert-style create R2", op: OperationCreateTopic, target: Target{Topic: "orders", CreateMayAlter: true}, want: safety.R2},
+		{name: "protected upsert-style create R3", op: OperationCreateTopic, target: Target{Topic: "orders", CreateMayAlter: true, ProtectedTopic: true}, want: safety.R3},
 		{name: "alter topic R2", op: OperationAlterTopic, target: Target{Topic: "orders"}, want: safety.R2},
 		{name: "produce protected R2", op: OperationProduce, target: Target{Topic: "orders", ProtectedTopic: true}, want: safety.R2},
 		{name: "mirror protected target R2", op: OperationMirror, target: Target{Topic: "orders", ProtectedTopic: true}, want: safety.R2},

@@ -280,6 +280,9 @@ func ctxSetCmd(f *cliFlags) *cobra.Command { //nolint:gocyclo // Backend-specifi
 				Namespace: firstNonEmpty(opts.namespace, f.Namespace),
 			}
 			applyBackendContextOptions(&item, opts)
+			if err := validateContextDefinition(&item); err != nil {
+				return err
+			}
 			cfg, err := mqgovctx.Load()
 			if err != nil {
 				return err
@@ -1223,7 +1226,7 @@ func runCtxImportOne(f *cliFlags, doc contextExportDocument, opts ctxImportOptio
 	if err != nil {
 		return err
 	}
-	if err := validateImportedContext(item); err != nil {
+	if err := validateContextDefinition(&item); err != nil {
 		return err
 	}
 	cfg, err := mqgovctx.Load()
@@ -1356,7 +1359,7 @@ func runCtxImportMany(f *cliFlags, doc contextExportDocument, opts ctxImportOpti
 			return err
 		}
 		candidates = append(candidates, candidate)
-		if err := validateImportedContext(item); err != nil {
+		if err := validateContextDefinition(&item); err != nil {
 			return err
 		}
 		if _, exists := cfg.Contexts[name]; exists && !opts.force {
@@ -1516,9 +1519,15 @@ func credentialBackendForContext(item mqgovctx.Context) (credstore.Backend, erro
 	return credstore.New(item.CredentialBackend)
 }
 
-func validateImportedContext(item mqgovctx.Context) error {
+func validateContextDefinition(item *mqgovctx.Context) error {
 	if !supportedContextBackend(item.Backend) {
 		return apperrors.New(apperrors.CodeNotImplemented, "backend is not supported", nil)
+	}
+	if item.Backend == "rocketmq" {
+		item.Namespace = strings.TrimSpace(item.Namespace)
+		if item.Namespace != "" {
+			return apperrors.New(apperrors.CodeNotImplemented, "RocketMQ namespace is not supported consistently by the v2 admin client", nil)
+		}
 	}
 	return nil
 }

@@ -22,7 +22,7 @@ func TestMessageMirrorCrossBrokerIntegration(t *testing.T) {
 	pulsarServiceURL := os.Getenv("PULSAR_SERVICE_URL")
 	pulsarAdminURL := os.Getenv("PULSAR_ADMIN_URL")
 	if strings.TrimSpace(kafkaBrokers) == "" || strings.TrimSpace(pulsarServiceURL) == "" || strings.TrimSpace(pulsarAdminURL) == "" {
-		t.Skip("KAFKA_BROKERS, PULSAR_SERVICE_URL and PULSAR_ADMIN_URL not set")
+		skipOrFailIntegration(t, "KAFKA_BROKERS, PULSAR_SERVICE_URL and PULSAR_ADMIN_URL not set")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
@@ -44,6 +44,14 @@ func TestMessageMirrorCrossBrokerIntegration(t *testing.T) {
 
 	runKafkaToPulsarMirror(t, ctx, kafkaBroker, pulsarBroker, kafkaBrokers, pulsarServiceURL, pulsarAdminURL)
 	runPulsarToKafkaMirror(t, ctx, kafkaBroker, pulsarBroker, kafkaBrokers, pulsarServiceURL, pulsarAdminURL)
+}
+
+func skipOrFailIntegration(t *testing.T, reason string) {
+	t.Helper()
+	if strings.EqualFold(strings.TrimSpace(os.Getenv("MQGOV_INTEGRATION_REQUIRED")), "true") {
+		t.Fatalf("%s while MQGOV_INTEGRATION_REQUIRED=true", reason)
+	}
+	t.Skip(reason)
 }
 
 func runKafkaToPulsarMirror(t *testing.T, ctx context.Context, kafkaBroker *kafkabackend.Broker, pulsarBroker *pulsarbackend.Broker, kafkaBrokers, pulsarServiceURL, pulsarAdminURL string) {

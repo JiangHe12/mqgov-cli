@@ -61,6 +61,7 @@ func sameTopicClassification(left, right mqclass.Target) bool {
 	return left.Topic == right.Topic &&
 		left.ProtectedTopic == right.ProtectedTopic &&
 		left.InternalTopic == right.InternalTopic &&
+		left.CreateMayAlter == right.CreateMayAlter &&
 		left.Plan == right.Plan
 }
 

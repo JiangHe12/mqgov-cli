@@ -2,6 +2,20 @@
 
 All notable changes to this project are documented in this file.
 
+## v0.6.1
+
+### Changed
+
+- Pinned the Kafka/Schema Registry, RabbitMQ, Pulsar, and RocketMQ integration images to the exact digests exercised by the v0.6.0 tag integration run.
+- Made the complete real-backend matrix (Kafka, ACL, TLS pinning, RabbitMQ, Pulsar, RocketMQ, and Kafka-to-Pulsar mirror) a reusable release gate with required mode preventing missing endpoints from becoming green skips.
+- Added a release preflight that requires a GitHub-verifiable signed annotated tag matching `package.json`, an exact literal `CHANGELOG.md` heading, and the freshly fetched `origin/main` commit; release jobs rerun the complete CI/security gate on that exact tag commit.
+- **Fail-closed compatibility change:** RocketMQ topic delete is now `NOT_IMPLEMENTED` because the upstream v2 admin client ignores broker/name-server response codes and route disappearance cannot prove broker-side deletion. RocketMQ namespace configuration is also rejected because the client applies namespace wrapping inconsistently across admin operations.
+
+### Fixed
+
+- Recognized Pulsar's official `compatibility` and `isCompatibility` response fields while keeping missing, malformed, conflicting, and conflicting duplicate results fail-closed.
+- Classifies RocketMQ topic creation as R2 because the upstream API is an upsert, checks every configured name server for absence before dispatch, and confirms the actual route and requested queue count separately through every name server after creation. Once the create RPC is entered, any request, queue-count conflict, or confirmation error is reported as `PARTIAL_FAILURE` with an uncertain audit outcome and a non-zero CLI exit instead of implying that no side effect occurred; the upstream client's fixed in-call route/write timeouts remain documented.
+
 ## v0.6.0
 
 ### Added

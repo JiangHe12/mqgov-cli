@@ -48,6 +48,7 @@ type Target struct {
 	Plan           bool
 	SchemaExists   bool
 	SchemaUnknown  bool
+	CreateMayAlter bool
 }
 
 type ACLTarget struct {
@@ -67,6 +68,9 @@ type Result struct {
 
 func Classify(op Operation, target Target) Result {
 	base := classifyBase(op)
+	if op == OperationCreateTopic && target.CreateMayAlter && !target.Plan {
+		base = escalate(base, "backend create API may alter an existing topic")
+	}
 	if target.Plan && isReadOnlyPlan(op) {
 		base = Result{Risk: safety.R0, Reason: "read-only impact preview"}
 	}

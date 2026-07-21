@@ -66,12 +66,14 @@ Writes require human authorization according to risk:
 
 ```bash
 mqgov topic create <topic> --partitions 3 --yes -o json
+mqgov topic create <topic> --partitions 3 --yes --ticket <ticket> -o json  # RocketMQ: upstream API is update-or-create (R2)
+mqgov topic create <topic> --partitions 3 --yes --ticket <ticket> --allow-topic-upsert -o json  # protected RocketMQ (R3)
 mqgov message produce <topic> --body <text> --yes -o json
 mqgov group reset-offset <group> <topic> --to earliest --dry-run -o json
 mqgov group reset-offset <group> <topic> --to latest --yes --ticket <ticket> --allow-offset-reset -o json
 mqgov topic purge <topic> --dry-run -o json
 mqgov topic purge <topic> --yes --ticket <ticket> --allow-topic-purge -o json
-mqgov topic delete <topic> --yes --ticket <ticket> --allow-topic-delete -o json
+mqgov topic delete <topic> --yes --ticket <ticket> --allow-topic-delete -o json  # supported backends only; RocketMQ is NOT_IMPLEMENTED
 mqgov message mirror <source-topic> --to-context <target-context> --to-topic <target-topic> --limit 100 --yes -o json
 mqgov schema register <subject-or-topic> --schema-file ./next.avsc --schema-type AVRO --yes -o json
 mqgov schema register <subject-or-topic> --schema-file ./next.avsc --schema-type AVRO --yes --ticket <ticket> -o json
@@ -88,6 +90,8 @@ mqgov acl revoke --principal svc --vhost / --resource-type vhost --resource-name
 mqgov acl grant --principal app-role --resource-type namespace --resource-name public/default --pattern literal --operation produce --permission allow --yes --ticket <ticket> -o json
 mqgov acl revoke --principal app-role --resource-type topic --resource-name <topic> --pattern literal --operation consume --permission allow --yes --ticket <ticket> --allow-destructive-acl -o json
 ```
+
+RocketMQ governance: `topic create` is R2 because the upstream API is update-or-create; protected targets are R3 and require `--allow-topic-upsert`. The backend checks and then confirms the actual queue route through every configured name server, but in-flight upstream route calls have a fixed client timeout and cannot be interrupted immediately. Treat every `PARTIAL_FAILURE` as uncertain and reconcile before retrying. RocketMQ topic delete and `--namespace` are fail-closed `NOT_IMPLEMENTED` because the v2 admin client cannot prove broker-side deletion and applies namespace wrapping inconsistently.
 
 ACL governance:
 

@@ -4,7 +4,7 @@
 
 **面向人类_和_ AI agent 的受治理消息中间件操作工具。**
 
-一条安全的命令行,统一管理 **Kafka**、**RabbitMQ**、**Pulsar**、**RocketMQ** —— 列出、查看、peek、tail、生产、治理 DLQ、重置 offset、查看/变更 ACL、检视 schema、清空、删除 topic,绝不手滑搞挂生产、也绝不静默清空一个队列。
+一条安全的命令行,统一管理 **Kafka**、**RabbitMQ**、**Pulsar**、**RocketMQ** —— 按后端如实声明能力；客户端无法证明安全的操作一律失败关闭。
 
 [![npm version](https://img.shields.io/npm/v/mqgov-cli.svg)](https://www.npmjs.com/package/mqgov-cli)
 [![CI](https://github.com/JiangHe12/mqgov-cli/actions/workflows/ci.yml/badge.svg)](https://github.com/JiangHe12/mqgov-cli/actions/workflows/ci.yml)
@@ -38,7 +38,7 @@
 | | |
 |---|---|
 | 📨 **四个 broker** | **Kafka**(franz-go)、**RabbitMQ**(AMQP + 管理 API)、**Pulsar**(客户端 + admin REST)、**RocketMQ**(rocketmq-client-go/v2)。一套与后端无关的治理模型;按 context 选择或按命令覆盖。 |
-| 🧱 **topic / group / message / dlq / acl / schema / fleet** | topic:list · describe · create · alter · delete · purge。消费组:list · lag · reset-offset。消息:非破坏性 peek · tail · 有界 mirror · produce。DLQ:list · peek · redrive · purge,映射各 broker 原生模型。ACL:list · grant · revoke(按后端能力开放)。Schema:list · describe · check · register · delete(按原生 schema registry 能力开放)。Fleet:跨已配置 context 的只读状态与 topic 视图。 |
+| 🧱 **topic / group / message / dlq / acl / schema / fleet** | topic:list · describe · create · alter · delete · purge（按后端能力开放）。消费组:list · lag · reset-offset。消息:非破坏性 peek · tail · 有界 mirror · produce。DLQ:list · peek · redrive · purge,映射各 broker 原生模型。ACL:list · grant · revoke(按后端能力开放)。Schema:list · describe · check · register · delete(按原生 schema registry 能力开放)。Fleet:跨已配置 context 的只读状态与 topic 视图。 |
 | 🔐 **R0–R3 治理** | 每个操作由 fail-closed 的 `mqclass` 引擎分级;保护上下文与内部/系统 topic 升一档;AI 调用方永远无法自我授权。 |
 | 🎯 **真实爆炸半径预览** | `reset-offset --dry-run` 和 `purge --dry-run` 从实时 broker 计算真实的每分区消息 delta —— 不靠猜。预览只读,绝不变更。 |
 | 👀 **非破坏性 peek/tail** | 把消息以指纹形式查看或流式读取,不消费、不移动游标(Kafka 直接分区读取、Pulsar Reader、RabbitMQ 仅 peek 使用 get+requeue)。无法保证非破坏的 broker 上,操作 **失败关闭**而非静默消费。 |
@@ -52,7 +52,8 @@
 
 | | Kafka | Pulsar | RabbitMQ | RocketMQ |
 |---|:---:|:---:|:---:|:---:|
-| topic list / describe / create / delete | ✅ | ✅ | ✅ | ✅ |
+| topic list / describe / create | ✅ | ✅ | ✅ | ✅ |
+| topic delete | ✅ | ✅ | ✅ | ❌ `NOT_IMPLEMENTED`⁴ |
 | produce | ✅ | ✅ | ✅ | ✅ |
 | **非破坏性 peek** | ✅ | ✅(Reader) | ✅(get+requeue) | ❌ `NOT_IMPLEMENTED`¹ |
 | **非破坏性 tail** | ✅ | ✅(Reader) | ❌ `NOT_IMPLEMENTED`² | ❌ `NOT_IMPLEMENTED`¹ |
@@ -66,6 +67,8 @@
 ¹ RocketMQ 的 Go v2 `PullConsumer` 会进入消费组生命周期并提交 offset,无法保证非破坏性 peek/tail —— mqgov 选择失败关闭,而非静默推进 offset。² RabbitMQ 没有向前的非破坏性 tail,读取语义是 consume/requeue。不支持的操作一律返回 `NOT_IMPLEMENTED`(exit 12),绝不假装成功。
 
 ³ RocketMQ broker ACL 存在 broker 侧 `plain_acl.yml` 中,但 `rocketmq-client-go/v2` 没有公开、cgo-free、干净的 ACL admin API 可读写该配置。mqgov 不 shell out 到 Java `mqadmin`,也不手搓 remoting 命令;在 Go 客户端提供干净 API 前,请通过 broker 配置或官方 mqadmin 带外管理 RocketMQ ACL。
+
+⁴ RocketMQ topic delete 已禁用：上游 v2 admin 客户端忽略 broker 和 NameServer 的响应码，仅看到 NameServer route 消失不足以证明 broker 侧已删除。RocketMQ `--namespace` 同样被拒绝，因为该客户端会对 route lookup/produce 加 namespace，却未对 create/delete/list 一致处理。
 
 ---
 
@@ -130,11 +133,11 @@ mqgov audit query --since 1h -o json
 | 档 | 涵盖 | 你必须提供 |
 |:---:|---|---|
 | **R0** | 读与预览(`topic list/describe`、`group list/lag`、`message peek`、`message tail`、`dlq list/peek`、`acl list`、`schema list/describe/check`、`fleet status/topics`、`*-dry-run`、`audit query/verify`、`audit prune` 预览、`doctor`) | 无 —— 但仍会审计 |
-| **R1** | 普通写(`message produce`、`message mirror` 目标侧、`topic create`、新 subject 的 `schema register`) | `--yes`(或交互确认) |
-| **R2** | 升级变更(`topic alter`、`group create/delete`、`acl grant`、已有 subject 的 `schema register`、向**保护** topic produce/mirror) | `--yes` **且**非空 `--ticket` |
-| **R3** | 破坏性 / 不可逆操作（`group reset-offset`、topic/DLQ purge、topic/schema delete、受支持的 DLQ redrive、宽泛 ACL 变更、内部 topic produce/mirror）及治理控制变更（`ctx set/use/delete/import/migrate-credentials`、`ctx role set/unset`、确认执行的 `audit prune`） | 以上 **再加**该操作专属的 `--allow-*` 标志 |
+| **R1** | 普通写(`message produce`、`message mirror` 目标侧、非 RocketMQ 的 `topic create`、新 subject 的 `schema register`) | `--yes`(或交互确认) |
+| **R2** | 升级变更(`topic alter`、RocketMQ `topic create`、`group create/delete`、`acl grant`、已有 subject 的 `schema register`、向**保护** topic produce/mirror) | `--yes` **且**非空 `--ticket` |
+| **R3** | 破坏性 / 不可逆操作（`group reset-offset`、topic/DLQ purge、受支持的 topic/schema delete、受支持的 DLQ redrive、宽泛 ACL 变更、内部 topic produce/mirror）、受保护的 RocketMQ topic upsert，及治理控制变更（`ctx set/use/delete/import/migrate-credentials`、`ctx role set/unset`、确认执行的 `audit prune`） | 以上 **再加**该操作专属的 `--allow-*` 标志 |
 
-R3 的 allow 标志:`--allow-offset-reset`、`--allow-topic-purge`、`--allow-topic-delete`、`--allow-destructive-acl`、`--allow-internal-produce`、`--allow-schema-delete`、`--allow-context-change`、`--allow-context-delete`、`--allow-role-change`、`--allow-audit-prune`。
+R3 的 allow 标志:`--allow-offset-reset`、`--allow-topic-purge`、`--allow-topic-delete`、`--allow-topic-upsert`、`--allow-destructive-acl`、`--allow-internal-produce`、`--allow-schema-delete`、`--allow-context-change`、`--allow-context-delete`、`--allow-role-change`、`--allow-audit-prune`。
 
 **保护上下文、保护 topic、内部/系统 topic 都使档位升一级。** 例如向 `__consumer_offsets` 生产被当作破坏性 R3 操作,需要 `--allow-internal-produce`。
 
@@ -164,11 +167,13 @@ mqgov topic list     [--pattern <name|glob>] -o json
 mqgov topic describe <topic> -o json
 
 # 写
-mqgov topic create <topic> [--partitions N] --yes                                  # R1(保护则 R2)
+mqgov topic create <topic> [--partitions N] --yes                                  # 非 RocketMQ R1(保护则 R2)
+mqgov topic create <topic> [--partitions N] --yes --ticket <t>                     # RocketMQ R2
+mqgov topic create <topic> [--partitions N] --yes --ticket <t> --allow-topic-upsert # 受保护 RocketMQ 为 R3
 mqgov topic alter  <topic> --partitions N --yes --ticket <t>                       # R2(Kafka/Pulsar)
 mqgov topic purge  <topic> [--dlq] --dry-run                                        # R0 预览
 mqgov topic purge  <topic> [--dlq] --yes --ticket <t> --allow-topic-purge          # R3
-mqgov topic delete <topic> --yes --ticket <t> --allow-topic-delete                 # R3
+mqgov topic delete <topic> --yes --ticket <t> --allow-topic-delete                 # 支持该操作的后端 R3；RocketMQ NOT_IMPLEMENTED
 ```
 </details>
 
@@ -327,6 +332,8 @@ mqgov completion bash|zsh|fish|powershell
 mqgov install <agent> --skills  # 把 mqgov AI skill 装进 agent(claude、codex…)或自定义路径
 mqgov version
 ```
+
+RocketMQ context 不支持 `--namespace`；上游 Go v2 admin 客户端的 namespace 包装不一致，mqgov 会直接拒绝，避免实际操作落到不同的 topic 名称。
 </details>
 
 ---
@@ -335,7 +342,7 @@ mqgov version
 
 mqgov-cli 设计为可被自治 agent 安全驱动:
 
-- 先跑 `mqgov capabilities -o json` 发现绑定后端支持什么 —— broker 各异,别假设(例如 Kafka、RabbitMQ、Pulsar 都支持 `acl`,但原生模型不同;Kafka 与 Pulsar 支持 `schema`;RabbitMQ/RocketMQ 无 offset、schema registry 或 tail;RocketMQ 无 peek)。需要跨 context 仪表盘时用只读的 `fleet status --all -o json`。
+- 先跑 `mqgov capabilities -o json` 发现绑定后端支持什么 —— broker 各异,别假设(例如 Kafka、RabbitMQ、Pulsar 都支持 `acl`,但原生模型不同;Kafka 与 Pulsar 支持 `schema`;RabbitMQ/RocketMQ 无 offset、schema registry 或 tail;RocketMQ 无 peek 或 topic delete)。需要跨 context 仪表盘时用只读的 `fleet status --all -o json`。
 - 处处用 `-o json`;每个命令返回稳定、带版本的信封。
 - 爆炸半径来自 `--dry-run` / `--plan`,绝不来自你自己的推理。
 - **绝不自填 `--ticket`、`--allow-*` 或高危 `--yes`。** 把所需人工审批上报并停下。
@@ -350,6 +357,7 @@ mqgov install claude --skills     # 也支持:codex、opencode、copilot、curso
 
 ## 🔏 信任与校验
 
+- **已验证发布标签** —— 仅当 signed annotated tag 经 GitHub 验证，且精确匹配 `package.json`、`CHANGELOG.md` 与最新拉取的 `origin/main` 时才开始发布；CI 与完整真实 broker 矩阵会在该标签提交上重跑。
 - **签名二进制** —— 每个发布产物用 [cosign](https://github.com/sigstore/cosign) 签名(keyless / OIDC)。`checksums.txt`(同样签名)覆盖所有平台。
 - **npm provenance** —— npm 包经 CI 用 OpenID Connect 发布,带 [provenance 证明](https://docs.npmjs.com/generating-provenance-statements),关联到本仓库与此工作流。
 - **校验安装** —— npm postinstall 经白名单主机下载二进制,并在安装前对照已签名的 `checksums.txt` 校验 SHA-256。
@@ -372,7 +380,7 @@ go mod tidy -diff
 npm pack --dry-run
 ```
 
-真后端集成测试(`//go:build integration`,env-gated,默认跳过)在 nightly `integration.yml` 工作流里对活的 Kafka/RabbitMQ/Pulsar/RocketMQ 容器运行;本地用自带的 `docker-compose.*.yml` 跑法见 [`docs/`](docs/)。
+真后端集成测试(`//go:build integration`,env-gated,默认跳过)使用固定 digest 的 Kafka/RabbitMQ/Pulsar/RocketMQ 镜像。完整的 Kafka/ACL/TLS/RabbitMQ/Pulsar/RocketMQ/mirror 矩阵是发布门禁，并在 nightly 和手动触发时运行。本地用自带的 `docker-compose.*.yml` 跑法见 [`docs/`](docs/)。
 
 完整验证流程见 [CONTRIBUTING.md](CONTRIBUTING.md)，漏洞报告方式与安全边界见
 [SECURITY.md](SECURITY.md)。

@@ -4,7 +4,7 @@
 
 **Governed message-broker operations for humans _and_ AI agents.**
 
-One safe command line for **Kafka**, **RabbitMQ**, **Pulsar**, and **RocketMQ** — list, describe, peek, tail, produce, govern DLQs, reset offsets, inspect ACLs and schemas, purge, and delete topics without ever fat-fingering production or silently draining a queue.
+One safe command line for **Kafka**, **RabbitMQ**, **Pulsar**, and **RocketMQ** — with per-backend capabilities that fail closed whenever the client cannot prove an operation safe.
 
 [![npm version](https://img.shields.io/npm/v/mqgov-cli.svg)](https://www.npmjs.com/package/mqgov-cli)
 [![CI](https://github.com/JiangHe12/mqgov-cli/actions/workflows/ci.yml/badge.svg)](https://github.com/JiangHe12/mqgov-cli/actions/workflows/ci.yml)
@@ -38,7 +38,7 @@ It's built on the shared [`opskit-core`](https://github.com/JiangHe12/opskit-cor
 | | |
 |---|---|
 | 📨 **Four brokers** | **Kafka** (franz-go), **RabbitMQ** (AMQP + management API), **Pulsar** (client + admin REST), **RocketMQ** (rocketmq-client-go/v2). One backend-agnostic governance model; pick per context or override per command. |
-| 🧱 **topic / group / message / dlq / acl / schema / fleet** | topics: list · describe · create · alter · delete · purge. consumer groups: list · lag · reset-offset. messages: non-destructive peek · tail · bounded mirror · produce. DLQs: list · peek · redrive · purge through native broker models. ACLs: list · grant · revoke where supported. Schemas: list · describe · check · register · delete where native schema registry support exists. Fleet: read-only status and topic inventory across configured contexts. |
+| 🧱 **topic / group / message / dlq / acl / schema / fleet** | topics: list · describe · create · alter · delete · purge where supported. consumer groups: list · lag · reset-offset. messages: non-destructive peek · tail · bounded mirror · produce. DLQs: list · peek · redrive · purge through native broker models. ACLs: list · grant · revoke where supported. Schemas: list · describe · check · register · delete where native schema registry support exists. Fleet: read-only status and topic inventory across configured contexts. |
 | 🔐 **R0–R3 governance** | every operation is risk-classified by the fail-closed `mqclass` engine; protected contexts and internal/system topics escalate one tier; AI callers can never self-authorize. |
 | 🎯 **Real blast-radius preview** | `reset-offset --dry-run` and `purge --dry-run` compute the actual per-partition message delta from the live broker — no guessing. The preview is read-only and never mutates. |
 | 👀 **Non-destructive peek/tail/mirror source** | inspect, stream, or bounded-copy messages without consuming them or moving any cursor where the broker can guarantee it (Kafka direct reads, Pulsar Reader). Where a broker can't guarantee this, the operation fails closed rather than silently consuming. |
@@ -52,7 +52,8 @@ It's built on the shared [`opskit-core`](https://github.com/JiangHe12/opskit-cor
 
 | | Kafka | Pulsar | RabbitMQ | RocketMQ |
 |---|:---:|:---:|:---:|:---:|
-| topic list / describe / create / delete | ✅ | ✅ | ✅ | ✅ |
+| topic list / describe / create | ✅ | ✅ | ✅ | ✅ |
+| topic delete | ✅ | ✅ | ✅ | ❌ `NOT_IMPLEMENTED`⁴ |
 | produce | ✅ | ✅ | ✅ | ✅ |
 | **non-destructive peek** | ✅ | ✅ (Reader) | ✅ (get+requeue) | ❌ `NOT_IMPLEMENTED`¹ |
 | **non-destructive tail** | ✅ | ✅ (Reader) | ❌ `NOT_IMPLEMENTED`² | ❌ `NOT_IMPLEMENTED`¹ |
@@ -66,6 +67,8 @@ It's built on the shared [`opskit-core`](https://github.com/JiangHe12/opskit-cor
 ¹ RocketMQ's Go v2 `PullConsumer` enters the consumer-group lifecycle and commits offsets, so it cannot guarantee non-destructive peek/tail — mqgov fails closed instead of silently advancing offsets. ² RabbitMQ has no forward non-destructive tail because reads are consume/requeue oriented. Unsupported operations always return `NOT_IMPLEMENTED` (exit 12), never a fake success.
 
 ³ RocketMQ broker ACLs live in broker-side `plain_acl.yml`, but `rocketmq-client-go/v2` does not expose a public, cgo-free admin API for reading or changing that config. mqgov does not shell out to the Java `mqadmin` tool and does not hand-roll remoting commands; manage RocketMQ ACLs out of band with broker configuration or official mqadmin until the Go client exposes a clean API.
+
+⁴ RocketMQ topic deletion is disabled because the upstream v2 admin client ignores broker and name-server response codes, so disappearance from name-server routes cannot prove that broker-side deletion succeeded. RocketMQ `--namespace` is also rejected because the client applies namespaces to route lookup and produce but not consistently to create/delete/list.
 
 ---
 
@@ -130,11 +133,11 @@ Every command is sorted into one of four **risk tiers** by the fail-closed `mqcl
 | Tier | What it covers | What you must provide |
 |:---:|---|---|
 | **R0** | Reads & previews (`topic list/describe`, `group list/lag`, `message peek`, `message tail`, `dlq list/peek`, `acl list`, `schema list/describe/check`, `fleet status/topics`, `*-dry-run`, `audit query/verify`, `audit prune` preview, `doctor`) | Nothing — but it's still audited |
-| **R1** | Ordinary writes (`message produce`, target side of `message mirror`, `topic create`, `schema register` for a new subject) | `--yes` (or an interactive confirmation) |
-| **R2** | Elevated mutations (`topic alter`, `group create/delete`, `acl grant`, `schema register` for an existing subject, produce/mirror to a **protected** topic) | `--yes` **and** a non-empty `--ticket` |
-| **R3** | Destructive / irreversible operations (`group reset-offset`, topic/DLQ purge, topic/schema delete, supported DLQ redrive, broad ACL changes, internal-topic produce/mirror) and governance-control changes (`ctx set/use/delete/import/migrate-credentials`, `ctx role set/unset`, confirmed `audit prune`) | The above **plus** the exact `--allow-*` flag |
+| **R1** | Ordinary writes (`message produce`, target side of `message mirror`, non-RocketMQ `topic create`, `schema register` for a new subject) | `--yes` (or an interactive confirmation) |
+| **R2** | Elevated mutations (`topic alter`, RocketMQ `topic create`, `group create/delete`, `acl grant`, `schema register` for an existing subject, produce/mirror to a **protected** topic) | `--yes` **and** a non-empty `--ticket` |
+| **R3** | Destructive / irreversible operations (`group reset-offset`, topic/DLQ purge, supported topic/schema delete, supported DLQ redrive, broad ACL changes, internal-topic produce/mirror), protected RocketMQ topic upserts, and governance-control changes (`ctx set/use/delete/import/migrate-credentials`, `ctx role set/unset`, confirmed `audit prune`) | The above **plus** the exact `--allow-*` flag |
 
-The R3 allow flags: `--allow-offset-reset`, `--allow-topic-purge`, `--allow-topic-delete`, `--allow-destructive-acl`, `--allow-internal-produce`, `--allow-schema-delete`, `--allow-context-change`, `--allow-context-delete`, `--allow-role-change`, `--allow-audit-prune`.
+The R3 allow flags: `--allow-offset-reset`, `--allow-topic-purge`, `--allow-topic-delete`, `--allow-topic-upsert`, `--allow-destructive-acl`, `--allow-internal-produce`, `--allow-schema-delete`, `--allow-context-change`, `--allow-context-delete`, `--allow-role-change`, `--allow-audit-prune`.
 
 **Protected contexts, protected topics, and internal/system topics raise the tier by one.** For example, producing to `__consumer_offsets` is treated as a destructive R3 operation and needs `--allow-internal-produce`.
 
@@ -166,11 +169,13 @@ mqgov topic list     [--pattern <name|glob>] -o json
 mqgov topic describe <topic> -o json
 
 # Write
-mqgov topic create <topic> [--partitions N] --yes                                  # R1 (R2 if protected)
+mqgov topic create <topic> [--partitions N] --yes                                  # non-RocketMQ R1 (R2 if protected)
+mqgov topic create <topic> [--partitions N] --yes --ticket <t>                     # RocketMQ R2
+mqgov topic create <topic> [--partitions N] --yes --ticket <t> --allow-topic-upsert # protected RocketMQ R3
 mqgov topic alter  <topic> --partitions N --yes --ticket <t>                       # R2 (Kafka/Pulsar)
 mqgov topic purge  <topic> [--dlq] --dry-run                                        # R0 preview
 mqgov topic purge  <topic> [--dlq] --yes --ticket <t> --allow-topic-purge          # R3
-mqgov topic delete <topic> --yes --ticket <t> --allow-topic-delete                 # R3
+mqgov topic delete <topic> --yes --ticket <t> --allow-topic-delete                 # supported backends R3; RocketMQ NOT_IMPLEMENTED
 ```
 </details>
 
@@ -329,6 +334,8 @@ mqgov completion bash|zsh|fish|powershell
 mqgov install <agent> --skills  # install the mqgov AI skill into an agent (claude, codex, …) or a custom path
 mqgov version
 ```
+
+RocketMQ contexts do not support `--namespace`; the upstream Go v2 admin client applies namespace wrapping inconsistently, so mqgov rejects it instead of risking operations against a different topic name.
 </details>
 
 ---
@@ -337,7 +344,7 @@ mqgov version
 
 mqgov-cli is designed to be driven by autonomous agents safely:
 
-- Run `mqgov capabilities -o json` first to discover what the bound backend supports — brokers differ, don't assume (e.g. Kafka, RabbitMQ, and Pulsar support `acl` with different native models; Kafka and Pulsar support `schema`; RabbitMQ/RocketMQ have no offsets, schema registry, or tail; RocketMQ has no peek). Use `fleet status --all -o json` for a read-only cross-context dashboard.
+- Run `mqgov capabilities -o json` first to discover what the bound backend supports — brokers differ, don't assume (e.g. Kafka, RabbitMQ, and Pulsar support `acl` with different native models; Kafka and Pulsar support `schema`; RabbitMQ/RocketMQ have no offsets, schema registry, or tail; RocketMQ has no peek or topic delete). Use `fleet status --all -o json` for a read-only cross-context dashboard.
 - Use `-o json` everywhere; every command returns a stable, versioned envelope.
 - Get blast radius from `--dry-run` / `--plan`, never from your own reasoning.
 - **Never self-fill `--ticket`, `--allow-*`, or a high-risk `--yes`.** Surface the required human approval and stop.
@@ -352,6 +359,7 @@ mqgov install claude --skills     # also: codex, opencode, copilot, cursor, wind
 
 ## 🔏 Trust & verification
 
+- **Verified release tags** — publication starts only from a GitHub-verified signed annotated tag that exactly matches `package.json`, `CHANGELOG.md`, and freshly fetched `origin/main`; CI and the complete real-broker matrix rerun on that tag commit.
 - **Signed binaries** — every release artifact is signed with [cosign](https://github.com/sigstore/cosign) (keyless / OIDC). A `checksums.txt` (also signed) covers all platforms.
 - **npm provenance** — the npm package is published from CI via OpenID Connect with [provenance attestations](https://docs.npmjs.com/generating-provenance-statements) linking it to this exact repo and workflow.
 - **Verified installs** — the npm postinstall downloads the binary over an allow-listed host and checks its SHA-256 against the signed `checksums.txt` before installing.
@@ -374,7 +382,7 @@ go mod tidy -diff
 npm pack --dry-run
 ```
 
-Real-backend integration tests (`//go:build integration`, env-gated, skipped by default) run against live Kafka/RabbitMQ/Pulsar/RocketMQ containers in the nightly `integration.yml` workflow; see [`docs/`](docs/) for how to run them locally with the bundled `docker-compose.*.yml` files.
+Real-backend integration tests (`//go:build integration`, env-gated, skipped by default) use pinned Kafka/RabbitMQ/Pulsar/RocketMQ images. The complete Kafka/ACL/TLS/RabbitMQ/Pulsar/RocketMQ/mirror matrix gates releases and also runs nightly/on manual dispatch. See [`docs/`](docs/) for local commands using the bundled `docker-compose.*.yml` files.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the full verification workflow and
 [SECURITY.md](SECURITY.md) for vulnerability reporting and security boundaries.

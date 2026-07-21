@@ -25,7 +25,7 @@ import (
 
 func TestRabbitMQIntegration(t *testing.T) {
 	if strings.TrimSpace(os.Getenv("RABBITMQ_AMQP_URL")) == "" && strings.TrimSpace(os.Getenv("RABBITMQ_HOST")) == "" {
-		t.Skip("RABBITMQ_AMQP_URL or RABBITMQ_HOST not set")
+		skipOrFailIntegration(t, "RABBITMQ_AMQP_URL or RABBITMQ_HOST not set")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
@@ -226,6 +226,14 @@ func TestRabbitMQIntegration(t *testing.T) {
 	if _, err := backend.DescribeTopic(ctx, coord); err == nil {
 		t.Fatal("DescribeTopic(deleted) error = nil, want not found")
 	}
+}
+
+func skipOrFailIntegration(t *testing.T, reason string) {
+	t.Helper()
+	if strings.EqualFold(strings.TrimSpace(os.Getenv("MQGOV_INTEGRATION_REQUIRED")), "true") {
+		t.Fatalf("%s while MQGOV_INTEGRATION_REQUIRED=true", reason)
+	}
+	t.Skip(reason)
 }
 
 func declareRabbitMQDLXQueues(t *testing.T, ctx context.Context, backend *Broker, source, dlq string) {

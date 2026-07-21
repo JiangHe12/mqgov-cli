@@ -91,6 +91,45 @@ func TestCtxSetRejectsPlainCredential(t *testing.T) {
 	}
 }
 
+func TestRocketMQContextNamespaceFailsClosedOnSetAndImport(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	mqgovctx.SetConfigPath(configPath)
+	t.Cleanup(func() { mqgovctx.SetConfigPath("") })
+
+	for _, previewFlag := range []string{"", "--plan", "--dry-run"} {
+		args := []string{"--backend", "rocketmq", "--namespace", "tenant-a"}
+		if previewFlag != "" {
+			args = append(args, previewFlag)
+		}
+		args = append(args, "ctx", "set", "dev", "--nameservers", "127.0.0.1:9876")
+		_, err := runCommandForTest(t, args...)
+		if got := apperrors.AsAppError(err).Code; got != apperrors.CodeNotImplemented {
+			t.Fatalf("ctx set %q namespace code = %s, want %s; err=%v", previewFlag, got, apperrors.CodeNotImplemented, err)
+		}
+	}
+
+	flags := newDefaultFlags()
+	err := runCtxImportOne(flags, contextExportDocument{
+		Name: "imported",
+		Context: &mqgovctx.Context{
+			Backend:             "rocketmq",
+			Namespace:           "tenant-a",
+			RocketMQNameServers: []string{"127.0.0.1:9876"},
+		},
+	}, ctxImportOptions{})
+	if got := apperrors.AsAppError(err).Code; got != apperrors.CodeNotImplemented {
+		t.Fatalf("ctx import RocketMQ namespace code = %s, want %s; err=%v", got, apperrors.CodeNotImplemented, err)
+	}
+
+	item := mqgovctx.Context{Backend: "rocketmq", Namespace: " \t "}
+	if err := validateContextDefinition(&item); err != nil {
+		t.Fatalf("whitespace-only RocketMQ namespace error = %v", err)
+	}
+	if item.Namespace != "" {
+		t.Fatalf("whitespace-only RocketMQ namespace normalized to %q, want empty", item.Namespace)
+	}
+}
+
 func TestCtxSetStoresCredentialReference(t *testing.T) {
 	configPath := filepath.Join(t.TempDir(), "config.yaml")
 	mqgovctx.SetConfigPath(configPath)

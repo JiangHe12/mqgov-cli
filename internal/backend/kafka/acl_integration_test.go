@@ -17,7 +17,7 @@ import (
 func TestKafkaACLIntegration(t *testing.T) {
 	brokers := os.Getenv("KAFKA_ACL_BROKERS")
 	if strings.TrimSpace(brokers) == "" {
-		t.Skip("KAFKA_ACL_BROKERS not set")
+		skipOrFailIntegration(t, "KAFKA_ACL_BROKERS not set")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()

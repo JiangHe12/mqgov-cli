@@ -2,7 +2,6 @@ package cmd
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"os"
 	"os/signal"
@@ -42,6 +41,7 @@ const (
 	allowOffsetReset      = safety.AllowFlag("allow-offset-reset")
 	allowTopicPurge       = safety.AllowFlag("allow-topic-purge")
 	allowTopicDelete      = safety.AllowFlag("allow-topic-delete")
+	allowTopicUpsert      = safety.AllowFlag("allow-topic-upsert")
 	allowDestructiveACL   = safety.AllowFlag("allow-destructive-acl")
 	allowInternalProduce  = safety.AllowFlag("allow-internal-produce")
 	allowSchemaDelete     = safety.AllowFlag("allow-schema-delete")
@@ -85,6 +85,7 @@ type cliFlags struct {
 	AllowOffsetReset    bool
 	AllowTopicPurge     bool
 	AllowTopicDelete    bool
+	AllowTopicUpsert    bool
 	AllowDestructiveACL bool
 	AllowInternalProd   bool
 	AllowSchemaDelete   bool
@@ -211,6 +212,7 @@ func newRootCmdWith(f *cliFlags) *cobra.Command {
 	cmd.PersistentFlags().BoolVar(&f.AllowOffsetReset, "allow-offset-reset", false, "Allow R3 offset reset/seek")
 	cmd.PersistentFlags().BoolVar(&f.AllowTopicPurge, "allow-topic-purge", false, "Allow R3 topic or DLQ purge")
 	cmd.PersistentFlags().BoolVar(&f.AllowTopicDelete, "allow-topic-delete", false, "Allow R3 topic delete")
+	cmd.PersistentFlags().BoolVar(&f.AllowTopicUpsert, "allow-topic-upsert", false, "Allow R3 RocketMQ topic update-or-create")
 	cmd.PersistentFlags().BoolVar(&f.AllowDestructiveACL, "allow-destructive-acl", false, "Allow R3 destructive ACL operation")
 	cmd.PersistentFlags().BoolVar(&f.AllowInternalProd, "allow-internal-produce", false, "Allow R3 produce to internal/system topics")
 	cmd.PersistentFlags().BoolVar(&f.AllowSchemaDelete, "allow-schema-delete", false, "Allow R3 schema delete")
@@ -244,7 +246,7 @@ func Execute() {
 	cmd := newRootCmdWith(f)
 	err := cmd.ExecuteContext(ctx)
 	finishTelemetry(ctx, f, err)
-	if err == nil || errors.Is(err, context.Canceled) {
+	if err == nil || isDirectCancellation(err) {
 		stop()
 		return
 	}
@@ -260,6 +262,10 @@ func Execute() {
 	}
 	stop()
 	os.Exit(code)
+}
+
+func isDirectCancellation(err error) bool {
+	return err == context.Canceled //nolint:errorlint // Only the unwrapped signal cancellation is intentionally quiet.
 }
 
 func finishTelemetry(ctx context.Context, f *cliFlags, err error) {
@@ -498,6 +504,7 @@ func grantedAllowFlags(f *cliFlags) map[safety.AllowFlag]bool {
 		allowOffsetReset:     f.AllowOffsetReset,
 		allowTopicPurge:      f.AllowTopicPurge,
 		allowTopicDelete:     f.AllowTopicDelete,
+		allowTopicUpsert:     f.AllowTopicUpsert,
 		allowDestructiveACL:  f.AllowDestructiveACL,
 		allowInternalProduce: f.AllowInternalProd,
 		allowSchemaDelete:    f.AllowSchemaDelete,

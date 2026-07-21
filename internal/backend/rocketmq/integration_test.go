@@ -21,7 +21,7 @@ func TestRocketMQIntegration(t *testing.T) {
 	namesrv := strings.TrimSpace(os.Getenv("ROCKETMQ_NAMESRV_ADDR"))
 	brokerAddr := strings.TrimSpace(os.Getenv("ROCKETMQ_BROKER_ADDR"))
 	if namesrv == "" || brokerAddr == "" {
-		t.Skip("ROCKETMQ_NAMESRV_ADDR and ROCKETMQ_BROKER_ADDR not set")
+		skipOrFailIntegration(t, "ROCKETMQ_NAMESRV_ADDR and ROCKETMQ_BROKER_ADDR not set")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
@@ -37,17 +37,20 @@ func TestRocketMQIntegration(t *testing.T) {
 	}
 	topic := fmt.Sprintf("mqgov-it-%d", time.Now().UnixNano())
 	coord := mqgov.TopicCoordinate{Cluster: "integration", Topic: topic}
-	defer func() { _ = backend.DeleteTopic(context.Background(), coord) }()
 
-	if _, err := backend.CreateTopic(ctx, mqgov.TopicCreateRequest{Coordinate: coord, Partitions: 4}); err != nil {
+	created, err := backend.CreateTopic(ctx, mqgov.TopicCreateRequest{Coordinate: coord, Partitions: 4})
+	if err != nil {
 		t.Fatalf("CreateTopic() error = %v", err)
+	}
+	if created.Partitions != 4 {
+		t.Fatalf("CreateTopic().Partitions = %d, want 4 confirmed queues", created.Partitions)
 	}
 	desc, err := backend.DescribeTopic(ctx, coord)
 	if err != nil {
 		t.Fatalf("DescribeTopic() error = %v", err)
 	}
-	if desc.Partitions == 0 {
-		t.Fatalf("DescribeTopic().Partitions = 0, want queues")
+	if desc.Partitions != 4 || desc.Partitions != created.Partitions {
+		t.Fatalf("DescribeTopic().Partitions = %d, want created queue count %d", desc.Partitions, created.Partitions)
 	}
 	if _, err := backend.CreateTopic(ctx, mqgov.TopicCreateRequest{Coordinate: coord, Partitions: 4}); apperrors.AsAppError(err).Code != apperrors.CodeResourceAlreadyExists {
 		t.Fatalf("CreateTopic(existing) error = %v, want ResourceAlreadyExists", err)
@@ -58,7 +61,6 @@ func TestRocketMQIntegration(t *testing.T) {
 
 	dlqTopic := "%DLQ%" + topic + "_group"
 	dlqCoord := mqgov.TopicCoordinate{Cluster: "integration", Topic: dlqTopic}
-	defer func() { _ = backend.DeleteTopic(context.Background(), dlqCoord) }()
 	if _, err := backend.CreateTopic(ctx, mqgov.TopicCreateRequest{Coordinate: dlqCoord, Partitions: 1}); err != nil {
 		t.Fatalf("CreateTopic(DLQ) error = %v", err)
 	}
@@ -93,12 +95,17 @@ func TestRocketMQIntegration(t *testing.T) {
 	if _, ok := mqgov.SupportsACL(backend); ok {
 		t.Fatalf("SupportsACL() = true, want false")
 	}
-	if err := backend.DeleteTopic(ctx, coord); err != nil {
-		t.Fatalf("DeleteTopic() error = %v", err)
+	if err := backend.DeleteTopic(ctx, coord); apperrors.AsAppError(err).Code != apperrors.CodeNotImplemented {
+		t.Fatalf("DeleteTopic() error = %v, want NotImplemented", err)
 	}
-	if _, err := backend.DescribeTopic(ctx, coord); apperrors.AsAppError(err).Code != apperrors.CodeResourceNotFound {
-		t.Fatalf("DescribeTopic(deleted) error = %v, want ResourceNotFound", err)
+}
+
+func skipOrFailIntegration(t *testing.T, reason string) {
+	t.Helper()
+	if strings.EqualFold(strings.TrimSpace(os.Getenv("MQGOV_INTEGRATION_REQUIRED")), "true") {
+		t.Fatalf("%s while MQGOV_INTEGRATION_REQUIRED=true", reason)
 	}
+	t.Skip(reason)
 }
 
 func firstQueue(t *testing.T, ctx context.Context, backend *Broker, topic string) *primitive.MessageQueue {

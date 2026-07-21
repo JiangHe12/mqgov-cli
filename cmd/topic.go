@@ -2,12 +2,14 @@ package cmd
 
 import (
 	"fmt"
+	"slices"
 	"strconv"
 
 	"github.com/spf13/cobra"
 
 	"github.com/JiangHe12/opskit-core/v2/apperrors"
 	"github.com/JiangHe12/opskit-core/v2/audit"
+	"github.com/JiangHe12/opskit-core/v2/safety"
 
 	"github.com/JiangHe12/mqgov-cli/internal/mqclass"
 	"github.com/JiangHe12/mqgov-cli/internal/mqgov"
@@ -98,8 +100,8 @@ func newTopicCreateCmd(f *cliFlags) *cobra.Command {
 			defer backend.Close()
 			opTarget := operationTargetFromBroker(f, backend)
 			topic := args[0]
-			target := declaredTopicTarget(meta, topic, false)
-			if err := classifyAndAuthorize(f, meta, mqclass.OperationCreateTopic, target, ""); err != nil {
+			target, allow := topicCreateAuthorizationTarget(meta, backend.Describe().Backend, topic)
+			if err := classifyAndAuthorize(f, meta, mqclass.OperationCreateTopic, target, allow); err != nil {
 				return err
 			}
 			request := mqgov.TopicCreateRequest{Coordinate: topicCoord(f, meta, topic), Partitions: partitions, Protected: target.ProtectedTopic}
@@ -113,7 +115,7 @@ func newTopicCreateCmd(f *cliFlags) *cobra.Command {
 				return err
 			}
 			desc, operationErr := backend.CreateTopic(cmd.Context(), request)
-			if err := finishMutationAudit(handle, mutationAuditOutcome{}, operationErr); err != nil {
+			if err := finishMutationAudit(handle, topicCreateAuditOutcome(operationErr), operationErr); err != nil {
 				return err
 			}
 			return targetJSONData(f, "TopicDescription", desc, opTarget, operationTargetWrite)
@@ -121,6 +123,22 @@ func newTopicCreateCmd(f *cliFlags) *cobra.Command {
 	}
 	cmd.Flags().IntVar(&partitions, "partitions", 1, "Partition count")
 	return cmd
+}
+
+func topicCreateAuthorizationTarget(meta mqgovctx.Context, backend, topic string) (mqclass.Target, safety.AllowFlag) {
+	target := declaredTopicTarget(meta, topic, false)
+	if backend != "rocketmq" {
+		return target, ""
+	}
+	target.CreateMayAlter = true
+	return target, allowTopicUpsert
+}
+
+func topicCreateAuditOutcome(operationErr error) mutationAuditOutcome {
+	if operationErr != nil && apperrors.AsAppError(operationErr).Code == apperrors.CodePartialFailure {
+		return mutationAuditOutcome{Uncertain: 1, counted: true}
+	}
+	return mutationAuditOutcome{}
 }
 
 func newTopicAlterCmd(f *cliFlags) *cobra.Command {
@@ -179,6 +197,9 @@ func newTopicDeleteCmd(f *cliFlags) *cobra.Command {
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if contextPlanOnly(f) {
+				if topicDeletePlanUsesRocketMQ(f) {
+					return apperrors.New(apperrors.CodeNotImplemented, "RocketMQ does not support topic delete", nil)
+				}
 				return printBrokerChangePlan(f, "delete", "topic", args[0], nil)
 			}
 			backend, meta, err := buildBroker(f)
@@ -186,6 +207,9 @@ func newTopicDeleteCmd(f *cliFlags) *cobra.Command {
 				return err
 			}
 			defer backend.Close()
+			if !slices.Contains(backend.Capabilities().Verbs, "delete") {
+				return apperrors.New(apperrors.CodeNotImplemented, "backend does not support topic delete", nil)
+			}
 			opTarget := operationTargetFromBroker(f, backend)
 			topic := args[0]
 			resolved, err := resolveTopicTarget(cmd.Context(), backend, f, meta, topic, false)
@@ -212,6 +236,14 @@ func newTopicDeleteCmd(f *cliFlags) *cobra.Command {
 			return targetJSONData(f, "DeleteResult", map[string]string{"topic": topic, "status": audit.StatusSuccess}, opTarget, operationTargetWrite)
 		},
 	}
+}
+
+func topicDeletePlanUsesRocketMQ(f *cliFlags) bool {
+	if f.Backend != "" {
+		return f.Backend == "rocketmq"
+	}
+	item, _, err := resolvedContext(f)
+	return err == nil && item.Backend == "rocketmq"
 }
 
 func newTopicPurgeCmd(f *cliFlags) *cobra.Command {

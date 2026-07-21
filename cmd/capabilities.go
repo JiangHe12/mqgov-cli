@@ -110,6 +110,14 @@ func capabilityPlainCommands() []string {
 
 func buildCapabilities(backendCaps mqgov.Capabilities) capabilitiesData {
 	v, c, _ := getVersionInfo()
+	topicCreate := capCommand{Noun: "topic", Verb: "create", Risk: "R1/R2 protected"}
+	topicDelete := capCommand{Noun: "topic", Verb: "delete", Risk: "R3", AllowFlag: "allow-topic-delete"}
+	if backendCaps.Backend == "rocketmq" {
+		topicCreate.Risk = "R2/R3 protected"
+		topicCreate.AllowFlag = "allow-topic-upsert"
+		topicDelete.Risk = "NotImplemented"
+		topicDelete.AllowFlag = ""
+	}
 	return capabilitiesData{
 		Tool: capTool{Name: "mqgov-cli", Version: v, Commit: c},
 		Supported: capSupported{
@@ -132,10 +140,10 @@ func buildCapabilities(backendCaps mqgov.Capabilities) capabilitiesData {
 			},
 			Commands: []capCommand{
 				{Noun: "topic", Verb: "list/describe", Risk: "R0"},
-				{Noun: "topic", Verb: "create", Risk: "R1/R2 protected"},
+				topicCreate,
 				{Noun: "topic", Verb: "alter", Risk: "R2"},
 				{Noun: "topic", Verb: "purge", Risk: "R3", AllowFlag: "allow-topic-purge"},
-				{Noun: "topic", Verb: "delete", Risk: "R3", AllowFlag: "allow-topic-delete"},
+				topicDelete,
 				{Noun: "group", Verb: "list/lag", Risk: "R0"},
 				{Noun: "group", Verb: "create/delete", Risk: "R2"},
 				{Noun: "group", Verb: "reset-offset", Risk: "R3", AllowFlag: "allow-offset-reset"},
