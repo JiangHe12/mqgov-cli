@@ -28,13 +28,16 @@ func TestMain(m *testing.M) {
 		}
 		os.Exit(0)
 	}
-	testHome, err := os.MkdirTemp("", "mqgov-cli-test-home-*")
+	testHome, err := createCommandTestHome()
 	if err != nil {
 		_, _ = fmt.Fprintf(os.Stderr, "create isolated test home: %v\n", err)
 		os.Exit(2)
 	}
 	oldHome, hadHome := os.LookupEnv("HOME")
 	oldProfile, hadProfile := os.LookupEnv("USERPROFILE")
+	oldTmpDir, hadTmpDir := os.LookupEnv("TMPDIR")
+	oldTemp, hadTemp := os.LookupEnv("TEMP")
+	oldTmp, hadTmp := os.LookupEnv("TMP")
 	if err := os.Setenv("HOME", testHome); err != nil {
 		_, _ = fmt.Fprintf(os.Stderr, "set isolated HOME: %v\n", err)
 		_ = os.RemoveAll(testHome)
@@ -46,9 +49,36 @@ func TestMain(m *testing.M) {
 		_ = os.RemoveAll(testHome)
 		os.Exit(2)
 	}
+	if err := os.Setenv("TMPDIR", testHome); err != nil {
+		_, _ = fmt.Fprintf(os.Stderr, "set isolated TMPDIR: %v\n", err)
+		restoreTestEnvironment("HOME", oldHome, hadHome)
+		restoreTestEnvironment("USERPROFILE", oldProfile, hadProfile)
+		_ = os.RemoveAll(testHome)
+		os.Exit(2)
+	}
+	if err := os.Setenv("TEMP", testHome); err != nil {
+		_, _ = fmt.Fprintf(os.Stderr, "set isolated TEMP: %v\n", err)
+		restoreTestEnvironment("HOME", oldHome, hadHome)
+		restoreTestEnvironment("USERPROFILE", oldProfile, hadProfile)
+		restoreTestEnvironment("TMPDIR", oldTmpDir, hadTmpDir)
+		_ = os.RemoveAll(testHome)
+		os.Exit(2)
+	}
+	if err := os.Setenv("TMP", testHome); err != nil {
+		_, _ = fmt.Fprintf(os.Stderr, "set isolated TMP: %v\n", err)
+		restoreTestEnvironment("HOME", oldHome, hadHome)
+		restoreTestEnvironment("USERPROFILE", oldProfile, hadProfile)
+		restoreTestEnvironment("TMPDIR", oldTmpDir, hadTmpDir)
+		restoreTestEnvironment("TEMP", oldTemp, hadTemp)
+		_ = os.RemoveAll(testHome)
+		os.Exit(2)
+	}
 	code := m.Run()
 	restoreTestEnvironment("HOME", oldHome, hadHome)
 	restoreTestEnvironment("USERPROFILE", oldProfile, hadProfile)
+	restoreTestEnvironment("TMPDIR", oldTmpDir, hadTmpDir)
+	restoreTestEnvironment("TEMP", oldTemp, hadTemp)
+	restoreTestEnvironment("TMP", oldTmp, hadTmp)
 	if err := os.RemoveAll(testHome); err != nil && code == 0 {
 		_, _ = fmt.Fprintf(os.Stderr, "remove isolated test home: %v\n", err)
 		code = 2
@@ -475,9 +505,7 @@ func TestGlobalPlanPreventsInstallAndConfirmedAuditPrune(t *testing.T) {
 
 	auditPath := filepath.Join(t.TempDir(), "audit.log")
 	rotated := auditPath + ".20240101-000000.log"
-	if err := os.WriteFile(rotated, []byte("{}\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	writePrivateMutationAuditTestFile(t, rotated, []byte("{}\n"))
 	flags = newDefaultFlags()
 	flags.Plan = true
 	flags.Yes = true

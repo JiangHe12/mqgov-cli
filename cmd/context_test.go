@@ -1208,16 +1208,19 @@ func TestCtxExportRejectsGovernedStateOutputPaths(t *testing.T) {
 
 	home := t.TempDir()
 	auditPath := filepath.Join(home, ".mqgov-cli", "audit.log")
-	for name, target := range map[string]string{
+	targets := map[string]string{
 		"config temp":     configPath + ".tmp",
 		"credential temp": filepath.Join(home, ".mqgov-cli", "credentials.enc.tmp"),
 		"audit key":       auditPath + ".hmac-key",
 		"checkpoint temp": auditPath + ".checkpoint.tmp-attacker",
-		"case variant": filepath.Join(
+	}
+	if filepath.VolumeName(auditPath) != "" {
+		targets["case variant"] = filepath.Join(
 			filepath.Dir(auditPath),
 			strings.ToUpper(filepath.Base(auditPath))+".CHECKPOINT.TMP-ATTACKER",
-		),
-	} {
+		)
+	}
+	for name, target := range targets {
 		t.Run(name, func(t *testing.T) {
 			if _, exportErr := runCommandForTestAtHome(
 				t,

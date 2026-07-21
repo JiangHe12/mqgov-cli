@@ -155,12 +155,8 @@ func TestAuditPruneDryRun(t *testing.T) {
 	path := filepath.Join(dir, "audit.log")
 	oldRotated := path + ".20240101-000000.log"
 	newRotated := path + ".20240102-000000.log"
-	if err := os.WriteFile(oldRotated, []byte("{}\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(newRotated, []byte("{}\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	writePrivateMutationAuditTestFile(t, oldRotated, []byte("{}\n"))
+	writePrivateMutationAuditTestFile(t, newRotated, []byte("{}\n"))
 
 	out, err := runCommandForTest(t, "-o", "json", "audit", "prune", "--path", path, "--keep-last", "1")
 	if err != nil {
@@ -177,7 +173,8 @@ func TestAuditPruneDryRun(t *testing.T) {
 	if err := json.Unmarshal([]byte(out), &payload); err != nil {
 		t.Fatalf("json.Unmarshal() error = %v; out=%s", err, out)
 	}
-	if payload.Kind != "AuditPruneResult" || !payload.Data.DryRun || payload.Data.Count != 1 || len(payload.Data.DeletedFiles) != 1 || payload.Data.DeletedFiles[0] != oldRotated {
+	if payload.Kind != "AuditPruneResult" || !payload.Data.DryRun || payload.Data.Count != 1 ||
+		len(payload.Data.DeletedFiles) != 1 || !sameAuditTestPath(payload.Data.DeletedFiles[0], oldRotated) {
 		t.Fatalf("audit prune payload = %+v", payload)
 	}
 	for _, filePath := range []string{oldRotated, newRotated} {

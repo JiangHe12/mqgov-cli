@@ -103,9 +103,7 @@ func TestMutationAuditRejectsNonRegularActivePathBeforeAppend(t *testing.T) {
 func TestMutationAuditRejectsSymlinkActivePathBeforeAppend(t *testing.T) {
 	auditPath := privateMutationAuditPath(t)
 	target := filepath.Join(filepath.Dir(auditPath), "target.log")
-	if err := os.WriteFile(target, []byte("{}\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	writePrivateMutationAuditTestFile(t, target, []byte("{}\n"))
 	if err := os.Symlink(target, auditPath); err != nil {
 		t.Skipf("symlink unavailable: %v", err)
 	}
@@ -133,9 +131,7 @@ func TestMutationAuditRejectsSymlinkActivePathBeforeAppend(t *testing.T) {
 
 func TestMutationAuditDurablySyncsRotationCreatedByAppend(t *testing.T) {
 	auditPath := privateMutationAuditPath(t)
-	if err := os.WriteFile(auditPath, []byte("{}\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	writePrivateMutationAuditTestFile(t, auditPath, []byte("{}\n"))
 	f := newDefaultFlags()
 	f.AuditMaxSize = 1
 	handle, err := beginMutationAudit(f, mutationAuditSpec{
@@ -1394,9 +1390,7 @@ func TestAuditQuerySanitizesHistoricalRawFields(t *testing.T) {
 	if err != nil {
 		t.Fatalf("json.Marshal() error = %v", err)
 	}
-	if err := os.WriteFile(auditPath, append(data, '\n'), 0o600); err != nil {
-		t.Fatalf("WriteFile(audit.log) error = %v", err)
-	}
+	writePrivateMutationAuditTestFile(t, auditPath, append(data, '\n'))
 	out, err := runCommandForTest(t, "-o", "json", "audit", "query", "--path", auditPath)
 	if err != nil {
 		t.Fatalf("audit query error = %v; output=%s", err, out)

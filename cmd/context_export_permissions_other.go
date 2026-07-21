@@ -8,7 +8,7 @@ import (
 )
 
 func openPrivateContextExportTemp(path string) (*os.File, error) {
-	return os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_RDWR, 0o600)
+	return os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_RDWR, 0o600) //nolint:gosec // The random exclusive path is derived from a validated export parent.
 }
 
 func replaceContextExportFile(from, to string) error {

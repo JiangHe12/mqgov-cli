@@ -245,7 +245,7 @@ func TestAuditPrunePreviewRunsBeforeAuthorizationAndPreservesCandidateOrder(t *t
 				t.Fatalf("preview = %+v, want ordered candidates %v", payload.Data, want)
 			}
 			for i := range want {
-				if payload.Data.DeletedFiles[i] != want[i] {
+				if !sameAuditTestPath(payload.Data.DeletedFiles[i], want[i]) {
 					t.Fatalf("candidate order = %v, want %v", payload.Data.DeletedFiles, want)
 				}
 			}
@@ -271,9 +271,7 @@ func TestAuditPruneRejectsInvalidAuthenticatedStateButDryRunStillListsCandidates
 			name: "checkpoint",
 			setup: func(t *testing.T, active, _ string) {
 				t.Helper()
-				if err := os.WriteFile(active+".checkpoint", []byte("{}\n"), 0o600); err != nil {
-					t.Fatal(err)
-				}
+				writePrivateMutationAuditTestFile(t, active+".checkpoint", []byte("{}\n"))
 			},
 		},
 		{
@@ -381,7 +379,7 @@ func TestAuditPruneRejectsInvalidAuthenticatedStateButDryRunStillListsCandidates
 					t.Skipf("symlink unavailable: %v", err)
 				}
 			},
-			wantCode: apperrors.CodeValidationFailed,
+			wantCode: apperrors.CodeLocalIOError,
 		},
 		{
 			name: "candidate directory",
@@ -423,7 +421,8 @@ func TestAuditPruneRejectsInvalidAuthenticatedStateButDryRunStillListsCandidates
 			if err := json.Unmarshal([]byte(out), &preview); err != nil {
 				t.Fatalf("decode preview: %v; out=%s", err, out)
 			}
-			if !preview.Data.DryRun || len(preview.Data.DeletedFiles) != 1 || preview.Data.DeletedFiles[0] != candidate {
+			if !preview.Data.DryRun || len(preview.Data.DeletedFiles) != 1 ||
+				!sameAuditTestPath(preview.Data.DeletedFiles[0], candidate) {
 				t.Fatalf("v2 preview = %+v", preview.Data)
 			}
 
@@ -616,9 +615,7 @@ func TestAuditPruneRejectsDefaultAuditAliasesAndArtifactNamespaces(t *testing.T)
 	if err := os.MkdirAll(filepath.Dir(defaultPath), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(defaultPath, []byte("{}\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	writePrivateMutationAuditTestFile(t, defaultPath, []byte("{}\n"))
 	canonical, err := normalizeAuditPruneTarget(
 		newDefaultFlags(),
 		filepath.Join(filepath.Dir(defaultPath), ".", filepath.Base(defaultPath)),
@@ -823,15 +820,11 @@ func prepareGovernedAuditPruneSequence(t *testing.T, roles map[string]string, co
 		t.Fatal(err)
 	}
 	auditPath := privateMutationAuditPath(t)
-	if err := os.WriteFile(auditPath, []byte(validLegacyAuditTestLine+"\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	writePrivateMutationAuditTestFile(t, auditPath, []byte(validLegacyAuditTestLine+"\n"))
 	rotated := make([]string, 0, count)
 	for i := 1; i <= count; i++ {
 		filePath := auditPath + "." + []string{"20260101-000000", "20260201-000000", "20260301-000000"}[i-1] + ".log"
-		if err := os.WriteFile(filePath, []byte(validLegacyAuditTestLine+"\n"), 0o600); err != nil {
-			t.Fatal(err)
-		}
+		writePrivateMutationAuditTestFile(t, filePath, []byte(validLegacyAuditTestLine+"\n"))
 		rotated = append(rotated, filePath)
 	}
 	return configPath, auditPath, rotated
@@ -842,16 +835,20 @@ const validLegacyAuditTestLine = `{"timestamp":"2026-01-01T00:00:00Z","eventType
 func writeV2AuditEnvelope(t *testing.T, path string) {
 	t.Helper()
 	content := " { \"kind\": \"AuditEnvelope\", \"apiVersion\": \"opskit-core.io/audit/v2\" }\n"
-	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	writePrivateMutationAuditTestFile(t, path, []byte(content))
 }
 
 func writeAuditTestLine(t *testing.T, path, line string) {
 	t.Helper()
-	if err := os.WriteFile(path, []byte(line+"\n"), 0o600); err != nil {
+	writePrivateMutationAuditTestFile(t, path, []byte(line+"\n"))
+}
+
+func writePrivateMutationAuditTestFile(t *testing.T, path string, data []byte) {
+	t.Helper()
+	if err := os.WriteFile(path, data, 0o600); err != nil {
 		t.Fatal(err)
 	}
+	secureMutationAuditTestFile(t, path)
 }
 
 func assertFileExists(t *testing.T, path string) {
@@ -859,4 +856,13 @@ func assertFileExists(t *testing.T, path string) {
 	if _, err := os.Stat(path); err != nil {
 		t.Fatalf("expected %s to exist: %v", path, err)
 	}
+}
+
+func sameAuditTestPath(left, right string) bool {
+	leftInfo, leftErr := os.Stat(left)
+	rightInfo, rightErr := os.Stat(right)
+	if leftErr == nil && rightErr == nil {
+		return os.SameFile(leftInfo, rightInfo)
+	}
+	return contextExportPathsEqual(left, right)
 }
