@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/JiangHe12/opskit-core/apperrors"
-	corectx "github.com/JiangHe12/opskit-core/ctx"
+	"github.com/JiangHe12/opskit-core/v2/apperrors"
+	corectx "github.com/JiangHe12/opskit-core/v2/ctx"
 
 	"github.com/JiangHe12/mqgov-cli/internal/mqgovctx"
 )
@@ -134,7 +134,10 @@ func TestFleetAuditRecordsContextsAndCounts(t *testing.T) {
 		t.Fatalf("ReadFile(audit.log) error = %v", err)
 	}
 	text := string(data)
-	if !strings.Contains(text, "mq.fleet") || !strings.Contains(text, "dev-a") || !strings.Contains(text, "count=") {
+	if !strings.Contains(text, "mq.fleet") ||
+		!strings.Contains(text, "dev-a") ||
+		!strings.Contains(text, `"detailFingerprint":"sha256:`) ||
+		!strings.Contains(text, `"detailBytes":`) {
 		t.Fatalf("audit log missing fleet summary: %s", text)
 	}
 }

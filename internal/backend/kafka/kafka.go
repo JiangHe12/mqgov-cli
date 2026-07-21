@@ -16,6 +16,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/twmb/franz-go/pkg/kadm"
@@ -25,7 +26,7 @@ import (
 	"github.com/twmb/franz-go/pkg/sasl/plain"
 	"github.com/twmb/franz-go/pkg/sasl/scram"
 
-	"github.com/JiangHe12/opskit-core/apperrors"
+	"github.com/JiangHe12/opskit-core/v2/apperrors"
 
 	"github.com/JiangHe12/mqgov-cli/internal/mqgov"
 	"github.com/JiangHe12/mqgov-cli/internal/tlspin"
@@ -54,6 +55,7 @@ type Broker struct {
 	client *kgo.Client
 	admin  *kadm.Client
 	srHTTP *http.Client
+	close  sync.Once
 }
 
 type schemaRegistryVersion struct {
@@ -90,6 +92,20 @@ func New(opts Options) (*Broker, error) {
 	return &Broker{opts: opts, client: client, admin: kadm.NewClient(client), srHTTP: httpClient}, nil
 }
 
+func (b *Broker) Close() {
+	if b == nil {
+		return
+	}
+	b.close.Do(func() {
+		if b.client != nil {
+			b.client.Close()
+		}
+		if b.srHTTP != nil {
+			b.srHTTP.CloseIdleConnections()
+		}
+	})
+}
+
 func (b *Broker) Ping(ctx context.Context) error {
 	if err := b.client.Ping(ctx); err != nil {
 		return unreachable(err)
@@ -105,13 +121,13 @@ func (b *Broker) Capabilities() mqgov.Capabilities {
 	return mqgov.Capabilities{
 		Backend:            "kafka",
 		ResourceTypes:      []string{"topic", "group", "message", "offset", "acl", "dlq", "schema"},
-		Verbs:              []string{"list", "describe", "lag", "peek", "tail", "produce", "mirror", "create", "alter", "delete", "purge", "reset-offset", "grant-acl", "revoke-acl", "redrive", "check-schema", "register-schema", "delete-schema"},
+		Verbs:              []string{"list", "describe", "lag", "peek", "tail", "produce", "mirror", "create", "alter", "delete", "purge", "reset-offset", "grant-acl", "revoke-acl", "check-schema", "register-schema", "delete-schema"},
 		SupportsOffsets:    true,
 		SupportsPartitions: true,
 		SupportsACL:        true,
 		SupportsDLQList:    false,
 		SupportsDLQPeek:    true,
-		SupportsDLQRedrive: true,
+		SupportsDLQRedrive: false,
 		SupportsDLQPurge:   true,
 		SupportsSchema:     b.opts.SchemaRegistryURL != "",
 	}
@@ -229,10 +245,13 @@ func (b *Broker) DeleteGroup(ctx context.Context, coord mqgov.GroupCoordinate) e
 }
 
 func (b *Broker) Peek(ctx context.Context, req mqgov.MessagePeekRequest) (mqgov.MessagePeekResult, error) {
-	count := req.Count
-	if count <= 0 {
-		count = 1
+	if req.Count <= 0 {
+		return mqgov.MessagePeekResult{}, apperrors.New(apperrors.CodeUsageError, "peek count must be positive", nil)
 	}
+	if req.Partition < 0 || req.Offset < 0 {
+		return mqgov.MessagePeekResult{}, apperrors.New(apperrors.CodeUsageError, "peek partition and offset must be non-negative", nil)
+	}
+	count := req.Count
 	client, err := b.peekClient(req)
 	if err != nil {
 		return mqgov.MessagePeekResult{}, err
@@ -571,8 +590,17 @@ func (b *Broker) PurgeTopic(ctx context.Context, req mqgov.TopicPurgeRequest) (m
 	}
 	impact, total := purgeImpact(start, end)
 	if !req.DryRun {
-		if err := b.deleteRecords(ctx, end); err != nil {
-			return mqgov.TopicPurgeResult{}, err
+		responses, deleteErr := b.deleteRecords(ctx, end)
+		impact, total = appliedDeleteRecordsImpact(start, responses)
+		if deleteErr != nil {
+			return mqgov.TopicPurgeResult{
+				Coordinate:  req.Coordinate,
+				DLQ:         req.DLQ,
+				DryRun:      false,
+				Impact:      impact,
+				Total:       total,
+				Fingerprint: mqgov.ResourceFingerprints{Count: total},
+			}, deleteErr
 		}
 	}
 	return mqgov.TopicPurgeResult{
@@ -597,42 +625,17 @@ func (b *Broker) PeekDLQ(ctx context.Context, req mqgov.DLQPeekRequest) (mqgov.D
 	return mqgov.DLQPeekResult{DLQ: req.DLQ, Partition: result.Partition, Offset: result.Offset, Count: result.Count, Messages: result.Messages}, nil
 }
 
-func (b *Broker) RedriveDLQ(ctx context.Context, req mqgov.DLQRedriveRequest) (mqgov.DLQRedriveResult, error) {
-	count := req.Count
-	if count <= 0 {
-		count = 100
-	}
-	impact, total, err := b.kafkaDLQImpact(ctx, req.DLQ.Topic, int64(count))
-	if err != nil {
-		return mqgov.DLQRedriveResult{}, err
-	}
-	if !req.DryRun && total > 0 {
-		messages, err := b.readDLQMessages(ctx, req.DLQ, int(total))
-		if err != nil {
-			return mqgov.DLQRedriveResult{}, err
-		}
-		for _, msg := range messages {
-			if _, err := b.Produce(ctx, mqgov.MessageProduceRequest{Coordinate: req.Target, Key: msg.Key, Body: msg.Body, Headers: msg.Headers}); err != nil {
-				return mqgov.DLQRedriveResult{}, err
-			}
-		}
-	}
-	return mqgov.DLQRedriveResult{
-		DLQ:         req.DLQ,
-		Target:      req.Target,
-		DryRun:      req.DryRun,
-		Impact:      impact,
-		Total:       total,
-		Fingerprint: mqgov.ResourceFingerprints{Count: total},
-	}, nil
+func (b *Broker) RedriveDLQ(context.Context, mqgov.DLQRedriveRequest) (mqgov.DLQRedriveResult, error) {
+	return mqgov.DLQRedriveResult{}, apperrors.New(
+		apperrors.CodeNotImplemented,
+		"Kafka DLQ redrive cannot atomically copy and remove an exact bounded record set",
+		nil,
+	)
 }
 
 func (b *Broker) PurgeDLQ(ctx context.Context, req mqgov.DLQPurgeRequest) (mqgov.DLQPurgeResult, error) {
 	result, err := b.PurgeTopic(ctx, mqgov.TopicPurgeRequest{Coordinate: req.DLQ, DLQ: true, DryRun: req.DryRun})
-	if err != nil {
-		return mqgov.DLQPurgeResult{}, err
-	}
-	return mqgov.DLQPurgeResult{DLQ: req.DLQ, DryRun: result.DryRun, Impact: result.Impact, Total: result.Total, Fingerprint: result.Fingerprint}, nil
+	return mqgov.DLQPurgeResult{DLQ: req.DLQ, DryRun: result.DryRun, Impact: result.Impact, Total: result.Total, Fingerprint: result.Fingerprint}, err
 }
 
 func (b *Broker) ListSchemas(ctx context.Context, opts mqgov.SchemaListOptions) ([]mqgov.SchemaSubject, error) {
@@ -959,7 +962,7 @@ func (b *Broker) startEndOffsets(ctx context.Context, topic string) (kadm.Listed
 	return start, end, nil
 }
 
-func (b *Broker) deleteRecords(ctx context.Context, offsets kadm.ListedOffsets) error {
+func (b *Broker) deleteRecords(ctx context.Context, offsets kadm.ListedOffsets) (kadm.DeleteRecordsResponses, error) {
 	req := make(kadm.Offsets)
 	for topic, partitions := range offsets {
 		req[topic] = make(map[int32]kadm.Offset)
@@ -969,84 +972,12 @@ func (b *Broker) deleteRecords(ctx context.Context, offsets kadm.ListedOffsets) 
 	}
 	responses, err := b.admin.DeleteRecords(ctx, req)
 	if err != nil {
-		return backendErr(err)
+		return responses, backendErr(err)
 	}
 	if err := responses.Error(); err != nil {
-		return backendErr(err)
+		return responses, backendErr(err)
 	}
-	return nil
-}
-
-func (b *Broker) kafkaDLQImpact(ctx context.Context, topic string, limit int64) ([]mqgov.PartitionImpact, int64, error) {
-	start, end, err := b.startEndOffsets(ctx, topic)
-	if err != nil {
-		return nil, 0, err
-	}
-	impact := make([]mqgov.PartitionImpact, 0)
-	var total int64
-	for _, item := range purgeImpactLimited(start, end, limit) {
-		impact = append(impact, item)
-		total += item.Count
-	}
-	return impact, total, nil
-}
-
-func (b *Broker) readDLQMessages(ctx context.Context, coord mqgov.TopicCoordinate, count int) ([]mqgov.Message, error) {
-	start, end, err := b.startEndOffsets(ctx, coord.Topic)
-	if err != nil {
-		return nil, err
-	}
-	partitions := make(map[int32]kgo.Offset)
-	for partition, listed := range start[coord.Topic] {
-		if listed.Err != nil {
-			return nil, backendErr(listed.Err)
-		}
-		partitions[partition] = kgo.NewOffset().At(listed.Offset)
-	}
-	client, err := b.tailClient(map[string]map[int32]kgo.Offset{coord.Topic: partitions})
-	if err != nil {
-		return nil, err
-	}
-	defer client.Close()
-	out := make([]mqgov.Message, 0, count)
-	done := tailDonePartitions(map[string]map[int32]kgo.Offset{coord.Topic: partitions}, end)
-	for len(out) < count && !tailAllDone(done, partitions) {
-		fetches := client.PollFetches(ctx)
-		if err := fetches.Err(); err != nil {
-			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-				break
-			}
-			return nil, backendErr(err)
-		}
-		if fetches.Empty() {
-			break
-		}
-		appendDLQFetches(fetches, coord, end, done, count, &out)
-	}
-	return out, nil
-}
-
-func appendDLQFetches(fetches kgo.Fetches, coord mqgov.TopicCoordinate, end kadm.ListedOffsets, done map[int32]bool, count int, out *[]mqgov.Message) {
-	iter := fetches.RecordIter()
-	for !iter.Done() && len(*out) < count {
-		record := iter.Next()
-		if record == nil {
-			continue
-		}
-		if kafkaTailPastEnd(record, end) {
-			done[record.Partition] = true
-			continue
-		}
-		*out = append(*out, mqgov.Message{
-			Coordinate: mqgov.MessageCoordinate{TopicCoordinate: coord, Partition: int(record.Partition), Offset: record.Offset},
-			Key:        record.Key,
-			Body:       record.Value,
-			Headers:    recordHeaders(record.Headers),
-		})
-		if kafkaTailReachedEnd(record, end) {
-			done[record.Partition] = true
-		}
-	}
+	return responses, nil
 }
 
 func (b *Broker) peekClient(req mqgov.MessagePeekRequest) (*kgo.Client, error) {
@@ -1223,44 +1154,27 @@ func purgeImpact(start, end kadm.ListedOffsets) ([]mqgov.PartitionImpact, int64)
 	return impact, total
 }
 
-func purgeImpactLimited(start, end kadm.ListedOffsets, limit int64) []mqgov.PartitionImpact {
+func appliedDeleteRecordsImpact(start kadm.ListedOffsets, responses kadm.DeleteRecordsResponses) ([]mqgov.PartitionImpact, int64) {
 	impact := make([]mqgov.PartitionImpact, 0)
-	remaining := limit
-	for topic, partitions := range end {
-		keys := make([]int, 0, len(partitions))
-		for partition := range partitions {
-			keys = append(keys, int(partition))
+	var total int64
+	for _, response := range responses.Sorted() {
+		if response.Err != nil {
+			continue
 		}
-		sort.Ints(keys)
-		for _, key := range keys {
-			if remaining <= 0 {
-				return impact
-			}
-			partition, err := safeInt32(key, "partition")
-			if err != nil {
-				return impact
-			}
-			endOffset := partitions[partition]
-			from := int64(0)
-			if s, ok := start[topic][partition]; ok && s.Err == nil && s.Offset >= 0 {
-				from = s.Offset
-			}
-			to := endOffset.Offset
-			if to < 0 {
-				to = from
-			}
-			count := abs64(to - from)
-			if count > remaining {
-				count = remaining
-				to = from + count
-			}
-			if count > 0 {
-				impact = append(impact, mqgov.PartitionImpact{Partition: int(partition), From: from, To: to, Count: count})
-				remaining -= count
-			}
+		startOffset, ok := start.Lookup(response.Topic, response.Partition)
+		if !ok || startOffset.Err != nil || startOffset.Offset < 0 || response.LowWatermark < startOffset.Offset {
+			continue
 		}
+		count := response.LowWatermark - startOffset.Offset
+		total += count
+		impact = append(impact, mqgov.PartitionImpact{
+			Partition: int(response.Partition),
+			From:      startOffset.Offset,
+			To:        response.LowWatermark,
+			Count:     count,
+		})
 	}
-	return impact
+	return impact, total
 }
 
 func kgoOptions(opts Options) ([]kgo.Opt, error) {

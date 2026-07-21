@@ -16,4 +16,4 @@ go test -tags=integration -count=1 ./internal/backend/rabbitmq
 
 The default `go test ./...` path does not require RabbitMQ and skips this file because it is build-tagged.
 
-RabbitMQ peek uses `basic.get` with `autoAck=false`, immediately followed by `nack(requeue=true)`. This keeps the message in the queue, but RabbitMQ may mark the delivery as redelivered and the broker may change redelivery ordering.
+RabbitMQ peek uses `basic.get` with `autoAck=false` and holds each distinct delivery until the requested batch has been fingerprinted. It then requeues the whole batch together. Messages remain in the queue, but RabbitMQ may mark them as redelivered and may change their ordering.

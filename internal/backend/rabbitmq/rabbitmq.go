@@ -15,11 +15,12 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	amqp "github.com/rabbitmq/amqp091-go"
 
-	"github.com/JiangHe12/opskit-core/apperrors"
+	"github.com/JiangHe12/opskit-core/v2/apperrors"
 
 	"github.com/JiangHe12/mqgov-cli/internal/mqgov"
 	"github.com/JiangHe12/mqgov-cli/internal/tlspin"
@@ -49,9 +50,13 @@ type Broker struct {
 	manageURL  string
 	httpClient *http.Client
 	tlsConfig  *tls.Config
+	close      sync.Once
 }
 
 func New(opts Options) (*Broker, error) {
+	if err := validateTLSConnectionURLs(opts); err != nil {
+		return nil, err
+	}
 	opts = normalizeConnectionCredentials(opts)
 	baseTLSConfig, err := buildTLSConfig(opts)
 	if err != nil {
@@ -75,6 +80,43 @@ func New(opts Options) (*Broker, error) {
 		httpClient.Transport = &http.Transport{TLSClientConfig: managementTLSConfig}
 	}
 	return &Broker{opts: opts, amqpURL: amqpURL, manageURL: managementURL, httpClient: httpClient, tlsConfig: amqpTLSConfig}, nil
+}
+
+func (b *Broker) Close() {
+	if b == nil {
+		return
+	}
+	b.close.Do(func() {
+		if b.httpClient != nil {
+			b.httpClient.CloseIdleConnections()
+		}
+	})
+}
+
+func validateTLSConnectionURLs(opts Options) error {
+	if !opts.TLS {
+		return nil
+	}
+	if err := requireEndpointScheme(opts.AMQPURL, "amqps", "RabbitMQ AMQP"); err != nil {
+		return err
+	}
+	return requireEndpointScheme(opts.ManagementURL, "https", "RabbitMQ management")
+}
+
+func requireEndpointScheme(rawURL, wantScheme, endpointName string) error {
+	rawURL = strings.TrimSpace(rawURL)
+	if rawURL == "" {
+		return nil
+	}
+	parsed, err := url.Parse(rawURL)
+	if err != nil || parsed.Host == "" || !strings.EqualFold(parsed.Scheme, wantScheme) {
+		return apperrors.New(
+			apperrors.CodeUsageError,
+			fmt.Sprintf("%s TLS requires a %s:// URL", endpointName, wantScheme),
+			nil,
+		)
+	}
+	return nil
 }
 
 func normalizeConnectionCredentials(opts Options) Options {
@@ -200,31 +242,61 @@ func (b *Broker) DeleteGroup(context.Context, mqgov.GroupCoordinate) error {
 }
 
 func (b *Broker) Peek(ctx context.Context, req mqgov.MessagePeekRequest) (mqgov.MessagePeekResult, error) {
-	count := req.Count
-	if count <= 0 {
-		count = 1
+	if req.Count <= 0 {
+		return mqgov.MessagePeekResult{}, apperrors.New(apperrors.CodeUsageError, "peek count must be positive", nil)
 	}
-	messages := make([]mqgov.MessageFingerprint, 0, count)
+	if req.Partition != 0 || req.Offset != 0 {
+		return mqgov.MessagePeekResult{}, apperrors.New(
+			apperrors.CodeNotImplemented,
+			"RabbitMQ peek supports only partition 0 at the queue head",
+			nil,
+		)
+	}
+	var messages []mqgov.MessageFingerprint
 	_, err := withChannel(ctx, b, func(ch *amqp.Channel) (struct{}, error) {
-		for len(messages) < count {
-			msg, ok, err := ch.Get(req.Coordinate.Topic, false)
-			if err != nil {
-				return struct{}{}, err
-			}
-			if !ok {
-				return struct{}{}, nil
-			}
-			messages = append(messages, mqgov.FingerprintMessage(0, int64(len(messages)), []byte(msg.RoutingKey), msg.Body))
-			if err := msg.Nack(false, true); err != nil {
-				return struct{}{}, err
-			}
-		}
-		return struct{}{}, nil
+		var peekErr error
+		messages, peekErr = rabbitMQPeekMessages(ch, req.Coordinate.Topic, req.Count)
+		return struct{}{}, peekErr
 	})
 	if err != nil {
 		return mqgov.MessagePeekResult{}, classifyAMQPError(err)
 	}
 	return mqgov.MessagePeekResult{Coordinate: req.Coordinate, Partition: 0, Offset: req.Offset, Count: len(messages), Messages: messages}, nil
+}
+
+type rabbitMQMessageGetter interface {
+	Get(queue string, autoAck bool) (amqp.Delivery, bool, error)
+}
+
+func rabbitMQPeekMessages(getter rabbitMQMessageGetter, queue string, count int) (messages []mqgov.MessageFingerprint, retErr error) {
+	deliveries := make([]amqp.Delivery, 0, count)
+	defer func() {
+		if len(deliveries) == 0 {
+			return
+		}
+		if err := deliveries[len(deliveries)-1].Nack(true, true); err != nil {
+			retErr = fmt.Errorf("restore peeked RabbitMQ messages: %w", err)
+		}
+	}()
+	messages = make([]mqgov.MessageFingerprint, 0, count)
+	for len(messages) < count {
+		msg, ok, err := getter.Get(queue, false)
+		if err != nil {
+			return messages, err
+		}
+		if !ok {
+			return messages, nil
+		}
+		deliveries = append(deliveries, msg)
+		messages = append(messages, mqgov.FingerprintMessageAt(
+			0,
+			int64(len(messages)),
+			[]byte(msg.RoutingKey),
+			msg.Body,
+			msg.Timestamp,
+		))
+	}
+	return messages, nil
 }
 
 func (b *Broker) Produce(ctx context.Context, req mqgov.MessageProduceRequest) (mqgov.MessageProduceResult, error) {
@@ -306,7 +378,12 @@ func (b *Broker) ListDLQs(ctx context.Context, opts mqgov.DLQListOptions) ([]mqg
 }
 
 func (b *Broker) PeekDLQ(ctx context.Context, req mqgov.DLQPeekRequest) (mqgov.DLQPeekResult, error) {
-	result, err := b.Peek(ctx, mqgov.MessagePeekRequest{Coordinate: req.DLQ, Count: req.Count})
+	result, err := b.Peek(ctx, mqgov.MessagePeekRequest{
+		Coordinate: req.DLQ,
+		Partition:  req.Partition,
+		Offset:     req.Offset,
+		Count:      req.Count,
+	})
 	if err != nil {
 		return mqgov.DLQPeekResult{}, err
 	}
@@ -318,9 +395,15 @@ func (b *Broker) RedriveDLQ(ctx context.Context, req mqgov.DLQRedriveRequest) (m
 	if count <= 0 {
 		count = 100
 	}
+	if req.DLQ.Topic == req.Target.Topic {
+		return mqgov.DLQRedriveResult{}, apperrors.New(apperrors.CodeUsageError, "RabbitMQ redrive target must differ from the DLQ", nil)
+	}
 	if req.DryRun {
 		queue, err := b.inspectQueue(ctx, req.DLQ.Topic)
 		if err != nil {
+			return mqgov.DLQRedriveResult{}, err
+		}
+		if _, err := b.inspectQueue(ctx, req.Target.Topic); err != nil {
 			return mqgov.DLQRedriveResult{}, err
 		}
 		total := int64(queue.Messages)
@@ -359,14 +442,22 @@ func (b *Broker) RedriveDLQ(ctx context.Context, req mqgov.DLQRedriveRequest) (m
 		}
 		return struct{}{}, nil
 	})
+	result := mqgov.DLQRedriveResult{
+		DLQ:         req.DLQ,
+		Target:      req.Target,
+		DryRun:      false,
+		Impact:      []mqgov.PartitionImpact{{Partition: 0, Count: total}},
+		Total:       total,
+		Fingerprint: mqgov.ResourceFingerprints{Count: total},
+	}
 	if err != nil {
 		var appErr *apperrors.AppError
 		if errors.As(err, &appErr) {
-			return mqgov.DLQRedriveResult{}, err
+			return result, err
 		}
-		return mqgov.DLQRedriveResult{}, classifyAMQPError(err)
+		return result, classifyAMQPError(err)
 	}
-	return mqgov.DLQRedriveResult{DLQ: req.DLQ, Target: req.Target, DryRun: false, Impact: []mqgov.PartitionImpact{{Partition: 0, Count: total}}, Total: total, Fingerprint: mqgov.ResourceFingerprints{Count: total}}, nil
+	return result, nil
 }
 
 func (b *Broker) PurgeDLQ(ctx context.Context, req mqgov.DLQPurgeRequest) (mqgov.DLQPurgeResult, error) {

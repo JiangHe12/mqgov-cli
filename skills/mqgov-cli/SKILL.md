@@ -11,6 +11,9 @@ Use `mqgov` for governed message middleware operations. Prefer `-o json` for mac
 Hard rules:
 
 - Never invent or self-fill `--ticket`, `--yes`, or `--allow-*`; these are human authorization inputs.
+- Authorization/audit identity is the local OS `username@hostname`; `--operator`
+  and MQGOV operator environment variables are ignored. This does not separate
+  an AI from a human under the same OS account.
 - Message body, key, and headers must not be copied into audit summaries or tickets. Use fingerprints and counts.
 - Check `mqgov capabilities -o json` before assuming a backend supports offsets, partitions, ACL, DLQ verbs, peek, or tail.
 - Unsupported backend operations fail closed with `NOT_IMPLEMENTED`.
@@ -19,21 +22,23 @@ Hard rules:
 Common setup:
 
 ```bash
-mqgov ctx set dev --backend kafka --brokers localhost:9092 --cluster dev
-mqgov ctx set dev-sr --backend kafka --brokers localhost:9092 --schema-registry-url https://schema-registry.example --schema-registry-username <user> --schema-registry-password <password> --credential-backend encrypted-file
-mqgov ctx set dev-rabbit --backend rabbitmq --host localhost --port 5672 --vhost / --management-url http://localhost:15672 --username guest
-mqgov ctx set dev-pulsar --backend pulsar --service-url pulsar://localhost:6650 --admin-url http://localhost:8080 --tenant public --pulsar-namespace default
-mqgov ctx set dev-rocket --backend rocketmq --nameservers localhost:9876 --broker-addr localhost:10911
-mqgov ctx use dev
+mqgov ctx set dev --backend kafka --brokers localhost:9092 --cluster dev --yes --ticket <ticket> --allow-context-change
+mqgov ctx set dev-sr --backend kafka --brokers localhost:9092 --schema-registry-url https://schema-registry.example --schema-registry-username <user> --schema-registry-password <password> --credential-backend encrypted-file --yes --ticket <ticket> --allow-context-change
+mqgov ctx set dev-rabbit --backend rabbitmq --host localhost --port 5672 --vhost / --management-url http://localhost:15672 --username guest --yes --ticket <ticket> --allow-context-change
+mqgov ctx set dev-pulsar --backend pulsar --service-url pulsar://localhost:6650 --admin-url http://localhost:8080 --tenant public --pulsar-namespace default --yes --ticket <ticket> --allow-context-change
+mqgov ctx set dev-rocket --backend rocketmq --nameservers localhost:9876 --broker-addr localhost:10911 --yes --ticket <ticket> --allow-context-change
+mqgov ctx use dev --yes --ticket <ticket> --allow-context-change
 mqgov ctx export dev > dev.ctx.yaml
-mqgov ctx import -f dev.ctx.yaml --yes
-mqgov ctx role set dev --target-operator <operator> --role reader|writer|admin
+mqgov ctx import -f dev.ctx.yaml --yes --ticket <ticket> --allow-context-change
+mqgov ctx role set dev --target-operator <operator> --role reader|writer|admin --yes --ticket <ticket> --allow-role-change
 mqgov ctx migrate-credentials --dry-run
-mqgov ctx migrate-credentials --yes
+mqgov ctx migrate-credentials --yes --ticket <ticket> --allow-context-change
 mqgov ctx test -o json
 ```
 
 For RabbitMQ, provide `MQGOV_PASSWORD` when running commands if the context has no stored credential. To persist a password, use `--password` with `--credential-backend keychain` or `--credential-backend encrypted-file`. Explicit `--username` and password sources override userinfo embedded in `--amqp-url` and are used for both AMQP and management API auth.
+
+Context import is validate-first across the full document. If secure credential writes succeed but the context config cannot commit, mqgov restores the previous credential values when it can prove compensation is safe; otherwise it fails closed and records an uncertain/incomplete compensation outcome.
 
 Reads:
 
@@ -55,6 +60,8 @@ mqgov fleet status --all -o json
 mqgov fleet topics --contexts dev,staging -o json
 ```
 
+Peek counts must be positive. Results preserve broker read order, return at most the requested count, and report the actual shorter count at the current boundary. RabbitMQ restores the complete unacknowledged batch after fingerprinting and fails the read if requeue fails.
+
 Writes require human authorization according to risk:
 
 ```bash
@@ -70,8 +77,8 @@ mqgov schema register <subject-or-topic> --schema-file ./next.avsc --schema-type
 mqgov schema register <subject-or-topic> --schema-file ./next.avsc --schema-type AVRO --yes --ticket <ticket> -o json
 mqgov schema delete <subject-or-topic> --yes --ticket <ticket> --allow-schema-delete -o json
 mqgov schema delete <subject-or-topic> --version <version> --permanent --yes --ticket <ticket> --allow-schema-delete -o json
-mqgov dlq redrive <dlq> --target <live-topic> --count 100 --dry-run -o json
-mqgov dlq redrive <dlq> --target <live-topic> --count 100 --yes --ticket <ticket> --allow-internal-produce -o json
+mqgov dlq redrive <dlq> --target <live-topic> --count 100 --dry-run -o json  # RabbitMQ
+mqgov dlq redrive <dlq> --target <live-topic> --count 100 --yes --ticket <ticket> --allow-internal-produce -o json  # RabbitMQ
 mqgov dlq purge <dlq> --dry-run -o json
 mqgov dlq purge <dlq> --yes --ticket <ticket> --allow-topic-purge -o json
 mqgov acl grant --principal User:svc --resource-type topic --resource-name <topic> --pattern literal --operation read --permission allow --yes --ticket <ticket> -o json
@@ -92,10 +99,10 @@ ACL governance:
 Message mirror governance:
 
 - `message mirror SOURCE --to-context NAME --to-topic NAME --limit N` is a bounded one-shot copy only. Never use it as a daemon and never add `--follow`.
-- Mirror uses two independent authorizations: source-side non-destructive read on the source context, then target-side produce on the target context. Protected source contexts can require approval before exfiltration; protected/internal targets follow produce risk and internal targets require `--allow-internal-produce`.
+- Mirror resolves each topic once, then uses two independent authorizations: source-side non-destructive read under the source context policy, then target-side produce under the persisted target context policy. Either failure precedes message reads and target writes. Protected source contexts can require approval before exfiltration; protected/internal targets follow produce risk and internal targets require `--allow-internal-produce`.
 - `--dry-run` / `--plan` is an R0 preview driven by the same dry-run flag that suppresses target produce. It may read/count from the source but must not mutate the target.
 - Kafka and Pulsar can be mirror sources. RabbitMQ and RocketMQ sources fail closed with `NOT_IMPLEMENTED` because their available reads cannot guarantee non-destructive full-message reads.
-- Key/body/headers may flow only in process memory from source to target. Audit/output must stay fingerprint-only: source, target, count, and body sha256 aggregation; never raw key, body, or headers.
+- Key/body/headers may flow only in process memory from source to target. Source and destination must be audited separately with their own context, target, request/result fingerprint, and count; never raw key, body, or headers.
 
 Schema governance:
 
@@ -117,7 +124,8 @@ DLQ governance:
 
 - DLQ verbs are `dlq list|peek|redrive|purge`. `list` and `peek` are R0 and fingerprint-only; dry-run redrive/purge are R0 previews.
 - Real `dlq redrive` is R3 and requires `--allow-internal-produce`; real `dlq purge` is R3 and requires `--allow-topic-purge`.
-- Kafka has no native DLQ and never auto-discovers one; use an explicit DLQ topic for peek/redrive/purge. RabbitMQ uses DLX-fed queues. Pulsar uses `{topic}-{subscription}-DLQ`. RocketMQ only supports listing `%DLQ%{consumerGroup}` topics; unsupported DLQ verbs fail closed with `NOT_IMPLEMENTED`.
+- RabbitMQ uses DLX-fed queues and supports all four verbs; redrive confirms the publish before acknowledging the source message. Kafka explicit DLQ topics support peek/purge but redrive is `NOT_IMPLEMENTED` because exact bounded copy-and-remove cannot be atomic. Pulsar supports list/peek for `{topic}-{subscription}-DLQ` but refuses redrive/purge because Reader/cursor operations do not provide those deletion semantics. RocketMQ only supports listing `%DLQ%{consumerGroup}` topics.
+- Pulsar offset reset supports only `--to latest`, using live per-partition subscription backlog as the affected count. Earliest/datetime/offset/shift resets return `NOT_IMPLEMENTED` before mutation intent because their impact cannot be measured reliably.
 
 Audit:
 
@@ -125,7 +133,28 @@ Audit:
 mqgov audit query --since 24h --limit 100 -o json
 mqgov audit verify --strict -o json
 mqgov audit prune --older-than 30 --dry-run -o json
-mqgov audit prune --older-than 30 --yes -o json
+mqgov audit prune --older-than 30 --confirm --yes --ticket <ticket> --allow-audit-prune -o json
 ```
+
+Confirmed audit pruning is fixed R3 and uses the persisted current-context
+policy. It requires `--confirm`, `--yes`, a non-empty ticket, and the exact
+allow flag. Never synthesize those authorization inputs. Authenticated v2
+history is validated and its checkpoint is advanced by opskit-core/v2 before
+the selected oldest rotation prefix is deleted. The prune intent/outcome is
+written to the sibling `.<audit-base>-control` log so its rotations never enter
+the target evidence namespace.
+
+Every mutation writes an intent before touching the target and an outcome
+afterwards. `AUDIT_INCOMPLETE` means outcome durability is incomplete; only an
+outcome known not to be committed enters the owner-only
+`<audit.log>.outcome-spool`. Do not blindly retry: repair audit storage and
+inspect `audit query` / `audit verify` before any replay or manual recovery.
+Replay is at-least-once, so a crash after append and before spool deletion can
+produce a duplicate outcome with the same `mutationId`. opskit-core/v2 reports
+whether an append is committed, not committed, or indeterminate. mqgov only
+queues records known not to be committed; committed and indeterminate errors
+fail closed without blind replay. An indeterminate replay is renamed with an
+`.indeterminate` suffix, blocks later automatic replay, and must be reconciled
+by `mutationId`.
 
 `message tail` is fingerprint-only and non-destructive. It is supported by Kafka and Pulsar. RabbitMQ and RocketMQ return `NOT_IMPLEMENTED` for tail; RocketMQ also returns `NOT_IMPLEMENTED` for peek.

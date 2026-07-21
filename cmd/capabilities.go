@@ -5,8 +5,8 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/JiangHe12/opskit-core/apperrors"
-	"github.com/JiangHe12/opskit-core/credstore"
+	"github.com/JiangHe12/opskit-core/v2/apperrors"
+	"github.com/JiangHe12/opskit-core/v2/credstore"
 
 	"github.com/JiangHe12/mqgov-cli/internal/mqgov"
 )
@@ -68,13 +68,16 @@ func newCapabilitiesCmd(f *cliFlags) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			defer backend.Close()
 			data := buildCapabilities(backend.Capabilities())
 			if f.Output == "json" {
 				return newPrinter(f).JSONData("Capabilities", data)
 			}
 			if f.Output == "plain" {
 				for _, command := range capabilityPlainCommands() {
-					_, _ = fmt.Fprintln(newPrinter(f).Out, command)
+					if _, err := fmt.Fprintln(newPrinter(f).Out, command); err != nil {
+						return apperrors.New(apperrors.CodeLocalIOError, "failed to write capabilities output", err)
+					}
 				}
 				return nil
 			}
@@ -82,8 +85,7 @@ func newCapabilitiesCmd(f *cliFlags) *cobra.Command {
 			for _, cmd := range data.Domain.Commands {
 				rows = append(rows, []string{cmd.Noun, cmd.Verb, cmd.Risk, cmd.AllowFlag})
 			}
-			newPrinter(f).Table([]string{"NOUN", "VERB", "RISK", "ALLOW FLAG"}, rows)
-			return nil
+			return newPrinter(f).Table([]string{"NOUN", "VERB", "RISK", "ALLOW FLAG"}, rows)
 		},
 	}
 }
@@ -153,6 +155,7 @@ func buildCapabilities(backendCaps mqgov.Capabilities) capabilitiesData {
 				{Noun: "schema", Verb: "register existing subject", Risk: "R2"},
 				{Noun: "schema", Verb: "delete", Risk: "R3", AllowFlag: "allow-schema-delete"},
 				{Noun: "fleet", Verb: "status/topics", Risk: "R0"},
+				{Noun: "audit", Verb: "prune", Risk: "R3", AllowFlag: "allow-audit-prune"},
 			},
 			OutputFormats:      []string{"table", "json", "plain"},
 			ErrorCodes:         errorCodeStrings(),

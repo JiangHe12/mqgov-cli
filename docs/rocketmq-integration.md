@@ -16,6 +16,4 @@ go test -tags=integration -count=1 ./internal/backend/rocketmq
 
 The default `go test ./...` path does not require RocketMQ and skips the integration file because it is build-tagged.
 
-This backend intentionally implements only the operations cleanly supported by `github.com/apache/rocketmq-client-go/v2`: topic create/delete/list/describe, produce, and non-destructive `PullConsumer.PullFrom` peek. Offset reset, lag, alter, purge, and ACL management are not advertised as supported capabilities and fail closed through the existing governance layer.
-
-RocketMQ peek uses `PullFrom` against an explicit queue and offset. The backend does not call `UpdateOffset` or `PersistOffset`, and returns only fingerprints.
+This backend intentionally implements only the operations cleanly supported by `github.com/apache/rocketmq-client-go/v2`: topic create/delete/list/describe and produce. Peek/tail, offset reset, lag, alter, purge, and ACL management are not advertised as supported capabilities and fail closed with `NOT_IMPLEMENTED` through the governance layer.

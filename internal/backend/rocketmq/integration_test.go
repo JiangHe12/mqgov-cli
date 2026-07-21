@@ -12,7 +12,7 @@ import (
 
 	"github.com/apache/rocketmq-client-go/v2/primitive"
 
-	"github.com/JiangHe12/opskit-core/apperrors"
+	"github.com/JiangHe12/opskit-core/v2/apperrors"
 
 	"github.com/JiangHe12/mqgov-cli/internal/mqgov"
 )

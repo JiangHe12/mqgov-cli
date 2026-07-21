@@ -5,9 +5,9 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/JiangHe12/opskit-core/apperrors"
-	"github.com/JiangHe12/opskit-core/audit"
-	"github.com/JiangHe12/opskit-core/safety"
+	"github.com/JiangHe12/opskit-core/v2/apperrors"
+	"github.com/JiangHe12/opskit-core/v2/audit"
+	"github.com/JiangHe12/opskit-core/v2/safety"
 
 	"github.com/JiangHe12/mqgov-cli/internal/mqclass"
 	"github.com/JiangHe12/mqgov-cli/internal/mqgov"
@@ -41,6 +41,7 @@ func newACLListCmd(f *cliFlags) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			defer backend.Close()
 			opTarget := operationTargetFromBroker(f, backend)
 			manager, ok := mqgov.SupportsACL(backend)
 			if !ok {
@@ -63,8 +64,7 @@ func newACLListCmd(f *cliFlags) *cobra.Command {
 			for _, item := range items {
 				rows = append(rows, []string{item.Principal, item.Host, item.Vhost, item.ResourceType, item.ResourceName, item.PatternType, item.Operation, item.Permission})
 			}
-			targetTable(f, []string{"PRINCIPAL", "HOST", "VHOST", "RESOURCE TYPE", "RESOURCE NAME", "PATTERN", "OPERATION", "PERMISSION"}, rows, opTarget)
-			return nil
+			return targetTable(f, []string{"PRINCIPAL", "HOST", "VHOST", "RESOURCE TYPE", "RESOURCE NAME", "PATTERN", "OPERATION", "PERMISSION"}, rows, opTarget)
 		},
 	}
 	cmd.Flags().StringVar(&flags.principal, "principal", "", "ACL principal filter")
@@ -81,10 +81,19 @@ func newACLGrantCmd(f *cliFlags) *cobra.Command {
 		Short: "Grant a broker ACL",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			if contextPlanOnly(f) {
+				binding := aclBinding(flags)
+				return printBrokerChangePlan(f, "grant", "acl", binding.ResourceType+"/"+binding.ResourceName, map[string]any{
+					"principal":  binding.Principal,
+					"operation":  binding.Operation,
+					"permission": binding.Permission,
+				})
+			}
 			backend, meta, err := buildBroker(f)
 			if err != nil {
 				return err
 			}
+			defer backend.Close()
 			opTarget := operationTargetFromBroker(f, backend)
 			manager, ok := mqgov.SupportsACL(backend)
 			if !ok {
@@ -99,11 +108,19 @@ func newACLGrantCmd(f *cliFlags) *cobra.Command {
 			if err := classifyAndAuthorize(f, meta, mqclass.OperationGrantACL, mqclass.Target{ACL: target}, allow); err != nil {
 				return err
 			}
-			if err := manager.GrantACL(cmd.Context(), binding); err != nil {
-				appendAuditWarn(f, auditEventACL, meta, aclAuditTarget(binding), audit.StatusFailed, aclBindingDiff(binding), err)
+			handle, err := beginMutationAudit(f, mutationAuditSpec{
+				Action:   "mq.acl.grant",
+				Context:  meta,
+				Target:   aclAuditTarget(binding),
+				Metadata: mutationValueMetadata("mq.acl.grant", binding),
+			})
+			if err != nil {
 				return err
 			}
-			appendAuditWarn(f, auditEventACL, meta, aclAuditTarget(binding), audit.StatusSuccess, aclBindingDiff(binding), nil)
+			operationErr := manager.GrantACL(cmd.Context(), binding)
+			if err := finishMutationAudit(handle, mutationAuditOutcome{}, operationErr); err != nil {
+				return err
+			}
 			return targetJSONData(f, "ACLBinding", binding, opTarget, operationTargetWrite)
 		},
 	}
@@ -118,10 +135,19 @@ func newACLRevokeCmd(f *cliFlags) *cobra.Command {
 		Short: "Revoke a broker ACL",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			if contextPlanOnly(f) {
+				binding := aclBinding(flags)
+				return printBrokerChangePlan(f, "revoke", "acl", binding.ResourceType+"/"+binding.ResourceName, map[string]any{
+					"principal":  binding.Principal,
+					"operation":  binding.Operation,
+					"permission": binding.Permission,
+				})
+			}
 			backend, meta, err := buildBroker(f)
 			if err != nil {
 				return err
 			}
+			defer backend.Close()
 			opTarget := operationTargetFromBroker(f, backend)
 			manager, ok := mqgov.SupportsACL(backend)
 			if !ok {
@@ -131,11 +157,19 @@ func newACLRevokeCmd(f *cliFlags) *cobra.Command {
 			if err := classifyAndAuthorize(f, meta, mqclass.OperationRevokeACL, mqclass.Target{ACL: aclClassTarget(flags)}, allowDestructiveACL); err != nil {
 				return err
 			}
-			if err := manager.RevokeACL(cmd.Context(), binding); err != nil {
-				appendAuditWarn(f, auditEventACL, meta, aclAuditTarget(binding), audit.StatusFailed, aclBindingDiff(binding), err)
+			handle, err := beginMutationAudit(f, mutationAuditSpec{
+				Action:   "mq.acl.revoke",
+				Context:  meta,
+				Target:   aclAuditTarget(binding),
+				Metadata: mutationValueMetadata("mq.acl.revoke", binding),
+			})
+			if err != nil {
 				return err
 			}
-			appendAuditWarn(f, auditEventACL, meta, aclAuditTarget(binding), audit.StatusSuccess, aclBindingDiff(binding), nil)
+			operationErr := manager.RevokeACL(cmd.Context(), binding)
+			if err := finishMutationAudit(handle, mutationAuditOutcome{}, operationErr); err != nil {
+				return err
+			}
 			return targetJSONData(f, "ACLBinding", binding, opTarget, operationTargetWrite)
 		},
 	}
@@ -180,17 +214,6 @@ func aclClassTarget(flags aclFlags) mqclass.ACLTarget {
 
 func aclAuditTarget(binding mqgov.ACLBinding) audit.EventTarget {
 	return audit.EventTarget{ResourceType: "acl", Resource: binding.ResourceType + "/" + binding.ResourceName}
-}
-
-func aclBindingDiff(binding mqgov.ACLBinding) string {
-	return "principal=" + binding.Principal +
-		" host=" + binding.Host +
-		" vhost=" + binding.Vhost +
-		" resourceType=" + binding.ResourceType +
-		" resourceName=" + binding.ResourceName +
-		" patternType=" + binding.PatternType +
-		" operation=" + binding.Operation +
-		" permission=" + binding.Permission
 }
 
 func aclFilterDiff(filter mqgov.ACLFilter) string {

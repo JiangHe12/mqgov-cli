@@ -5,12 +5,35 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
+	"strings"
 	"testing"
 
-	"github.com/JiangHe12/opskit-core/apperrors"
+	"github.com/JiangHe12/opskit-core/v2/apperrors"
 
 	"github.com/JiangHe12/mqgov-cli/internal/mqgov"
 )
+
+type closeIdleTransport struct {
+	http.RoundTripper
+	calls int
+}
+
+func (transport *closeIdleTransport) CloseIdleConnections() {
+	transport.calls++
+}
+
+func TestCloseIsIdempotent(t *testing.T) {
+	t.Parallel()
+	transport := &closeIdleTransport{}
+	backend := &Broker{httpClient: &http.Client{Transport: transport}}
+
+	backend.Close()
+	backend.Close()
+	if transport.calls != 1 {
+		t.Fatalf("CloseIdleConnections() calls = %d, want 1", transport.calls)
+	}
+}
 
 func TestListGroupsNotSupportedWithoutTopic(t *testing.T) {
 	backend := &Broker{}
@@ -41,6 +64,175 @@ func TestSupportsSchemaTrue(t *testing.T) {
 	}
 	if _, ok := mqgov.SupportsSchema(backend); !ok {
 		t.Fatalf("SupportsSchema capability assertion = false, want true")
+	}
+}
+
+func TestPulsarTLSRejectsExplicitPlaintextEndpoints(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		opts Options
+	}{
+		{
+			name: "service URL",
+			opts: Options{
+				TLS:        true,
+				ServiceURL: "pulsar://pulsar.example:6650",
+				AdminURL:   "https://pulsar.example:8443",
+			},
+		},
+		{
+			name: "admin URL",
+			opts: Options{
+				TLS:        true,
+				ServiceURL: "pulsar+ssl://pulsar.example:6651",
+				AdminURL:   "http://pulsar.example:8080",
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			_, err := New(tt.opts)
+			if err == nil {
+				t.Fatal("New() error = nil, want plaintext endpoint rejection")
+			}
+			if got := apperrors.AsAppError(err).Code; got != apperrors.CodeUsageError {
+				t.Fatalf("New() error = %v, code = %s, want %s", err, got, apperrors.CodeUsageError)
+			}
+		})
+	}
+}
+
+func TestPulsarTLSDefaultsUseSecureEndpoints(t *testing.T) {
+	t.Parallel()
+
+	backend, err := New(Options{
+		TLS:        true,
+		TLSPinPath: filepath.Join(t.TempDir(), "tls_known_hosts"),
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	t.Cleanup(backend.client.Close)
+	if !strings.HasPrefix(backend.opts.ServiceURL, "pulsar+ssl://") {
+		t.Fatalf("ServiceURL = %q, want pulsar+ssl", backend.opts.ServiceURL)
+	}
+	if !strings.HasPrefix(backend.opts.AdminURL, "https://") {
+		t.Fatalf("AdminURL = %q, want https", backend.opts.AdminURL)
+	}
+	if backend.tlsConfig == nil {
+		t.Fatal("tlsConfig = nil, want TLS config")
+	}
+}
+
+func TestPulsarCompatibilityFailsClosed(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		body       string
+		compatible bool
+		wantErr    bool
+	}{
+		{name: "compatible", body: `{"compatible":true}`, compatible: true},
+		{name: "incompatible alias", body: `{"is_compatible":false}`, compatible: false},
+		{name: "empty", body: "", wantErr: true},
+		{name: "malformed", body: `{`, wantErr: true},
+		{name: "missing compatibility field", body: `{"message":"accepted"}`, wantErr: true},
+		{name: "conflicting fields", body: `{"compatible":true,"is_compatible":false}`, wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			compatible, _, err := pulsarCompatibility([]byte(tt.body))
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("pulsarCompatibility() error = nil, want fail-closed error")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("pulsarCompatibility() error = %v", err)
+			}
+			if compatible != tt.compatible {
+				t.Fatalf("pulsarCompatibility() compatible = %t, want %t", compatible, tt.compatible)
+			}
+		})
+	}
+}
+
+func TestPulsarOffsetResetRefusesTargetsWithoutReliableImpact(t *testing.T) {
+	t.Parallel()
+	backend := &Broker{}
+	for _, target := range []string{"", "earliest", "datetime:2026-07-20T00:00:00Z", "offset:10", "shift:-1"} {
+		t.Run(target, func(t *testing.T) {
+			t.Parallel()
+			_, err := backend.PlanOffsetReset(context.Background(), mqgov.OffsetPlanRequest{
+				Group:     mqgov.GroupCoordinate{Group: "billing"},
+				Topic:     mqgov.TopicCoordinate{Topic: "orders"},
+				To:        target,
+				DryRun:    true,
+				Partition: -1,
+			})
+			if got := apperrors.AsAppError(err).Code; got != apperrors.CodeNotImplemented {
+				t.Fatalf("PlanOffsetReset(%q) code = %s, want %s; err=%v", target, got, apperrors.CodeNotImplemented, err)
+			}
+		})
+	}
+}
+
+func TestPulsarLatestResetImpactUsesPerPartitionBacklog(t *testing.T) {
+	t.Parallel()
+	stats := topicStats{
+		Subscriptions: map[string]subscriptionStat{"billing": {MsgBacklog: 999}},
+		Partitions: map[string]topicStats{
+			"persistent://public/default/orders-partition-1": {
+				Subscriptions: map[string]subscriptionStat{"billing": {MsgBacklog: 2}},
+			},
+			"persistent://public/default/orders-partition-0": {
+				Subscriptions: map[string]subscriptionStat{"billing": {MsgBacklog: 5}},
+			},
+		},
+	}
+
+	impact, total, err := pulsarLatestResetImpact(stats, "billing")
+	if err != nil {
+		t.Fatalf("pulsarLatestResetImpact() error = %v", err)
+	}
+	if total != 7 || len(impact) != 2 {
+		t.Fatalf("impact = %+v total=%d, want two partitions totaling 7", impact, total)
+	}
+	if impact[0].Partition != 0 || impact[0].Count != 5 || impact[1].Partition != 1 || impact[1].Count != 2 {
+		t.Fatalf("impact = %+v, want partition 0=5 and partition 1=2", impact)
+	}
+}
+
+func TestPulsarLatestResetImpactFailsClosedOnUnparseablePartition(t *testing.T) {
+	t.Parallel()
+	stats := topicStats{Partitions: map[string]topicStats{
+		"orders-shard-a": {Subscriptions: map[string]subscriptionStat{"billing": {MsgBacklog: 1}}},
+	}}
+
+	_, _, err := pulsarLatestResetImpact(stats, "billing")
+	if got := apperrors.AsAppError(err).Code; got != apperrors.CodeNotImplemented {
+		t.Fatalf("pulsarLatestResetImpact() code = %s, want %s; err=%v", got, apperrors.CodeNotImplemented, err)
+	}
+}
+
+func TestPulsarDLQMutationCapabilitiesFailClosed(t *testing.T) {
+	t.Parallel()
+	backend := &Broker{}
+	capabilities := backend.Capabilities()
+	if capabilities.SupportsDLQRedrive || capabilities.SupportsDLQPurge {
+		t.Fatalf("DLQ mutation capabilities = %+v, want redrive/purge disabled", capabilities)
+	}
+	if _, err := backend.RedriveDLQ(context.Background(), mqgov.DLQRedriveRequest{}); apperrors.AsAppError(err).Code != apperrors.CodeNotImplemented {
+		t.Fatalf("RedriveDLQ() error = %v, want NotImplemented", err)
+	}
+	if _, err := backend.PurgeDLQ(context.Background(), mqgov.DLQPurgeRequest{}); apperrors.AsAppError(err).Code != apperrors.CodeNotImplemented {
+		t.Fatalf("PurgeDLQ() error = %v, want NotImplemented", err)
 	}
 }
 

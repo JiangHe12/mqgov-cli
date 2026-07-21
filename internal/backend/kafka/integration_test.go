@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/JiangHe12/opskit-core/apperrors"
+	"github.com/JiangHe12/opskit-core/v2/apperrors"
 
 	"github.com/JiangHe12/mqgov-cli/internal/mqgov"
 )
@@ -160,19 +160,8 @@ func TestKafkaIntegration(t *testing.T) {
 	if dlqPeek.Count != 1 || dlqPeek.Messages[0].BodySHA256 != dlqProduced.Fingerprint.BodySHA256 {
 		t.Fatalf("PeekDLQ() = %+v, want produced fingerprint %+v", dlqPeek, dlqProduced.Fingerprint)
 	}
-	dlqPlan, err := dlqManager.RedriveDLQ(ctx, mqgov.DLQRedriveRequest{DLQ: dlqCoord, Target: coord, Count: 1, DryRun: true})
-	if err != nil {
-		t.Fatalf("RedriveDLQ(dry-run) error = %v", err)
-	}
-	if dlqPlan.Total != 1 {
-		t.Fatalf("RedriveDLQ(dry-run).Total = %d, want 1", dlqPlan.Total)
-	}
-	dlqRedriven, err := dlqManager.RedriveDLQ(ctx, mqgov.DLQRedriveRequest{DLQ: dlqCoord, Target: coord, Count: 1})
-	if err != nil {
-		t.Fatalf("RedriveDLQ() error = %v", err)
-	}
-	if dlqRedriven.Total != 1 {
-		t.Fatalf("RedriveDLQ().Total = %d, want 1", dlqRedriven.Total)
+	if _, err := dlqManager.RedriveDLQ(ctx, mqgov.DLQRedriveRequest{DLQ: dlqCoord, Target: coord, Count: 1, DryRun: true}); apperrors.AsAppError(err).Code != apperrors.CodeNotImplemented {
+		t.Fatalf("RedriveDLQ(dry-run) error = %v, want NotImplemented", err)
 	}
 	dlqPurge, err := dlqManager.PurgeDLQ(ctx, mqgov.DLQPurgeRequest{DLQ: dlqCoord, DryRun: true})
 	if err != nil {

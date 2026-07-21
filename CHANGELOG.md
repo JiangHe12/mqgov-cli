@@ -2,6 +2,27 @@
 
 All notable changes to this project are documented in this file.
 
+## v0.6.0
+
+### Added
+
+- Added two-phase mutation auditing with intent-before-effect, correlated outcomes, and commit-aware recovery of definitely uncommitted audit outcomes.
+
+### Changed
+
+- **BREAKING**: Context and role changes plus confirmed audit pruning are fixed R3 governance operations requiring their precise `--allow-*` flags.
+- Updated to `opskit-core/v2` v2.0.0. Confirmed audit pruning now validates authenticated history, advances checkpoints safely, and records its intent and outcome in a sibling control log.
+
+### Fixed
+
+- Made broker capability reporting and destructive behavior fail closed: RabbitMQ redrive uses publisher confirms and removes only acknowledged source messages, Kafka refuses non-atomic DLQ redrive, and Pulsar refuses unsupported redrive, purge, and non-measurable offset resets.
+- RabbitMQ peek now restores the complete unacknowledged batch, Pulsar latest reset derives impact from live partition backlog, TLS mode requires secure endpoint schemes, and broker clients now release their transport resources.
+- Context import validates all targets before writing and compensates rollback-safe credential changes on config-commit failure. Vault slots are matched by address, namespace, and path, collisions are rejected, and rollback fails closed without atomic compare-and-swap; file exports use bounded atomic replacement and reject reserved-path aliases.
+
+### Security
+
+- Authorization identity now derives from the local OS user and hostname. Mutation audit and replay storage redact payloads and secrets, queue only definitely uncommitted outcomes, and quarantine indeterminate replay.
+
 ## v0.5.10
 
 ### Changed

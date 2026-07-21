@@ -59,7 +59,7 @@ It's built on the shared [`opskit-core`](https://github.com/JiangHe12/opskit-cor
 | **offset lag / reset** | ✅ | ✅ (cursor) | ❌ (no offsets) | ❌ |
 | alter partitions | ✅ | ✅ | ❌ | ❌ |
 | purge | ✅ | ✅ | ✅ | ❌ |
-| **DLQ list / peek / redrive / purge** | list ❌; explicit topic peek/redrive/purge ✅ | ✅ `{topic}-{subscription}-DLQ` | ✅ DLX queues | list ✅ `%DLQ%group`; others ❌ |
+| **DLQ list / peek / redrive / purge** | explicit topic peek/purge ✅; list/redrive ❌ | list/peek ✅ `{topic}-{subscription}-DLQ`; redrive/purge ❌ | ✅ DLX queues | list ✅ `%DLQ%group`; others ❌ |
 | **ACL list / grant / revoke** | ✅ | ✅ namespace/topic permissions | ✅ user-vhost permissions | ❌ `NOT_IMPLEMENTED`³ |
 | **schema list / describe / check / register / delete** | ✅ Confluent Schema Registry | ✅ built-in admin schema API | ❌ `NOT_IMPLEMENTED` | ❌ `NOT_IMPLEMENTED` |
 
@@ -81,7 +81,7 @@ This installs a tiny launcher; on first run it downloads the right pre-built bin
 <summary>Other ways to install</summary>
 
 - **Direct download** — grab the binary for your platform from the [Releases page](https://github.com/JiangHe12/mqgov-cli/releases), verify it against `checksums.txt` (cosign-signed), put it on your `PATH`, and rename it to `mqgov`.
-- **From source** — `go install github.com/JiangHe12/mqgov-cli@latest` (Go 1.26+).
+- **From source** — `go install github.com/JiangHe12/mqgov-cli@latest` (Go 1.25+).
 - **Mirror / air-gapped** — set `MQGOV_DOWNLOAD_MIRROR=<base-url>` to fetch the binary from your own mirror. Deprecated `MQGOV_CLI_DOWNLOAD_MIRROR` is still accepted.
 
 Verify the install:
@@ -98,9 +98,9 @@ mqgov doctor          # checks context, backend reachability, and audit-log writ
 ## 🚀 Quick start (60 seconds)
 
 ```bash
-# 1. Point mqgov at your broker (stored as a reusable "context")
-mqgov ctx set dev --backend kafka --brokers 127.0.0.1:9092
-mqgov ctx use dev
+# 1. Point mqgov at your broker (context control changes are always R3)
+mqgov ctx set dev --backend kafka --brokers 127.0.0.1:9092 --yes --ticket OPS-123 --allow-context-change
+mqgov ctx use dev --yes --ticket OPS-123 --allow-context-change
 mqgov ctx test                       # ping the broker through the context
 
 # 2. Read something — reads are always free (R0), no flags needed
@@ -129,12 +129,12 @@ Every command is sorted into one of four **risk tiers** by the fail-closed `mqcl
 
 | Tier | What it covers | What you must provide |
 |:---:|---|---|
-| **R0** | Reads & previews (`topic list/describe`, `group list/lag`, `message peek`, `message tail`, `dlq list/peek`, `acl list`, `schema list/describe/check`, `fleet status/topics`, `*-dry-run`, `audit query/verify/prune`, `doctor`) | Nothing — but it's still audited |
+| **R0** | Reads & previews (`topic list/describe`, `group list/lag`, `message peek`, `message tail`, `dlq list/peek`, `acl list`, `schema list/describe/check`, `fleet status/topics`, `*-dry-run`, `audit query/verify`, `audit prune` preview, `doctor`) | Nothing — but it's still audited |
 | **R1** | Ordinary writes (`message produce`, target side of `message mirror`, `topic create`, `schema register` for a new subject) | `--yes` (or an interactive confirmation) |
 | **R2** | Elevated mutations (`topic alter`, `group create/delete`, `acl grant`, `schema register` for an existing subject, produce/mirror to a **protected** topic) | `--yes` **and** a non-empty `--ticket` |
-| **R3** | Destructive / irreversible (`group reset-offset`, `topic purge`, `topic delete`, `schema delete`, `dlq redrive`, `dlq purge`, broad `acl grant`, `acl revoke`, produce/mirror to an **internal/system** topic) | The above **plus** the exact `--allow-*` flag |
+| **R3** | Destructive / irreversible operations (`group reset-offset`, topic/DLQ purge, topic/schema delete, supported DLQ redrive, broad ACL changes, internal-topic produce/mirror) and governance-control changes (`ctx set/use/delete/import/migrate-credentials`, `ctx role set/unset`, confirmed `audit prune`) | The above **plus** the exact `--allow-*` flag |
 
-The R3 allow flags: `--allow-offset-reset`, `--allow-topic-purge`, `--allow-topic-delete`, `--allow-destructive-acl`, `--allow-internal-produce`, `--allow-schema-delete`.
+The R3 allow flags: `--allow-offset-reset`, `--allow-topic-purge`, `--allow-topic-delete`, `--allow-destructive-acl`, `--allow-internal-produce`, `--allow-schema-delete`, `--allow-context-change`, `--allow-context-delete`, `--allow-role-change`, `--allow-audit-prune`.
 
 **Protected contexts, protected topics, and internal/system topics raise the tier by one.** For example, producing to `__consumer_offsets` is treated as a destructive R3 operation and needs `--allow-internal-produce`.
 
@@ -143,6 +143,13 @@ Three rules keep this safe — especially for automation:
 1. **Blast radius comes from the tool, not a guess.** Use `--dry-run` / `--plan` to see the exact per-partition impact. Never estimate it by reasoning.
 2. **`mqclass` is fail-closed and structure-aware.** All offset changes, purge, topic delete, ACL revoke, and broad ACL grants are pinned R3; wildcard/glob targets escalate; an unknown operation fails closed to the highest tier — it never falls to R0.
 3. **🤖 AI agents must never invent `--ticket`, `--allow-*`, or a high-risk `--yes`.** Those are *human* authorization inputs. An agent should surface "this needs approval X" to its operator and stop.
+
+Authorization and audit identity come only from the local OS
+`username@hostname`. `--operator`, `MQGOV_OPERATOR`, and
+`MQGOV_CLI_OPERATOR` are compatibility inputs and are ignored for identity.
+This does not separate an AI process from a human process under the same OS
+account; that requires an external signed approval source or a separately
+protected operator account.
 
 ---
 
@@ -180,10 +187,11 @@ mqgov group reset-offset <group> <topic> --to <target> --dry-run -o json        
 mqgov group reset-offset <group> <topic> --to <target> --yes --ticket <t> --allow-offset-reset   # R3
 
 #   --to: earliest | latest | offset:N | datetime:<RFC3339> | shift:±N
-#   (offset:N / shift:N are Kafka-only; unsupported targets/backends return a clear error)
+#   (Pulsar reset supports only latest, whose live per-partition backlog is measurable;
+#    other targets and unsupported backends return NOT_IMPLEMENTED before mutation intent)
 ```
 
-Offsets are a Kafka and Pulsar concept. On RabbitMQ and RocketMQ, `group lag` / `reset-offset` fail closed with `NOT_IMPLEMENTED`.
+Offsets are a Kafka and Pulsar concept. Pulsar reset supports only `--to latest`; mqgov refuses earliest/datetime/absolute/shift resets because Pulsar does not expose a reliable affected-message count for them. On RabbitMQ and RocketMQ, `group lag` / `reset-offset` fail closed with `NOT_IMPLEMENTED`.
 </details>
 
 <details>
@@ -197,9 +205,9 @@ mqgov message mirror  <source-topic> --to-context <ctx> --to-topic <topic> --lim
 mqgov message produce <topic> [--key <k>] [--body <text>] --yes                    # R1 (R3 + --allow-internal-produce for internal topics)
 ```
 
-`peek` and `tail` never consume a message or move a cursor, and return only sha256 fingerprints (`keySha256`, `bodySha256`, size, optional timestamp) — never the body. `tail` is bounded by `--max-messages` and `--timeout`; `--follow` streams new messages only until those bounds or cancellation.
+`peek` and `tail` never consume a message or move a cursor, and return only sha256 fingerprints (`keySha256`, `bodySha256`, size, optional timestamp) — never the body. Peek counts must be positive; results preserve broker read order, never exceed `--count`, and report the actual shorter count at the current boundary. RabbitMQ holds the distinct batch unacknowledged and requeues it together only after fingerprinting; a requeue failure fails the command. `tail` is bounded by `--max-messages` and `--timeout`; `--follow` streams new messages only until those bounds or cancellation.
 
-`message mirror` is a bounded one-shot copy, never a daemon. It performs two independent authorizations: a source-side non-destructive read against the source context, then a target-side produce against `--to-context`. `--dry-run` / `--plan` is an R0 preview that reads/counts but does not produce. Kafka and Pulsar can be mirror sources; RabbitMQ and RocketMQ source mirroring fail closed with `NOT_IMPLEMENTED` because their available read APIs cannot guarantee non-destructive full-message reads. Keys, bodies, and headers flow only in process memory; audit records source/target/count and body sha256 aggregation only. Kafka supports `--from earliest|latest|offset:N|timestamp:<RFC3339>` and `--partition`; Pulsar supports `earliest|latest|timestamp:<RFC3339>` and all-partition reads. Headers are copied where both backends can express string/byte headers; unsupported source concepts are not fabricated.
+`message mirror` is a bounded one-shot copy, never a daemon. It resolves both topics once, then performs two independent authorizations: a source-side non-destructive read under the source context policy and a target-side produce under the persisted `--to-context` policy. Either failure occurs before message reads or target writes. Source and destination are audited separately with their own context, target, request/result fingerprint, and count; bodies, keys, and headers never enter audit. `--dry-run` / `--plan` reads/counts but does not produce. Kafka and Pulsar can be mirror sources; RabbitMQ and RocketMQ source mirroring fail closed with `NOT_IMPLEMENTED`. Kafka supports `--from earliest|latest|offset:N|timestamp:<RFC3339>` and `--partition`; Pulsar supports `earliest|latest|timestamp:<RFC3339>` and all-partition reads.
 </details>
 
 <details>
@@ -208,13 +216,13 @@ mqgov message produce <topic> [--key <k>] [--body <text>] --yes                 
 ```bash
 mqgov dlq list [--topic <source-or-dlq>] [--group <group-or-sub>] [--pattern <name|glob>] -o json     # R0
 mqgov dlq peek <dlq> [--topic <source>] [--group <group-or-sub>] [--count N] -o json                   # R0, fingerprints only
-mqgov dlq redrive <dlq> --target <live-topic> [--count N] --dry-run -o json                            # R0 preview
-mqgov dlq redrive <dlq> --target <live-topic> [--count N] --yes --ticket <t> --allow-internal-produce  # R3
+mqgov dlq redrive <dlq> --target <live-topic> [--count N] --dry-run -o json                            # R0 preview (RabbitMQ)
+mqgov dlq redrive <dlq> --target <live-topic> [--count N] --yes --ticket <t> --allow-internal-produce  # R3 (RabbitMQ)
 mqgov dlq purge <dlq> --dry-run -o json                                                                 # R0 preview
 mqgov dlq purge <dlq> --yes --ticket <t> --allow-topic-purge                                           # R3
 ```
 
-DLQ mapping is backend-native and honest: RocketMQ lists `%DLQ%{consumerGroup}` topics only; RabbitMQ treats DLQs as ordinary queues fed by a dead-letter exchange; Kafka has no native DLQ and never auto-discovers one, so use an explicit DLQ topic for peek/redrive/purge; Pulsar uses `{topic}-{subscription}-DLQ`. Unsupported verbs return `NOT_IMPLEMENTED`.
+DLQ mapping is backend-native and honest: RabbitMQ redrive publishes with confirms and removes only acknowledged source messages; Kafka explicit topics support peek/purge but redrive is refused because an exact bounded copy-and-remove cannot be atomic; Pulsar supports list/peek for `{topic}-{subscription}-DLQ` but refuses redrive/purge because Reader/skip-cursor behavior cannot provide those deletion semantics; RocketMQ lists `%DLQ%{consumerGroup}` topics only. Unsupported verbs return `NOT_IMPLEMENTED`, never a successful copy-only or no-op result.
 
 Redrive is governed as internal produce: dry-run is a read-only preview and real execution requires `--allow-internal-produce`. Audit remains fingerprint/count-only and never stores message body, key, or headers.
 </details>
@@ -291,14 +299,28 @@ mqgov ctx set <name> --backend rocketmq --nameservers <h:p,h:p> [--broker-addr <
 mqgov ctx use|list|current|delete|export|import|role|migrate-credentials|test
 mqgov ctx role set|unset|list <context>
 #   secrets: --password <pw|token|secretKey> and --schema-registry-password <pw> go through --credential-backend <encrypted-file|keychain|...>  (a non-plain backend is required)
-#   ctx export redacts credentials by default; run ctx migrate-credentials --dry-run before ctx migrate-credentials --yes.
+#   Preview any context-control change with --plan; previews do not authorize or mutate.
+#   Apply set/use/import/migrate with --yes --ticket <t> --allow-context-change; delete uses --allow-context-delete; role set/unset uses --allow-role-change.
+#   ctx export redacts credentials by default; run ctx migrate-credentials --dry-run before its approved apply.
+#   ctx import validates every context and credential backend before writing. Credential writes are compensated if config commit fails; an unsafe or incomplete compensation returns an explicit error and uncertain audit outcome.
+#   File exports reject context/audit/spool/lock aliases and use a private, fsynced temporary file plus atomic replacement.
 #   RabbitMQ: prefer --username plus MQGOV_PASSWORD for non-interactive runs; to persist a password, use --password with keychain or encrypted-file.
 #   If --amqp-url contains userinfo, explicit --username and password sources override it for both AMQP and management API auth.
 
 # Audit (tamper-evident, fingerprint-only)
 mqgov audit query  [--since 24h] [--type <t>] [--operator <o>] [--status <s>] [--limit 100] -o json
 mqgov audit verify [--strict] -o json
-mqgov audit prune  (--before <…> | --older-than <days> | --keep-last <n>) [--yes|--confirm]  # dry-run unless confirmed
+mqgov audit prune  (--before <…> | --older-than <days> | --keep-last <n>)                    # R0 preview
+mqgov audit prune  (--before <…> | --older-than <days> | --keep-last <n>) --confirm --yes --ticket <t> --allow-audit-prune
+
+# Confirmed pruning uses the persisted current-context policy and is fixed R3;
+# --confirm and the complete R3 authorization are both required.
+# Confirmed pruning delegates authenticated-chain validation and checkpoint advancement to opskit-core/v2; its intent/outcome uses sibling `.<audit-base>-control` evidence.
+# Mutations persist an intent before touching the target and an outcome afterwards.
+# If an outcome is known not to be committed, mqgov returns AUDIT_INCOMPLETE and keeps it in <audit.log>.outcome-spool for replay before the next intent.
+# Replay is durable and ordered but intentionally at-least-once: a crash after append and before spool deletion can produce a duplicate outcome with the same mutationId.
+# Do not blindly retry AUDIT_INCOMPLETE. Repair audit storage and run audit query/verify; only definitely uncommitted queue entries are eligible for automatic replay.
+# opskit-core/v2 reports append commit state. mqgov only queues a safe retry after a known not-committed outcome; an indeterminate replay is renamed with `.indeterminate`, blocks later automatic replay, and must be reconciled by mutationId.
 
 # Diagnostics & ecosystem
 mqgov doctor -o json            # read-only health check (redacted output)
@@ -347,9 +369,15 @@ go test -count=1 ./...
 gofmt -l main.go cmd internal      # must print nothing
 golangci-lint run --timeout=5m
 go vet -tags=integration ./...
+CGO_ENABLED=0 go build ./...
+go mod tidy -diff
+npm pack --dry-run
 ```
 
 Real-backend integration tests (`//go:build integration`, env-gated, skipped by default) run against live Kafka/RabbitMQ/Pulsar/RocketMQ containers in the nightly `integration.yml` workflow; see [`docs/`](docs/) for how to run them locally with the bundled `docker-compose.*.yml` files.
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the full verification workflow and
+[SECURITY.md](SECURITY.md) for vulnerability reporting and security boundaries.
 
 mqgov-cli is built on the shared [`opskit-core`](https://github.com/JiangHe12/opskit-core) governance engine and is part of the **opskit** family of governed CLIs for AI agents — alongside [`dbgov-cli`](https://www.npmjs.com/package/dbgov-cli) (databases), [`srvgov-cli`](https://www.npmjs.com/package/srvgov-cli) (remote servers), and [`cfgov-cli`](https://www.npmjs.com/package/cfgov-cli) (config centers).
 

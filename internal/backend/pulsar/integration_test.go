@@ -13,7 +13,7 @@ import (
 
 	pulsarclient "github.com/apache/pulsar-client-go/pulsar"
 
-	"github.com/JiangHe12/opskit-core/apperrors"
+	"github.com/JiangHe12/opskit-core/v2/apperrors"
 
 	"github.com/JiangHe12/mqgov-cli/internal/mqgov"
 )
@@ -213,10 +213,11 @@ func TestPulsarIntegration(t *testing.T) {
 		t.Fatalf("tail changed backlog: before=%d after=%d", before.Total, afterTail.Total)
 	}
 	plan, err := backend.PlanOffsetReset(ctx, mqgov.OffsetPlanRequest{
-		Group:  mqgov.GroupCoordinate{Cluster: "integration", Namespace: "public/default", Group: sub},
-		Topic:  coord,
-		To:     "latest",
-		DryRun: true,
+		Group:     mqgov.GroupCoordinate{Cluster: "integration", Namespace: "public/default", Group: sub},
+		Topic:     coord,
+		To:        "latest",
+		DryRun:    true,
+		Partition: -1,
 	})
 	if err != nil {
 		t.Fatalf("PlanOffsetReset() error = %v", err)
@@ -225,9 +226,10 @@ func TestPulsarIntegration(t *testing.T) {
 		t.Fatalf("plan total = %d, want %d", plan.Total, before.Total)
 	}
 	if _, err := backend.ResetOffset(ctx, mqgov.OffsetPlanRequest{
-		Group: mqgov.GroupCoordinate{Cluster: "integration", Namespace: "public/default", Group: sub},
-		Topic: coord,
-		To:    "latest",
+		Group:     mqgov.GroupCoordinate{Cluster: "integration", Namespace: "public/default", Group: sub},
+		Topic:     coord,
+		To:        "latest",
+		Partition: -1,
 	}); err != nil {
 		t.Fatalf("ResetOffset() error = %v", err)
 	}
@@ -280,26 +282,11 @@ func TestPulsarIntegration(t *testing.T) {
 	if dlqPeek.Count != 1 || dlqPeek.Messages[0].BodySHA256 != dlqProduced.Fingerprint.BodySHA256 {
 		t.Fatalf("PeekDLQ() = %+v, want %+v", dlqPeek, dlqProduced.Fingerprint)
 	}
-	redrivePlan, err := dlqManager.RedriveDLQ(ctx, mqgov.DLQRedriveRequest{DLQ: dlqCoord, Target: coord, Topic: topic, Group: sub, Count: 1, DryRun: true})
-	if err != nil {
-		t.Fatalf("RedriveDLQ(dry-run) error = %v", err)
+	if _, err := dlqManager.RedriveDLQ(ctx, mqgov.DLQRedriveRequest{DLQ: dlqCoord, Target: coord, Topic: topic, Group: sub, Count: 1, DryRun: true}); apperrors.AsAppError(err).Code != apperrors.CodeNotImplemented {
+		t.Fatalf("RedriveDLQ(dry-run) error = %v, want NotImplemented", err)
 	}
-	if redrivePlan.Total != 1 {
-		t.Fatalf("RedriveDLQ(dry-run).Total = %d, want 1", redrivePlan.Total)
-	}
-	redriven, err := dlqManager.RedriveDLQ(ctx, mqgov.DLQRedriveRequest{DLQ: dlqCoord, Target: coord, Topic: topic, Group: sub, Count: 1})
-	if err != nil {
-		t.Fatalf("RedriveDLQ() error = %v", err)
-	}
-	if redriven.Total != 1 {
-		t.Fatalf("RedriveDLQ().Total = %d, want 1", redriven.Total)
-	}
-	purgeDLQ, err := dlqManager.PurgeDLQ(ctx, mqgov.DLQPurgeRequest{DLQ: dlqCoord, Topic: topic, Group: sub, DryRun: true})
-	if err != nil {
-		t.Fatalf("PurgeDLQ(dry-run) error = %v", err)
-	}
-	if purgeDLQ.Total != 1 {
-		t.Fatalf("PurgeDLQ(dry-run).Total = %d, want 1", purgeDLQ.Total)
+	if _, err := dlqManager.PurgeDLQ(ctx, mqgov.DLQPurgeRequest{DLQ: dlqCoord, Topic: topic, Group: sub, DryRun: true}); apperrors.AsAppError(err).Code != apperrors.CodeNotImplemented {
+		t.Fatalf("PurgeDLQ(dry-run) error = %v, want NotImplemented", err)
 	}
 	if err := backend.DeleteTopic(ctx, coord); err != nil {
 		t.Fatalf("DeleteTopic() error = %v", err)

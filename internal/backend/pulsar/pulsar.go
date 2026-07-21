@@ -15,11 +15,12 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	pulsarclient "github.com/apache/pulsar-client-go/pulsar"
 
-	"github.com/JiangHe12/opskit-core/apperrors"
+	"github.com/JiangHe12/opskit-core/v2/apperrors"
 
 	"github.com/JiangHe12/mqgov-cli/internal/mqgov"
 	"github.com/JiangHe12/mqgov-cli/internal/tlspin"
@@ -45,6 +46,7 @@ type Broker struct {
 	client     pulsarclient.Client
 	httpClient *http.Client
 	tlsConfig  *tls.Config
+	close      sync.Once
 }
 
 type topicStats struct {
@@ -85,11 +87,7 @@ type pulsarSchemaPayload struct {
 }
 
 func New(opts Options) (*Broker, error) {
-	opts.Tenant = firstNonEmpty(opts.Tenant, "public")
-	opts.Namespace = firstNonEmpty(opts.Namespace, "default")
-	opts.ServiceURL = firstNonEmpty(opts.ServiceURL, "pulsar://127.0.0.1:6650")
-	opts.AdminURL = firstNonEmpty(opts.AdminURL, "http://127.0.0.1:8080")
-	baseTLSConfig, err := buildTLSConfig(opts)
+	opts, baseTLSConfig, err := prepareConnectionOptions(opts)
 	if err != nil {
 		return nil, err
 	}
@@ -137,6 +135,72 @@ func New(opts Options) (*Broker, error) {
 	return &Broker{opts: opts, client: client, httpClient: httpClient, tlsConfig: serviceTLSConfig}, nil
 }
 
+func (b *Broker) Close() {
+	if b == nil {
+		return
+	}
+	b.close.Do(func() {
+		if b.client != nil {
+			b.client.Close()
+		}
+		if b.httpClient != nil {
+			b.httpClient.CloseIdleConnections()
+		}
+	})
+}
+
+func prepareConnectionOptions(opts Options) (Options, *tls.Config, error) {
+	opts.Tenant = firstNonEmpty(opts.Tenant, "public")
+	opts.Namespace = firstNonEmpty(opts.Namespace, "default")
+	opts = normalizeConnectionURLs(opts)
+	if err := validateTLSConnectionURLs(opts); err != nil {
+		return Options{}, nil, err
+	}
+	baseTLSConfig, err := buildTLSConfig(opts)
+	if err != nil {
+		return Options{}, nil, err
+	}
+	return opts, baseTLSConfig, nil
+}
+
+func normalizeConnectionURLs(opts Options) Options {
+	if strings.TrimSpace(opts.ServiceURL) == "" {
+		opts.ServiceURL = "pulsar://127.0.0.1:6650"
+		if opts.TLS {
+			opts.ServiceURL = "pulsar+ssl://127.0.0.1:6651"
+		}
+	}
+	if strings.TrimSpace(opts.AdminURL) == "" {
+		opts.AdminURL = "http://127.0.0.1:8080"
+		if opts.TLS {
+			opts.AdminURL = "https://127.0.0.1:8443"
+		}
+	}
+	return opts
+}
+
+func validateTLSConnectionURLs(opts Options) error {
+	if !opts.TLS {
+		return nil
+	}
+	if err := requireEndpointScheme(opts.ServiceURL, "pulsar+ssl", "Pulsar service"); err != nil {
+		return err
+	}
+	return requireEndpointScheme(opts.AdminURL, "https", "Pulsar admin")
+}
+
+func requireEndpointScheme(rawURL, wantScheme, endpointName string) error {
+	parsed, err := url.Parse(strings.TrimSpace(rawURL))
+	if err != nil || parsed.Host == "" || !strings.EqualFold(parsed.Scheme, wantScheme) {
+		return apperrors.New(
+			apperrors.CodeUsageError,
+			fmt.Sprintf("%s TLS requires a %s:// URL", endpointName, wantScheme),
+			nil,
+		)
+	}
+	return nil
+}
+
 func (b *Broker) Ping(ctx context.Context) error {
 	_, err := b.adminJSON(ctx, http.MethodGet, "/admin/v2/namespaces/"+pathEscape(b.opts.Tenant)+"/"+pathEscape(b.opts.Namespace), nil)
 	return err
@@ -150,14 +214,14 @@ func (b *Broker) Capabilities() mqgov.Capabilities {
 	return mqgov.Capabilities{
 		Backend:            "pulsar",
 		ResourceTypes:      []string{"topic", "group", "message", "offset", "acl", "dlq", "schema"},
-		Verbs:              []string{"list", "describe", "lag", "peek", "tail", "produce", "mirror", "create", "alter", "delete", "purge", "reset-offset", "grant-acl", "revoke-acl", "redrive", "check-schema", "register-schema", "delete-schema"},
+		Verbs:              []string{"list", "describe", "lag", "peek", "tail", "produce", "mirror", "create", "alter", "delete", "purge", "reset-offset", "grant-acl", "revoke-acl", "check-schema", "register-schema", "delete-schema"},
 		SupportsOffsets:    true,
 		SupportsPartitions: true,
 		SupportsACL:        true,
 		SupportsDLQList:    true,
 		SupportsDLQPeek:    true,
-		SupportsDLQRedrive: true,
-		SupportsDLQPurge:   true,
+		SupportsDLQRedrive: false,
+		SupportsDLQPurge:   false,
 		SupportsSchema:     true,
 	}
 }
@@ -260,10 +324,20 @@ func (b *Broker) DeleteGroup(ctx context.Context, coord mqgov.GroupCoordinate) e
 }
 
 func (b *Broker) Peek(ctx context.Context, req mqgov.MessagePeekRequest) (mqgov.MessagePeekResult, error) {
-	count := req.Count
-	if count <= 0 {
-		count = 1
+	if req.Count <= 0 {
+		return mqgov.MessagePeekResult{}, apperrors.New(apperrors.CodeUsageError, "peek count must be positive", nil)
 	}
+	if req.Partition < 0 || req.Offset < 0 {
+		return mqgov.MessagePeekResult{}, apperrors.New(apperrors.CodeUsageError, "peek partition and offset must be non-negative", nil)
+	}
+	if req.Partition > 0 || req.Offset > 0 {
+		return mqgov.MessagePeekResult{}, apperrors.New(
+			apperrors.CodeNotImplemented,
+			"Pulsar peek does not support partition-specific or offset-specific reads",
+			nil,
+		)
+	}
+	count := req.Count
 	reader, err := b.client.CreateReader(pulsarclient.ReaderOptions{
 		Topic:                   b.fqn(req.Coordinate.Topic),
 		StartMessageID:          pulsarclient.EarliestMessageID(),
@@ -498,56 +572,32 @@ func (b *Broker) ListDLQs(ctx context.Context, opts mqgov.DLQListOptions) ([]mqg
 
 func (b *Broker) PeekDLQ(ctx context.Context, req mqgov.DLQPeekRequest) (mqgov.DLQPeekResult, error) {
 	dlq := b.resolvePulsarDLQ(req.DLQ.Topic, req.Topic, req.Group)
-	result, err := b.Peek(ctx, mqgov.MessagePeekRequest{Coordinate: mqgov.TopicCoordinate{Cluster: req.DLQ.Cluster, Namespace: req.DLQ.Namespace, Topic: dlq}, Count: req.Count})
+	result, err := b.Peek(ctx, mqgov.MessagePeekRequest{
+		Coordinate: mqgov.TopicCoordinate{Cluster: req.DLQ.Cluster, Namespace: req.DLQ.Namespace, Topic: dlq},
+		Partition:  req.Partition,
+		Offset:     req.Offset,
+		Count:      req.Count,
+	})
 	if err != nil {
 		return mqgov.DLQPeekResult{}, err
 	}
 	return mqgov.DLQPeekResult{DLQ: result.Coordinate, Count: result.Count, Messages: result.Messages}, nil
 }
 
-func (b *Broker) RedriveDLQ(ctx context.Context, req mqgov.DLQRedriveRequest) (mqgov.DLQRedriveResult, error) {
-	count := req.Count
-	if count <= 0 {
-		count = 100
-	}
-	dlq := b.resolvePulsarDLQ(req.DLQ.Topic, req.Topic, req.Group)
-	dlqCoord := mqgov.TopicCoordinate{Cluster: req.DLQ.Cluster, Namespace: req.DLQ.Namespace, Topic: dlq}
-	if req.DryRun {
-		messages, err := b.readPulsarMessages(ctx, dlq, count)
-		if err != nil {
-			return mqgov.DLQRedriveResult{}, err
-		}
-		total := int64(len(messages))
-		return mqgov.DLQRedriveResult{DLQ: dlqCoord, Target: req.Target, DryRun: true, Impact: []mqgov.PartitionImpact{{Partition: 0, Count: total}}, Total: total, Fingerprint: mqgov.ResourceFingerprints{Count: total}}, nil
-	}
-	messages, err := b.readPulsarMessages(ctx, dlq, count)
-	if err != nil {
-		return mqgov.DLQRedriveResult{}, err
-	}
-	for _, msg := range messages {
-		if _, err := b.Produce(ctx, mqgov.MessageProduceRequest{Coordinate: req.Target, Key: msg.Key, Body: msg.Body, Headers: msg.Headers}); err != nil {
-			return mqgov.DLQRedriveResult{}, err
-		}
-	}
-	total := int64(len(messages))
-	return mqgov.DLQRedriveResult{DLQ: dlqCoord, Target: req.Target, DryRun: false, Impact: []mqgov.PartitionImpact{{Partition: 0, Count: total}}, Total: total, Fingerprint: mqgov.ResourceFingerprints{Count: total}}, nil
+func (b *Broker) RedriveDLQ(context.Context, mqgov.DLQRedriveRequest) (mqgov.DLQRedriveResult, error) {
+	return mqgov.DLQRedriveResult{}, apperrors.New(
+		apperrors.CodeNotImplemented,
+		"Pulsar DLQ redrive cannot remove exactly the messages copied by a non-destructive reader",
+		nil,
+	)
 }
 
-func (b *Broker) PurgeDLQ(ctx context.Context, req mqgov.DLQPurgeRequest) (mqgov.DLQPurgeResult, error) {
-	dlq := b.resolvePulsarDLQ(req.DLQ.Topic, req.Topic, req.Group)
-	dlqCoord := mqgov.TopicCoordinate{Cluster: req.DLQ.Cluster, Namespace: req.DLQ.Namespace, Topic: dlq}
-	if req.DryRun {
-		total, err := b.countPulsarMessages(ctx, dlq)
-		if err != nil {
-			return mqgov.DLQPurgeResult{}, err
-		}
-		return mqgov.DLQPurgeResult{DLQ: dlqCoord, DryRun: true, Impact: []mqgov.PartitionImpact{{Partition: 0, Count: total}}, Total: total, Fingerprint: mqgov.ResourceFingerprints{Count: total}}, nil
-	}
-	result, err := b.PurgeTopic(ctx, mqgov.TopicPurgeRequest{Coordinate: mqgov.TopicCoordinate{Cluster: req.DLQ.Cluster, Namespace: req.DLQ.Namespace, Topic: dlq}, DLQ: true, DryRun: req.DryRun})
-	if err != nil {
-		return mqgov.DLQPurgeResult{}, err
-	}
-	return mqgov.DLQPurgeResult{DLQ: result.Coordinate, DryRun: result.DryRun, Impact: result.Impact, Total: result.Total, Fingerprint: result.Fingerprint}, nil
+func (b *Broker) PurgeDLQ(context.Context, mqgov.DLQPurgeRequest) (mqgov.DLQPurgeResult, error) {
+	return mqgov.DLQPurgeResult{}, apperrors.New(
+		apperrors.CodeNotImplemented,
+		"Pulsar DLQ purge cannot delete retained messages without deleting or recreating the topic",
+		nil,
+	)
 }
 
 func (b *Broker) ListACLs(ctx context.Context, filter mqgov.ACLFilter) ([]mqgov.ACLBinding, error) {
@@ -684,7 +734,10 @@ func (b *Broker) CheckCompatibility(ctx context.Context, req mqgov.SchemaCheckRe
 	if err != nil {
 		return mqgov.SchemaCheckResult{}, err
 	}
-	compatible, message := pulsarCompatibility(body)
+	compatible, message, err := pulsarCompatibility(body)
+	if err != nil {
+		return mqgov.SchemaCheckResult{}, backendErr(err)
+	}
 	return mqgov.SchemaCheckResult{Subject: shortTopicName(req.Subject), Version: firstNonEmpty(req.Version, "latest"), Compatible: compatible, SchemaHash: mqgov.SHA256Hex([]byte(req.Schema)), Message: message}, nil
 }
 
@@ -754,24 +807,8 @@ func (b *Broker) ResetOffset(ctx context.Context, req mqgov.OffsetPlanRequest) (
 	if err := b.ensureSubscriptionInactive(ctx, req.Group.Group, req.Topic.Topic); err != nil {
 		return mqgov.OffsetPlan{}, err
 	}
-	if strings.HasPrefix(req.To, "offset:") || strings.HasPrefix(req.To, "shift:") {
-		return mqgov.OffsetPlan{}, apperrors.New(apperrors.CodeUsageError, "unsupported for pulsar", nil)
-	}
 	path := b.topicPath(req.Topic.Topic) + "/subscription/" + pathEscape(req.Group.Group)
-	switch {
-	case req.To == "" || req.To == "earliest":
-		_, err = b.adminJSON(ctx, http.MethodPost, path+"/resetcursor/0", nil)
-	case req.To == "latest":
-		_, err = b.adminJSON(ctx, http.MethodPost, path+"/skip_all", nil)
-	case strings.HasPrefix(req.To, "datetime:"):
-		t, perr := time.Parse(time.RFC3339, strings.TrimPrefix(req.To, "datetime:"))
-		if perr != nil {
-			return mqgov.OffsetPlan{}, apperrors.New(apperrors.CodeUsageError, "invalid datetime target", perr)
-		}
-		_, err = b.adminJSON(ctx, http.MethodPost, path+"/resetcursor/"+strconv.FormatInt(t.UnixMilli(), 10), nil)
-	default:
-		return mqgov.OffsetPlan{}, apperrors.New(apperrors.CodeUsageError, "unsupported for pulsar", nil)
-	}
+	_, err = b.adminJSON(ctx, http.MethodPost, path+"/skip_all", nil)
 	if err != nil {
 		return mqgov.OffsetPlan{}, err
 	}
@@ -779,75 +816,118 @@ func (b *Broker) ResetOffset(ctx context.Context, req mqgov.OffsetPlanRequest) (
 }
 
 func (b *Broker) offsetPlan(ctx context.Context, req mqgov.OffsetPlanRequest) (mqgov.OffsetPlan, error) {
-	if strings.HasPrefix(req.To, "offset:") || strings.HasPrefix(req.To, "shift:") {
-		return mqgov.OffsetPlan{}, apperrors.New(apperrors.CodeUsageError, "unsupported for pulsar", nil)
+	if err := validatePulsarOffsetReset(req); err != nil {
+		return mqgov.OffsetPlan{}, err
 	}
 	stats, err := b.stats(ctx, req.Topic.Topic)
 	if err != nil {
 		return mqgov.OffsetPlan{}, err
 	}
-	backlog := stats.subscriptionBacklog(req.Group.Group)
-	target := backlog
-	if req.To == "latest" {
-		target = 0
+	impact, total, err := pulsarLatestResetImpact(stats, req.Group.Group)
+	if err != nil {
+		return mqgov.OffsetPlan{}, err
 	}
 	return mqgov.OffsetPlan{
 		Group:  req.Group,
 		Topic:  req.Topic,
 		To:     req.To,
 		DryRun: req.DryRun,
-		Impact: []mqgov.PartitionImpact{{Partition: 0, From: backlog, To: target, Count: abs64(backlog - target)}},
-		Total:  abs64(backlog - target),
+		Impact: impact,
+		Total:  total,
 	}, nil
 }
 
-func (b *Broker) readPulsarMessages(ctx context.Context, topic string, count int) ([]mqgov.Message, error) {
-	reader, err := b.client.CreateReader(pulsarclient.ReaderOptions{
-		Topic:                   b.fqn(topic),
-		StartMessageID:          pulsarclient.EarliestMessageID(),
-		StartMessageIDInclusive: true,
-		ReceiverQueueSize:       maxInt(count, 1),
-	})
-	if err != nil {
-		return nil, backendErr(err)
+func validatePulsarOffsetReset(req mqgov.OffsetPlanRequest) error {
+	if req.Partition >= 0 {
+		return apperrors.New(apperrors.CodeNotImplemented, "Pulsar partition-specific offset reset is not supported", nil)
 	}
-	defer reader.Close()
-	out := make([]mqgov.Message, 0, count)
-	for len(out) < count && reader.HasNext() {
-		msg, err := reader.Next(ctx)
-		if err != nil {
-			return nil, backendErr(err)
-		}
-		id := msg.ID()
-		out = append(out, mqgov.Message{
-			Coordinate: mqgov.MessageCoordinate{TopicCoordinate: mqgov.TopicCoordinate{Cluster: b.opts.Cluster, Namespace: b.opts.Tenant + "/" + b.opts.Namespace, Topic: topic}, Partition: int(id.PartitionIdx()), Offset: id.EntryID()},
-			Key:        []byte(msg.Key()),
-			Body:       msg.Payload(),
-			Headers:    bytesHeaders(msg.Properties()),
-		})
+	if strings.TrimSpace(req.To) != "latest" {
+		return apperrors.New(
+			apperrors.CodeNotImplemented,
+			"Pulsar offset reset supports only latest because other targets do not expose a reliable affected-message count",
+			nil,
+		)
 	}
-	return out, nil
+	if strings.TrimSpace(req.Group.Group) == "" {
+		return apperrors.New(apperrors.CodeUsageError, "Pulsar subscription is required", nil)
+	}
+	return nil
 }
 
-func (b *Broker) countPulsarMessages(ctx context.Context, topic string) (int64, error) {
-	reader, err := b.client.CreateReader(pulsarclient.ReaderOptions{
-		Topic:                   b.fqn(topic),
-		StartMessageID:          pulsarclient.EarliestMessageID(),
-		StartMessageIDInclusive: true,
-		ReceiverQueueSize:       1,
-	})
-	if err != nil {
-		return 0, backendErr(err)
-	}
-	defer reader.Close()
-	var total int64
-	for reader.HasNext() {
-		if _, err := reader.Next(ctx); err != nil {
-			return 0, backendErr(err)
+func pulsarLatestResetImpact(stats topicStats, subscription string) ([]mqgov.PartitionImpact, int64, error) {
+	if len(stats.Partitions) == 0 {
+		if stats.NumberOfPartitions > 1 {
+			return nil, 0, apperrors.New(
+				apperrors.CodeNotImplemented,
+				"Pulsar partition stats are unavailable; cannot compute a reliable reset impact",
+				nil,
+			)
 		}
-		total++
+		sub, ok := stats.Subscriptions[subscription]
+		if !ok {
+			return nil, 0, apperrors.New(apperrors.CodeResourceNotFound, "Pulsar subscription not found", nil)
+		}
+		if sub.MsgBacklog < 0 {
+			return nil, 0, apperrors.New(apperrors.CodeBackendError, "Pulsar returned a negative subscription backlog", nil)
+		}
+		return []mqgov.PartitionImpact{{Partition: 0, Count: sub.MsgBacklog}}, sub.MsgBacklog, nil
 	}
-	return total, nil
+
+	keys := make([]string, 0, len(stats.Partitions))
+	for name := range stats.Partitions {
+		keys = append(keys, name)
+	}
+	sort.Strings(keys)
+	impact := make([]mqgov.PartitionImpact, 0, len(keys))
+	seen := make(map[int]struct{}, len(keys))
+	foundSubscription := false
+	var total int64
+	for _, name := range keys {
+		partition, err := pulsarPartitionIndex(name)
+		if err != nil {
+			return nil, 0, err
+		}
+		if _, duplicate := seen[partition]; duplicate {
+			return nil, 0, apperrors.New(apperrors.CodeNotImplemented, "Pulsar partition stats contain duplicate partition identifiers", nil)
+		}
+		seen[partition] = struct{}{}
+		backlog := int64(0)
+		if sub, ok := stats.Partitions[name].Subscriptions[subscription]; ok {
+			foundSubscription = true
+			backlog = sub.MsgBacklog
+		}
+		if backlog < 0 {
+			return nil, 0, apperrors.New(apperrors.CodeBackendError, "Pulsar returned a negative subscription backlog", nil)
+		}
+		impact = append(impact, mqgov.PartitionImpact{Partition: partition, Count: backlog})
+		total += backlog
+	}
+	if !foundSubscription {
+		return nil, 0, apperrors.New(apperrors.CodeResourceNotFound, "Pulsar subscription not found", nil)
+	}
+	sort.Slice(impact, func(i, j int) bool { return impact[i].Partition < impact[j].Partition })
+	return impact, total, nil
+}
+
+func pulsarPartitionIndex(name string) (int, error) {
+	const marker = "-partition-"
+	index := strings.LastIndex(name, marker)
+	if index < 0 {
+		return 0, apperrors.New(
+			apperrors.CodeNotImplemented,
+			"Pulsar partition stats do not expose parseable partition identifiers",
+			nil,
+		)
+	}
+	partition, err := strconv.Atoi(name[index+len(marker):])
+	if err != nil || partition < 0 {
+		return 0, apperrors.New(
+			apperrors.CodeNotImplemented,
+			"Pulsar partition stats do not expose parseable partition identifiers",
+			nil,
+		)
+	}
+	return partition, nil
 }
 
 func (b *Broker) stats(ctx context.Context, topic string) (topicStats, error) {
@@ -1207,10 +1287,10 @@ func (b *Broker) pulsarSchemaVersions(ctx context.Context, subject string) ([]st
 	return out, nil
 }
 
-func pulsarCompatibility(body []byte) (bool, string) {
+func pulsarCompatibility(body []byte) (bool, string, error) {
 	trimmed := strings.TrimSpace(string(body))
 	if trimmed == "" {
-		return true, ""
+		return false, "", fmt.Errorf("pulsar compatibility response is empty")
 	}
 	var result struct {
 		Compatible   *bool    `json:"compatible"`
@@ -1219,16 +1299,19 @@ func pulsarCompatibility(body []byte) (bool, string) {
 		Messages     []string `json:"messages"`
 	}
 	if err := json.Unmarshal(body, &result); err != nil {
-		return true, trimmed
+		return false, "", fmt.Errorf("decode Pulsar compatibility response: %w", err)
 	}
-	compatible := true
-	if result.Compatible != nil {
-		compatible = *result.Compatible
+	if result.Compatible == nil && result.IsCompatible == nil {
+		return false, "", fmt.Errorf("pulsar compatibility response is missing a compatibility result")
 	}
-	if result.IsCompatible != nil {
-		compatible = *result.IsCompatible
+	if result.Compatible != nil && result.IsCompatible != nil && *result.Compatible != *result.IsCompatible {
+		return false, "", fmt.Errorf("pulsar compatibility response contains conflicting results")
 	}
-	return compatible, firstNonEmpty(result.Message, strings.Join(result.Messages, "; "))
+	compatible := result.Compatible
+	if compatible == nil {
+		compatible = result.IsCompatible
+	}
+	return *compatible, firstNonEmpty(result.Message, strings.Join(result.Messages, "; ")), nil
 }
 
 func pulsarSchemaVersionString(version any) string {
@@ -1519,13 +1602,6 @@ func timeout(opts Options) time.Duration {
 		return opts.Timeout
 	}
 	return 30 * time.Second
-}
-
-func abs64(value int64) int64 {
-	if value < 0 {
-		return -value
-	}
-	return value
 }
 
 func pulsarUsesTLS(opts Options) bool {

@@ -9,11 +9,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/JiangHe12/opskit-core/apperrors"
+	"github.com/JiangHe12/opskit-core/v2/apperrors"
 	"github.com/spf13/cobra"
 
-	"github.com/JiangHe12/opskit-core/audit"
-	"github.com/JiangHe12/opskit-core/safety"
+	"github.com/JiangHe12/opskit-core/v2/audit"
+	"github.com/JiangHe12/opskit-core/v2/safety"
 
 	"github.com/JiangHe12/mqgov-cli/internal/mqclass"
 	"github.com/JiangHe12/mqgov-cli/internal/mqgov"
@@ -35,16 +35,24 @@ func newMessagePeekCmd(f *cliFlags) *cobra.Command {
 		Short: "Peek message fingerprints without bodies",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := validatePeekWindow(partition, offset, count); err != nil {
+				return err
+			}
 			backend, meta, err := buildBroker(f)
 			if err != nil {
 				return err
 			}
+			defer backend.Close()
 			opTarget := operationTargetFromBroker(f, backend)
 			topic := args[0]
-			if err := classifyAndAuthorize(f, meta, mqclass.OperationPeek, mqclass.Target{Topic: topic}, ""); err != nil {
+			resolved, err := resolveTopicTarget(cmd.Context(), backend, f, meta, topic, false)
+			if err != nil {
 				return err
 			}
-			result, err := backend.Peek(cmd.Context(), mqgov.MessagePeekRequest{Coordinate: topicCoord(f, meta, topic), Partition: partition, Offset: offset, Count: count})
+			if err := classifyAndAuthorize(f, meta, mqclass.OperationPeek, resolved.Classification, ""); err != nil {
+				return err
+			}
+			result, err := backend.Peek(cmd.Context(), mqgov.MessagePeekRequest{Coordinate: resolved.Coordinate, Partition: partition, Offset: offset, Count: count})
 			if err != nil {
 				return err
 			}
@@ -56,6 +64,19 @@ func newMessagePeekCmd(f *cliFlags) *cobra.Command {
 	cmd.Flags().Int64Var(&offset, "offset", 0, "Offset")
 	cmd.Flags().IntVar(&count, "count", 1, "Maximum messages")
 	return cmd
+}
+
+func validatePeekWindow(partition int, offset int64, count int) error {
+	if partition < 0 {
+		return apperrors.New(apperrors.CodeUsageError, "peek partition must be non-negative", nil)
+	}
+	if offset < 0 {
+		return apperrors.New(apperrors.CodeUsageError, "peek offset must be non-negative", nil)
+	}
+	if count <= 0 {
+		return apperrors.New(apperrors.CodeUsageError, "peek count must be positive", nil)
+	}
+	return nil
 }
 
 func newMessageTailCmd(f *cliFlags) *cobra.Command {
@@ -73,15 +94,18 @@ func newMessageTailCmd(f *cliFlags) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			defer backend.Close()
 			opTarget := operationTargetFromBroker(f, backend)
 			tailer, ok := mqgov.SupportsTail(backend)
 			if !ok {
 				return apperrors.New(apperrors.CodeNotImplemented, "backend does not support non-destructive message tail", nil)
 			}
 			topic := args[0]
-			desc, _ := backend.DescribeTopic(cmd.Context(), topicCoord(f, meta, topic))
-			target := mqclass.Target{Topic: topic, ProtectedTopic: isProtectedTopic(meta, topic, desc), InternalTopic: desc.Internal}
-			if err := classifyAndAuthorize(f, meta, mqclass.OperationTail, target, ""); err != nil {
+			resolved, err := resolveTopicTarget(cmd.Context(), backend, f, meta, topic, false)
+			if err != nil {
+				return err
+			}
+			if err := classifyAndAuthorize(f, meta, mqclass.OperationTail, resolved.Classification, ""); err != nil {
 				return err
 			}
 			if timeout <= 0 {
@@ -89,8 +113,10 @@ func newMessageTailCmd(f *cliFlags) *cobra.Command {
 			}
 			runCtx, cancel := context.WithTimeout(cmd.Context(), timeout)
 			defer cancel()
-			req := mqgov.MessageTailRequest{Coordinate: topicCoord(f, meta, topic), Partition: partition, From: from, Follow: follow, MaxMessages: maxMessages}
-			printOperationTarget(newPrinter(f), opTarget, operationTargetRead)
+			req := mqgov.MessageTailRequest{Coordinate: resolved.Coordinate, Partition: partition, From: from, Follow: follow, MaxMessages: maxMessages}
+			if err := printOperationTarget(newPrinter(f), opTarget, operationTargetRead); err != nil {
+				return err
+			}
 			result, tailErr := tailer.Tail(runCtx, req, func(fp mqgov.MessageFingerprint) error {
 				return printTailFingerprint(f, fp, opTarget)
 			})
@@ -119,16 +145,14 @@ func printTailFingerprint(f *cliFlags, fp mqgov.MessageFingerprint, target opera
 	if f.Output == "json" {
 		return newPrinter(f).JSONData("MessageFingerprint", targetDataForOutput(f, fp, target))
 	}
-	newPrinter(f).Info(fmt.Sprintf("partition=%d offset=%d key-sha256=%s body-sha256=%s size=%d timestamp=%s", fp.Partition, fp.Offset, fp.KeySHA256, fp.BodySHA256, fp.Size, fp.Timestamp))
-	return nil
+	return newPrinter(f).Info(fmt.Sprintf("partition=%d offset=%d key-sha256=%s body-sha256=%s size=%d timestamp=%s", fp.Partition, fp.Offset, fp.KeySHA256, fp.BodySHA256, fp.Size, fp.Timestamp))
 }
 
 func printTailResult(f *cliFlags, result mqgov.MessageTailResult, target operationTarget) error {
 	if f.Output == "json" {
 		return newPrinter(f).JSONData("MessageTailResult", targetDataForOutput(f, result, target))
 	}
-	newPrinter(f).Info(fmt.Sprintf("tail complete count=%d totalSize=%d", result.Count, result.TotalSize))
-	return nil
+	return newPrinter(f).Info(fmt.Sprintf("tail complete count=%d totalSize=%d", result.Count, result.TotalSize))
 }
 
 func tailAuditDiff(result mqgov.MessageTailResult) string {
@@ -143,27 +167,45 @@ func newMessageProduceCmd(f *cliFlags) *cobra.Command {
 		Short: "Produce a message",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if contextPlanOnly(f) {
+				return printBrokerChangePlan(f, "produce", "message", args[0], map[string]any{
+					"keySha256":  mqgov.SHA256Hex([]byte(key)),
+					"bodySha256": mqgov.SHA256Hex([]byte(body)),
+					"size":       len(body),
+				})
+			}
 			backend, meta, err := buildBroker(f)
 			if err != nil {
 				return err
 			}
+			defer backend.Close()
 			opTarget := operationTargetFromBroker(f, backend)
 			topic := args[0]
-			desc, _ := backend.DescribeTopic(cmd.Context(), topicCoord(f, meta, topic))
-			target := mqclass.Target{Topic: topic, ProtectedTopic: isProtectedTopic(meta, topic, desc), InternalTopic: desc.Internal}
+			resolved, err := resolveTopicTarget(cmd.Context(), backend, f, meta, topic, false)
+			if err != nil {
+				return err
+			}
 			allow := safety.AllowFlag("")
-			if target.InternalTopic {
+			if resolved.Classification.InternalTopic {
 				allow = allowInternalProduce
 			}
-			if err := classifyAndAuthorize(f, meta, mqclass.OperationProduce, target, allow); err != nil {
+			if err := classifyAndAuthorize(f, meta, mqclass.OperationProduce, resolved.Classification, allow); err != nil {
 				return err
 			}
-			result, err := backend.Produce(cmd.Context(), mqgov.MessageProduceRequest{Coordinate: topicCoord(f, meta, topic), Key: []byte(key), Body: []byte(body)})
+			request := mqgov.MessageProduceRequest{Coordinate: resolved.Coordinate, Key: []byte(key), Body: []byte(body)}
+			handle, err := beginMutationAudit(f, mutationAuditSpec{
+				Action:   "mq.message.produce",
+				Context:  meta,
+				Target:   audit.EventTarget{ResourceType: "message", Resource: topic},
+				Metadata: mutationMessageMetadata(request.Key, request.Body),
+			})
 			if err != nil {
-				appendAuditWarn(f, auditEventMessage, meta, audit.EventTarget{ResourceType: "message", Resource: topic}, audit.StatusFailed, "produce", err)
 				return err
 			}
-			appendAuditWarn(f, auditEventMessage, meta, audit.EventTarget{ResourceType: "message", Resource: topic}, audit.StatusSuccess, fmt.Sprintf("produce key-sha256=%s body-sha256=%s size=%d", result.Fingerprint.KeySHA256, result.Fingerprint.BodySHA256, result.Fingerprint.Size), nil)
+			result, operationErr := backend.Produce(cmd.Context(), request)
+			if err := finishMutationAudit(handle, mutationAuditOutcome{}, operationErr); err != nil {
+				return err
+			}
 			return targetJSONData(f, "MessageProduceResult", result, opTarget, operationTargetWrite)
 		},
 	}
@@ -187,6 +229,7 @@ func newMessageMirrorCmd(f *cliFlags) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			defer sourceBackend.Close()
 			source, ok := mqgov.SupportsMirrorSource(sourceBackend)
 			if !ok {
 				return apperrors.New(apperrors.CodeNotImplemented, "source backend does not support non-destructive message mirror", nil)
@@ -204,48 +247,103 @@ func newMessageMirrorCmd(f *cliFlags) *cobra.Command {
 			if hasMirrorTargetPattern(toTopic) {
 				return apperrors.New(apperrors.CodeUsageError, "mirror target topic must not contain wildcards", nil)
 			}
-			sourceTarget := mqclass.Target{Topic: sourceTopic, ProtectedTopic: sourceMeta.Protected || protectedTopicName(sourceMeta, sourceTopic), InternalTopic: isInternalMessageTopic(sourceTopic)}
-			if err := classifyAndAuthorize(f, sourceMeta, mqclass.OperationPeek, sourceTarget, ""); err != nil {
+			sourcePreflightTarget := declaredTopicTarget(sourceMeta, sourceTopic, false)
+			sourcePreflightTarget.ProtectedTopic = sourcePreflightTarget.ProtectedTopic || sourceMeta.Protected
+			if err := classifyAndAuthorize(f, sourceMeta, mqclass.OperationPeek, sourcePreflightTarget, ""); err != nil {
 				return err
 			}
 			targetBackend, targetMeta, targetFlags, err := buildMirrorTargetBroker(f, toContext)
 			if err != nil {
 				return err
 			}
+			defer targetBackend.Close()
 			opTarget := operationTargetFromBroker(targetFlags, targetBackend)
 			dryRun := f.DryRun || f.Plan
-			targetDesc, _ := targetBackend.DescribeTopic(cmd.Context(), topicCoord(targetFlags, targetMeta, toTopic))
-			target := mqclass.Target{Topic: toTopic, ProtectedTopic: isProtectedTopic(targetMeta, toTopic, targetDesc), InternalTopic: targetDesc.Internal, Plan: dryRun}
+			targetPreflightTarget := declaredTopicTarget(targetMeta, toTopic, dryRun)
 			allow := safety.AllowFlag("")
-			if target.InternalTopic && !dryRun {
+			if targetPreflightTarget.InternalTopic && !dryRun {
 				allow = allowInternalProduce
 			}
-			if err := classifyAndAuthorize(f, targetMeta, mqclass.OperationMirror, target, allow); err != nil {
+			if err := classifyAndAuthorize(targetFlags, targetMeta, mqclass.OperationMirror, targetPreflightTarget, allow); err != nil {
 				return err
+			}
+			sourceResolved, err := resolveTopicTarget(cmd.Context(), sourceBackend, f, sourceMeta, sourceTopic, false)
+			if err != nil {
+				return err
+			}
+			sourceResolved.Classification.ProtectedTopic = sourceResolved.Classification.ProtectedTopic || sourceMeta.Protected
+			targetResolved, err := resolveTopicTarget(cmd.Context(), targetBackend, targetFlags, targetMeta, toTopic, dryRun)
+			if err != nil {
+				return err
+			}
+			if !sameTopicClassification(sourcePreflightTarget, sourceResolved.Classification) {
+				if err := classifyAndAuthorize(f, sourceMeta, mqclass.OperationPeek, sourceResolved.Classification, ""); err != nil {
+					return err
+				}
+			}
+			allow = ""
+			if targetResolved.Classification.InternalTopic && !dryRun {
+				allow = allowInternalProduce
+			}
+			if !sameTopicClassification(targetPreflightTarget, targetResolved.Classification) {
+				if err := classifyAndAuthorize(targetFlags, targetMeta, mqclass.OperationMirror, targetResolved.Classification, allow); err != nil {
+					return err
+				}
 			}
 			acc := newMirrorAccumulator()
 			req := mqgov.MessageMirrorRequest{
-				Source:    topicCoord(f, sourceMeta, sourceTopic),
-				Target:    topicCoord(targetFlags, targetMeta, toTopic),
+				Source:    sourceResolved.Coordinate,
+				Target:    targetResolved.Coordinate,
 				From:      from,
 				Partition: partition,
 				Limit:     limit,
 				DryRun:    dryRun,
 			}
+			var handle *mutationAuditHandle
+			if !dryRun {
+				handle, err = beginMutationAudit(f, mirrorTargetMutationAuditSpec(toContext, targetMeta, req, limit))
+				if err != nil {
+					return err
+				}
+			}
+			succeeded := 0
+			failed := 0
 			result, err := source.MirrorMessages(cmd.Context(), req, func(msg mqgov.Message) error {
 				acc.Add(msg.Body)
 				if dryRun {
 					return nil
 				}
-				_, err := targetBackend.Produce(cmd.Context(), mqgov.MessageProduceRequest{Coordinate: req.Target, Key: msg.Key, Body: msg.Body, Headers: msg.Headers})
-				return err
+				_, produceErr := targetBackend.Produce(cmd.Context(), mqgov.MessageProduceRequest{Coordinate: req.Target, Key: msg.Key, Body: msg.Body, Headers: msg.Headers})
+				if produceErr != nil {
+					failed++
+					return produceErr
+				}
+				succeeded++
+				return nil
 			})
 			result.Fingerprint = acc.Fingerprints()
+			sourceAuditStatus := audit.StatusSuccess
 			if err != nil {
-				appendAuditWarn(f, auditEventMessage, sourceMeta, audit.EventTarget{ResourceType: "message", Resource: sourceTopic + "->" + toContext + "/" + toTopic}, audit.StatusFailed, mirrorAuditDiff(result), err)
+				sourceAuditStatus = audit.StatusFailed
+			}
+			appendMirrorReadAudit(f, sourceMeta, f.contextName(), req, result, sourceAuditStatus, err)
+			if !dryRun {
+				if err != nil && failed == 0 {
+					failed = 1
+				}
+				if auditErr := finishBatchMutationAudit(handle, limit, succeeded, failed, err); auditErr != nil {
+					return auditErr
+				}
+			}
+			if err != nil {
+				if dryRun {
+					appendMirrorTargetPreviewAudit(f, targetMeta, toContext, req, result, audit.StatusFailed, err)
+				}
 				return err
 			}
-			appendAuditWarn(f, auditEventMessage, sourceMeta, audit.EventTarget{ResourceType: "message", Resource: sourceTopic + "->" + toContext + "/" + toTopic}, audit.StatusSuccess, mirrorAuditDiff(result), nil)
+			if dryRun {
+				appendMirrorTargetPreviewAudit(f, targetMeta, toContext, req, result, audit.StatusSuccess, nil)
+			}
 			return targetJSONData(f, "MessageMirrorResult", result, opTarget, operationTargetWrite)
 		},
 	}
@@ -300,20 +398,88 @@ func mirrorAuditDiff(result mqgov.MessageMirrorResult) string {
 	return fmt.Sprintf("mirror source=%s target=%s count=%d body-sha256=%s dryRun=%t", result.Source.Topic, result.Target.Topic, result.Count, result.Fingerprint.BodySHA256, result.DryRun)
 }
 
+type mirrorAuditBinding struct {
+	Request     mqgov.MessageMirrorRequest
+	Count       int64
+	Impact      []mqgov.PartitionImpact
+	Fingerprint mqgov.ResourceFingerprints
+}
+
+func mirrorTargetMutationAuditSpec(
+	contextName string,
+	meta mqgovctx.Context,
+	request mqgov.MessageMirrorRequest,
+	limit int,
+) mutationAuditSpec {
+	metadata := mutationValueMetadata("mq.message.mirror.target", request)
+	metadata.Items = limit
+	return mutationAuditSpec{
+		Action:      "mq.message.mirror",
+		ContextName: contextName,
+		Context:     meta,
+		Target:      audit.EventTarget{ResourceType: "message", Resource: request.Target.Topic},
+		Metadata:    metadata,
+	}
+}
+
+func appendMirrorReadAudit(
+	f *cliFlags,
+	meta mqgovctx.Context,
+	contextName string,
+	request mqgov.MessageMirrorRequest,
+	result mqgov.MessageMirrorResult,
+	status string,
+	operationErr error,
+) {
+	metadata := mutationValueMetadata("mq.message.mirror.source", mirrorAuditBinding{
+		Request:     request,
+		Count:       result.Count,
+		Impact:      result.Impact,
+		Fingerprint: result.Fingerprint,
+	})
+	metadata.Items = int(result.Count)
+	appendAuditWarnForContext(
+		f,
+		auditEventMessage,
+		meta,
+		contextName,
+		audit.EventTarget{ResourceType: "message", Resource: request.Source.Topic},
+		status,
+		mirrorAuditDiff(result),
+		metadata,
+		operationErr,
+	)
+}
+
+func appendMirrorTargetPreviewAudit(
+	f *cliFlags,
+	meta mqgovctx.Context,
+	contextName string,
+	request mqgov.MessageMirrorRequest,
+	result mqgov.MessageMirrorResult,
+	status string,
+	operationErr error,
+) {
+	metadata := mutationValueMetadata("mq.message.mirror.target-preview", mirrorAuditBinding{
+		Request:     request,
+		Count:       result.Count,
+		Impact:      result.Impact,
+		Fingerprint: result.Fingerprint,
+	})
+	metadata.Items = int(result.Count)
+	appendAuditWarnForContext(
+		f,
+		auditEventMessage,
+		meta,
+		contextName,
+		audit.EventTarget{ResourceType: "message", Resource: request.Target.Topic},
+		status,
+		mirrorAuditDiff(result),
+		metadata,
+		operationErr,
+	)
+}
+
 func hasMirrorTargetPattern(topic string) bool {
 	return strings.ContainsAny(topic, "*?[")
-}
-
-func protectedTopicName(meta mqgovctx.Context, topic string) bool {
-	for _, protected := range meta.Topics {
-		if protected == topic {
-			return true
-		}
-	}
-	return false
-}
-
-func isInternalMessageTopic(topic string) bool {
-	name := strings.ToLower(strings.TrimSpace(topic))
-	return strings.HasPrefix(name, "__") || strings.HasPrefix(name, "_system") || strings.Contains(name, "consumer_offsets")
 }

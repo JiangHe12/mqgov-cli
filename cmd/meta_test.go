@@ -80,6 +80,15 @@ func TestCapabilitiesJSONFamilySchema(t *testing.T) {
 	if strings.Join(env.Domain.OutputFormats, ",") != "table,json,plain" || len(env.Domain.ErrorCodes) == 0 || len(env.Domain.ExitCodes) == 0 {
 		t.Fatalf("domain metadata incomplete: %+v", env.Domain)
 	}
+	foundAuditPrune := false
+	for _, command := range data.Domain.Commands {
+		if command.Noun == "audit" && command.Verb == "prune" {
+			foundAuditPrune = command.Risk == "R3" && command.AllowFlag == "allow-audit-prune"
+		}
+	}
+	if !foundAuditPrune {
+		t.Fatalf("capabilities missing governed audit prune: %+v", data.Domain.Commands)
+	}
 }
 
 func TestGlobalFlagsHelp(t *testing.T) {
@@ -87,7 +96,7 @@ func TestGlobalFlagsHelp(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Execute() error = %v", err)
 	}
-	for _, flag := range []string{"--debug", "--trace", "--no-color"} {
+	for _, flag := range []string{"--debug", "--trace", "--no-color", "--allow-audit-prune"} {
 		if !strings.Contains(out, flag) {
 			t.Fatalf("help missing %s:\n%s", flag, out)
 		}

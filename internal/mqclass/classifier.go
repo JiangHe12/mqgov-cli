@@ -3,7 +3,7 @@ package mqclass
 import (
 	"strings"
 
-	"github.com/JiangHe12/opskit-core/safety"
+	"github.com/JiangHe12/opskit-core/v2/safety"
 )
 
 type Operation string

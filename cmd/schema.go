@@ -7,8 +7,8 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/JiangHe12/opskit-core/apperrors"
-	"github.com/JiangHe12/opskit-core/audit"
+	"github.com/JiangHe12/opskit-core/v2/apperrors"
+	"github.com/JiangHe12/opskit-core/v2/audit"
 
 	"github.com/JiangHe12/mqgov-cli/internal/mqclass"
 	"github.com/JiangHe12/mqgov-cli/internal/mqgov"
@@ -32,6 +32,7 @@ func newSchemaListCmd(f *cliFlags) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			defer backend.Close()
 			opTarget := operationTargetFromBroker(f, backend)
 			manager, err := schemaManager(backend)
 			if err != nil {
@@ -53,8 +54,7 @@ func newSchemaListCmd(f *cliFlags) *cobra.Command {
 			for _, item := range items {
 				rows = append(rows, []string{item.Subject})
 			}
-			targetTable(f, []string{"SUBJECT"}, rows, opTarget)
-			return nil
+			return targetTable(f, []string{"SUBJECT"}, rows, opTarget)
 		},
 	}
 	cmd.Flags().StringVar(&pattern, "pattern", "", "Exact schema subject")
@@ -73,6 +73,7 @@ func newSchemaDescribeCmd(f *cliFlags) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			defer backend.Close()
 			opTarget := operationTargetFromBroker(f, backend)
 			manager, err := schemaManager(backend)
 			if err != nil {
@@ -109,6 +110,7 @@ func newSchemaCheckCmd(f *cliFlags) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			defer backend.Close()
 			opTarget := operationTargetFromBroker(f, backend)
 			manager, err := schemaManager(backend)
 			if err != nil {
@@ -147,17 +149,24 @@ func newSchemaRegisterCmd(f *cliFlags) *cobra.Command {
 		Short: "Register a schema subject or a new subject version",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			subject := args[0]
+			schema, err := readSchemaInput(schemaText, schemaFile)
+			if err != nil {
+				return err
+			}
+			if contextPlanOnly(f) {
+				return printBrokerChangePlan(f, "register", "schema", subject, map[string]any{
+					"schemaType":   schemaType,
+					"schemaSha256": mqgov.SHA256Hex([]byte(schema)),
+				})
+			}
 			backend, meta, err := buildBroker(f)
 			if err != nil {
 				return err
 			}
+			defer backend.Close()
 			opTarget := operationTargetFromBroker(f, backend)
 			manager, err := schemaManager(backend)
-			if err != nil {
-				return err
-			}
-			subject := args[0]
-			schema, err := readSchemaInput(schemaText, schemaFile)
 			if err != nil {
 				return err
 			}
@@ -187,12 +196,22 @@ func newSchemaRegisterCmd(f *cliFlags) *cobra.Command {
 					return err
 				}
 			}
-			result, err := manager.RegisterSchema(cmd.Context(), mqgov.SchemaRegisterRequest{Subject: subject, Type: schemaType, Schema: schema})
+			request := mqgov.SchemaRegisterRequest{Subject: subject, Type: schemaType, Schema: schema}
+			metadata := mutationPayloadMetadata("mq.schema.register", []byte(schema))
+			metadata.Items = 1
+			handle, err := beginMutationAudit(f, mutationAuditSpec{
+				Action:   "mq.schema.register",
+				Context:  meta,
+				Target:   audit.EventTarget{ResourceType: "schema", Resource: subject},
+				Metadata: metadata,
+			})
 			if err != nil {
-				appendAuditWarn(f, auditEventSchema, meta, audit.EventTarget{ResourceType: "schema", Resource: subject}, audit.StatusFailed, "register schemaSha256="+mqgov.SHA256Hex([]byte(schema)), err)
 				return err
 			}
-			appendAuditWarn(f, auditEventSchema, meta, audit.EventTarget{ResourceType: "schema", Resource: subject}, audit.StatusSuccess, schemaRegisterDiff(result), nil)
+			result, operationErr := manager.RegisterSchema(cmd.Context(), request)
+			if err := finishMutationAudit(handle, mutationAuditOutcome{Revision: result.Version}, operationErr); err != nil {
+				return err
+			}
 			return targetJSONData(f, "SchemaDescription", result, opTarget, operationTargetWrite)
 		},
 	}
@@ -210,10 +229,17 @@ func newSchemaDeleteCmd(f *cliFlags) *cobra.Command {
 		Short: "Delete a schema subject or version",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if contextPlanOnly(f) {
+				return printBrokerChangePlan(f, "delete", "schema", args[0], map[string]any{
+					"version":   version,
+					"permanent": permanent,
+				})
+			}
 			backend, meta, err := buildBroker(f)
 			if err != nil {
 				return err
 			}
+			defer backend.Close()
 			opTarget := operationTargetFromBroker(f, backend)
 			manager, err := schemaManager(backend)
 			if err != nil {
@@ -228,12 +254,21 @@ func newSchemaDeleteCmd(f *cliFlags) *cobra.Command {
 			if err := classifyAndAuthorize(f, meta, mqclass.OperationDeleteSchema, mqclass.Target{Topic: subject}, allowSchemaDelete); err != nil {
 				return err
 			}
-			result, err := manager.DeleteSchema(cmd.Context(), mqgov.SchemaDeleteRequest{Subject: subject, Version: version, Permanent: permanent})
+			request := mqgov.SchemaDeleteRequest{Subject: subject, Version: version, Permanent: permanent}
+			handle, err := beginMutationAudit(f, mutationAuditSpec{
+				Action:   "mq.schema.delete",
+				Context:  meta,
+				Target:   audit.EventTarget{ResourceType: "schema", Resource: subject},
+				Metadata: mutationValueMetadata("mq.schema.delete", request),
+			})
 			if err != nil {
-				appendAuditWarn(f, auditEventSchema, meta, audit.EventTarget{ResourceType: "schema", Resource: subject}, audit.StatusFailed, schemaDeleteDiff(desc, version, permanent), err)
 				return err
 			}
-			appendAuditWarn(f, auditEventSchema, meta, audit.EventTarget{ResourceType: "schema", Resource: subject}, audit.StatusSuccess, schemaDeleteResultDiff(result, desc), nil)
+			result, operationErr := manager.DeleteSchema(cmd.Context(), request)
+			revision := firstNonEmpty(result.Version, desc.Version)
+			if err := finishMutationAudit(handle, mutationAuditOutcome{Revision: revision}, operationErr); err != nil {
+				return err
+			}
 			return targetJSONData(f, "SchemaDeleteResult", result, opTarget, operationTargetWrite)
 		},
 	}
@@ -272,18 +307,6 @@ func readSchemaInput(schemaText, schemaFile string) (string, error) {
 
 func schemaMetaDiff(desc mqgov.SchemaDescription) string {
 	return "describe subject=" + desc.Subject + " version=" + desc.Version + " id=" + strconv.Itoa(desc.ID) + " schemaSha256=" + desc.SchemaHash
-}
-
-func schemaRegisterDiff(desc mqgov.SchemaDescription) string {
-	return "register subject=" + desc.Subject + " version=" + desc.Version + " schemaSha256=" + desc.SchemaHash
-}
-
-func schemaDeleteDiff(desc mqgov.SchemaDescription, version string, permanent bool) string {
-	return "delete subject=" + desc.Subject + " version=" + firstNonEmpty(version, desc.Version) + " schemaSha256=" + desc.SchemaHash + " permanent=" + strconv.FormatBool(permanent)
-}
-
-func schemaDeleteResultDiff(result mqgov.SchemaDeleteResult, desc mqgov.SchemaDescription) string {
-	return "delete subject=" + result.Subject + " version=" + firstNonEmpty(result.Version, desc.Version) + " schemaSha256=" + desc.SchemaHash + " permanent=" + strconv.FormatBool(result.Permanent)
 }
 
 func isResourceNotFound(err error) bool {

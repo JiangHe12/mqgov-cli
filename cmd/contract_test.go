@@ -3,15 +3,16 @@ package cmd
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
-	"github.com/JiangHe12/opskit-core/apperrors"
-	corectx "github.com/JiangHe12/opskit-core/ctx"
-	"github.com/JiangHe12/opskit-core/safety"
+	"github.com/JiangHe12/opskit-core/v2/apperrors"
+	corectx "github.com/JiangHe12/opskit-core/v2/ctx"
+	"github.com/JiangHe12/opskit-core/v2/safety"
 
 	"github.com/JiangHe12/mqgov-cli/internal/mqgovctx"
 )
@@ -39,8 +40,10 @@ func TestContractJSONEnvelopeAndExitCodes(t *testing.T) {
 		{name: "schema delete requires specific allow flag", args: []string{"-o", "json", "--yes", "--ticket", "OPS-1", "schema", "delete", "orders-value"}, wantExit: 8},
 		{name: "schema delete passes with schema delete allow flag", args: []string{"-o", "json", "--yes", "--ticket", "OPS-1", "--allow-schema-delete", "schema", "delete", "orders-value"}, wantExit: 0, wantKind: "SchemaDeleteResult"},
 		{name: "schema unsupported backend fails closed", args: []string{"-o", "json", "--backend", "rabbitmq", "schema", "list"}, wantExit: 12},
+		{name: "message peek rejects zero count", args: []string{"-o", "json", "message", "peek", "orders", "--count", "0"}, wantExit: 1},
 		{name: "dlq list is R0", args: []string{"-o", "json", "dlq", "list"}, wantExit: 0, wantKind: "DLQList"},
 		{name: "dlq peek is R0", args: []string{"-o", "json", "dlq", "peek", "orders.dlq", "--count", "1"}, wantExit: 0, wantKind: "DLQPeekResult"},
+		{name: "dlq peek rejects negative count", args: []string{"-o", "json", "dlq", "peek", "orders.dlq", "--count", "-1"}, wantExit: 1},
 		{name: "dlq redrive dry-run previews without high-risk authorization", args: []string{"-o", "json", "dlq", "redrive", "orders.dlq", "--target", "orders", "--dry-run"}, wantExit: 0, wantKind: "DLQRedriveResult"},
 		{name: "dlq redrive real execution requires internal produce allow flag", args: []string{"-o", "json", "--yes", "--ticket", "OPS-1", "dlq", "redrive", "orders.dlq", "--target", "orders"}, wantExit: 8},
 		{name: "dlq redrive real execution passes with internal produce allow flag", args: []string{"-o", "json", "--yes", "--ticket", "OPS-1", "--allow-internal-produce", "dlq", "redrive", "orders.dlq", "--target", "orders"}, wantExit: 0, wantKind: "DLQRedriveResult"},
@@ -94,7 +97,10 @@ func TestAuditDoesNotPersistMessagePlaintext(t *testing.T) {
 			t.Fatalf("audit log contains plaintext %q: %s", forbidden, text)
 		}
 	}
-	if !strings.Contains(text, "key-sha256") || !strings.Contains(text, "body-sha256") {
+	if !strings.Contains(text, `"keyFingerprint":"sha256:`) ||
+		!strings.Contains(text, `"bodyFingerprint":"sha256:`) ||
+		!strings.Contains(text, `"keyBytes":10`) ||
+		!strings.Contains(text, `"bodyBytes":11`) {
 		t.Fatalf("audit log missing fingerprints: %s", text)
 	}
 }
@@ -116,8 +122,8 @@ func TestAuditDoesNotPersistSchemaPlaintext(t *testing.T) {
 	if strings.Contains(text, "SecretSchema") || strings.Contains(text, schema) {
 		t.Fatalf("audit log contains schema plaintext: %s", text)
 	}
-	if !strings.Contains(text, "schemaSha256") {
-		t.Fatalf("audit log missing schema hash: %s", text)
+	if !strings.Contains(text, `"detailFingerprint":"sha256:`) || !strings.Contains(text, `"detailBytes":`) {
+		t.Fatalf("audit log missing safe detail fingerprint: %s", text)
 	}
 }
 
@@ -138,8 +144,9 @@ func TestAuditDoesNotPersistRegisteredSchemaPlaintext(t *testing.T) {
 	if strings.Contains(text, "SecretRegisteredSchema") || strings.Contains(text, schema) {
 		t.Fatalf("audit log contains registered schema plaintext: %s", text)
 	}
-	if !strings.Contains(text, "schemaSha256") {
-		t.Fatalf("audit log missing schema hash: %s", text)
+	if !strings.Contains(text, `"payloadFingerprint":"sha256:`) ||
+		!strings.Contains(text, fmt.Sprintf(`"payloadBytes":%d`, len(schema))) {
+		t.Fatalf("audit log missing schema payload fingerprint: %s", text)
 	}
 }
 
@@ -280,8 +287,12 @@ func TestRootVersionFlagUsesPackageName(t *testing.T) {
 
 func runCommandForTest(t *testing.T, args ...string) (string, error) {
 	t.Helper()
+	return runCommandForTestAtHome(t, t.TempDir(), args...)
+}
+
+func runCommandForTestAtHome(t *testing.T, home string, args ...string) (string, error) {
+	t.Helper()
 	t.Setenv("NO_COLOR", "1")
-	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("USERPROFILE", home)
 	cmd := NewRootCmd()

@@ -15,7 +15,7 @@ import (
 	"github.com/apache/rocketmq-client-go/v2/primitive"
 	rmqproducer "github.com/apache/rocketmq-client-go/v2/producer"
 
-	"github.com/JiangHe12/opskit-core/apperrors"
+	"github.com/JiangHe12/opskit-core/v2/apperrors"
 
 	"github.com/JiangHe12/mqgov-cli/internal/mqgov"
 )
@@ -35,7 +35,8 @@ type Options struct {
 }
 
 type Broker struct {
-	opts Options
+	opts            Options
+	producerFactory func() (rocketmqclient.Producer, error)
 }
 
 type topicAdmin interface {
@@ -59,6 +60,8 @@ func New(opts Options) (*Broker, error) {
 	}
 	return &Broker{opts: opts}, nil
 }
+
+func (*Broker) Close() {}
 
 func (b *Broker) Ping(ctx context.Context) error {
 	admin, err := b.newAdmin()
@@ -208,10 +211,10 @@ func (b *Broker) Produce(ctx context.Context, req mqgov.MessageProduceRequest) (
 	if err != nil {
 		return mqgov.MessageProduceResult{}, err
 	}
+	defer func() { _ = producer.Shutdown() }()
 	if err := producer.Start(); err != nil {
 		return mqgov.MessageProduceResult{}, classifyErr(err)
 	}
-	defer func() { _ = producer.Shutdown() }()
 	msg := primitive.NewMessage(req.Coordinate.Topic, req.Body)
 	if len(req.Key) > 0 {
 		msg.WithKeys([]string{string(req.Key)})
@@ -303,6 +306,9 @@ func (b *Broker) newAdmin() (topicAdmin, error) {
 }
 
 func (b *Broker) newProducer() (rocketmqclient.Producer, error) {
+	if b.producerFactory != nil {
+		return b.producerFactory()
+	}
 	nameServers, err := primitive.NewNamesrvAddr(b.opts.NameServers...)
 	if err != nil {
 		return nil, apperrors.New(apperrors.CodeUsageError, "invalid RocketMQ name server address", err)

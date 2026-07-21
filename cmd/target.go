@@ -3,7 +3,7 @@ package cmd
 import (
 	"strings"
 
-	"github.com/JiangHe12/opskit-core/printer"
+	"github.com/JiangHe12/opskit-core/v2/printer"
 
 	"github.com/JiangHe12/mqgov-cli/internal/mqgov"
 )
@@ -48,12 +48,12 @@ func fleetOperationTarget(contexts []fleetContext) operationTarget {
 	}
 }
 
-func printOperationTarget(p *printer.Printer, target operationTarget, mode operationTargetMode) {
+func printOperationTarget(p *printer.Printer, target operationTarget, mode operationTargetMode) error {
 	label := "TARGET"
 	if mode == operationTargetWrite {
 		label = "WRITE TARGET"
 	}
-	p.TargetHeader(label, [][2]string{
+	return p.TargetHeader(label, [][2]string{
 		{"context", target.Context},
 		{"backend", target.Backend},
 		{"cluster", target.Cluster},
@@ -70,7 +70,9 @@ func targetDataForOutput(f *cliFlags, data any, target operationTarget) any {
 
 func targetJSONData(f *cliFlags, kind string, data any, target operationTarget, mode operationTargetMode) error {
 	p := newPrinter(f)
-	printOperationTarget(p, target, mode)
+	if err := printOperationTarget(p, target, mode); err != nil {
+		return err
+	}
 	return p.JSONData(kind, targetDataForOutput(f, data, target))
 }
 
@@ -86,8 +88,24 @@ func targetJSONList(f *cliFlags, kind string, items any, total, pageSize int, ta
 	})
 }
 
-func targetTable(f *cliFlags, headers []string, rows [][]string, target operationTarget) {
+func printBrokerChangePlan(f *cliFlags, action, resourceType, resource string, details map[string]any) error {
+	data := map[string]any{
+		"action":       action,
+		"resourceType": resourceType,
+		"resource":     resource,
+		"context":      f.contextName(),
+		"dryRun":       true,
+	}
+	for key, value := range details {
+		data[key] = value
+	}
+	return newPrinter(f).JSONData("ChangePlan", data)
+}
+
+func targetTable(f *cliFlags, headers []string, rows [][]string, target operationTarget) error {
 	p := newPrinter(f)
-	printOperationTarget(p, target, operationTargetRead)
-	p.Table(headers, rows)
+	if err := printOperationTarget(p, target, operationTargetRead); err != nil {
+		return err
+	}
+	return p.Table(headers, rows)
 }

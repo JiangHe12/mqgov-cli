@@ -56,7 +56,26 @@ go mod tidy                             # must be a no-op
   `--ticket`. R3 also needs the exact command-specific `--allow-*` flag
   (`--allow-offset-reset`, `--allow-topic-purge`, `--allow-topic-delete`,
   `--allow-destructive-acl`, `--allow-internal-produce`,
-  `--allow-schema-delete`).
+  `--allow-schema-delete`, `--allow-context-change`,
+  `--allow-context-delete`, `--allow-role-change`, `--allow-audit-prune`).
+- Context creation/replacement/selection/import/credential migration, context deletion,
+  and role changes are fixed R3 control-plane operations. Set/import/delete/role/migrate
+  use the target's pre-change policy; a new target inherits the persisted current
+  context's policy. Context selection uses the old current context's policy, or
+  the target policy when no current context exists. Recheck that policy under
+  the context-store lock before any credential or context write.
+- Authorization and audit identity comes from the local OS
+  `username@hostname`; caller flags and operator environment variables are
+  never trusted. This does not separate AI and human processes under one OS
+  account; that requires an external signed approval source or a separately
+  protected operator account.
+- Confirmed audit pruning is a fixed R3 evidence-destruction operation using
+  the persisted current-context policy. It requires `--confirm`, `--yes`, a
+  non-empty ticket, and the exact `--allow-audit-prune`.
+  Preview runs before authorization and never deletes. Confirmed pruning must
+  use the core checkpoint-aware API; never edit authenticated audit artifacts
+  directly in the CLI. Its control intent/outcome goes to the same-directory
+  sibling `.<audit-base>-control`, never the target evidence namespace.
 - Protected contexts, protected topics, and internal/system topics raise every
   operation one tier; authorization must go through `opskit-core/safety`
   (`EffectiveRisk` + `Authorize`).
@@ -77,6 +96,11 @@ go mod tidy                             # must be a no-op
   bodies, keys, headers, tickets, or reasons. `Message.Key/Body/Headers` are
   `json:"-"` so payloads can never serialize. Redaction applies before caller
   output and before audit persistence.
+- Core v2 append state is authoritative for mutation outcomes. Only a
+  known-not-committed outcome enters the durable replay spool; committed and
+  indeterminate states are not blindly queued. An indeterminate replay is
+  renamed with `.indeterminate` and blocks later automatic replay until manual
+  reconciliation by `mutationId + phase`.
 - Peek/tail must be non-destructive (no consume, no cursor/offset advance) or
   fail closed (`NotImplemented`) — never silently consume on an R0 read.
 - No insecure transport: SASL/TLS and mTLS via credstore; never an
@@ -84,8 +108,9 @@ go mod tidy                             # must be a no-op
   fails closed; it never silently connects in plaintext. Kafka, RabbitMQ, and
   Pulsar TLS connections pin the server leaf SPKI-SHA256 on first use in
   `.mqgov-cli/tls_known_hosts` and hard-fail on any later SPKI mismatch;
-  RocketMQ currently has no TLS client path to pin.
-- RabbitMQ credentials use the same username/password for AMQP and the
+  RocketMQ has no TLS client path to pin.
+- Kafka and RabbitMQ usernames are configured with `ctx set --username`.
+  RabbitMQ credentials use the same username/password for AMQP and the
   management API. Prefer `ctx set --backend rabbitmq --username <user>` plus
   `MQGOV_PASSWORD` at command runtime when no credential is stored; persistent
   passwords must use a non-plain credstore backend. If `--amqp-url` also embeds
@@ -97,7 +122,10 @@ go mod tidy                             # must be a no-op
   `OffsetManager` / `PartitionManager` / `ACLManager` / `Tailer` / `DLQManager` / `SchemaManager` interfaces, type-asserted
   and gated by `Supports*`. Unsupported capabilities fail closed with
   `NotImplemented` — never faked. Capabilities must reflect what the client
-  actually supports (e.g. RabbitMQ/RocketMQ `SupportsOffsets=false`; RabbitMQ/RocketMQ do not support non-destructive tail or mirror source; Kafka and Pulsar support mirror source through non-destructive reads; Kafka, RabbitMQ, and Pulsar support ACL, RocketMQ does not; Kafka has no native DLQ discovery so DLQ list is NotImplemented while peek/redrive/purge work on an explicit DLQ topic, RocketMQ supports only DLQ list; Kafka and Pulsar support schema register/delete through native schema registries, RabbitMQ and RocketMQ do not).
+  actually supports (e.g. RabbitMQ/RocketMQ `SupportsOffsets=false`; RabbitMQ/RocketMQ do not support non-destructive tail or mirror source; Kafka and Pulsar support mirror source through non-destructive reads; Kafka, RabbitMQ, and Pulsar support ACL, RocketMQ does not; Kafka explicit DLQ topics support peek/purge but not list/redrive, Pulsar supports DLQ list/peek but not redrive/purge, RabbitMQ supports all four DLQ verbs, and RocketMQ supports only DLQ list; Kafka and Pulsar support schema register/delete through native schema registries, RabbitMQ and RocketMQ do not).
+- Resolve exact topic metadata once before authorization, then reuse the bound
+  coordinate and protected/internal classification for execution. Metadata
+  lookup errors or mismatched coordinates fail closed before mutation intent.
 - **Backends are dumb**: they only execute broker operations. All R0-R3
   authorization stays in `cmd/` + `mqclass`; a backend must never make an
   authorization decision.

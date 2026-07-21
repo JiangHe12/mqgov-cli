@@ -20,12 +20,11 @@ import (
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 
-	"github.com/JiangHe12/opskit-core/apperrors"
-	"github.com/JiangHe12/opskit-core/audit"
-	"github.com/JiangHe12/opskit-core/printer"
-	"github.com/JiangHe12/opskit-core/redact"
-	"github.com/JiangHe12/opskit-core/safety"
-	"github.com/JiangHe12/opskit-core/telemetry"
+	"github.com/JiangHe12/opskit-core/v2/apperrors"
+	"github.com/JiangHe12/opskit-core/v2/audit"
+	"github.com/JiangHe12/opskit-core/v2/printer"
+	"github.com/JiangHe12/opskit-core/v2/safety"
+	"github.com/JiangHe12/opskit-core/v2/telemetry"
 
 	"github.com/JiangHe12/mqgov-cli/internal/backend/fake"
 	kafkabackend "github.com/JiangHe12/mqgov-cli/internal/backend/kafka"
@@ -46,6 +45,10 @@ const (
 	allowDestructiveACL   = safety.AllowFlag("allow-destructive-acl")
 	allowInternalProduce  = safety.AllowFlag("allow-internal-produce")
 	allowSchemaDelete     = safety.AllowFlag("allow-schema-delete")
+	allowContextChange    = safety.AllowFlag("allow-context-change")
+	allowContextDelete    = safety.AllowFlag("allow-context-delete")
+	allowRoleChange       = safety.AllowFlag("allow-role-change")
+	allowAuditPrune       = safety.AllowFlag("allow-audit-prune")
 	auditEventTopic       = audit.EventType("mq.topic")
 	auditEventGroup       = audit.EventType("mq.group")
 	auditEventMessage     = audit.EventType("mq.message")
@@ -85,6 +88,10 @@ type cliFlags struct {
 	AllowDestructiveACL bool
 	AllowInternalProd   bool
 	AllowSchemaDelete   bool
+	AllowContextChange  bool
+	AllowContextDelete  bool
+	AllowRoleChange     bool
+	AllowAuditPrune     bool
 	OTLPEnd             string
 	OTLPMetrics         string
 	OTLPInsec           bool
@@ -97,6 +104,8 @@ type cliFlags struct {
 	telemetryStop       telemetry.ShutdownFunc
 	metricsStop         telemetry.ShutdownFunc
 	metricAttrs         []attribute.KeyValue
+	trustedOperator     string
+	mutationAudit       *mutationAuditRuntime
 }
 
 var versionInfo = struct {
@@ -108,17 +117,19 @@ var versionInfo = struct {
 
 func init() {
 	mqgovctx.Configure()
-	apperrors.Configure(apperrors.Options{APIVersion: apiVersion})
+	errorCodes := append(apperrors.AllCodes(), codeAuditIncomplete)
+	apperrors.Configure(apperrors.Options{
+		APIVersion:  apiVersion,
+		Codes:       errorCodes,
+		Suggestions: map[apperrors.ErrorCode]string{codeAuditIncomplete: "Resolve audit storage and replay durable mutation outcomes before retrying."},
+	})
 	printer.Configure(printer.Options{APIVersion: apiVersion, JSONEnvelopeByDefault: true})
 	audit.Configure(audit.Config{
 		APIVersion:       auditAPIVersion,
 		ConfigDirName:    ".mqgov-cli",
 		PrivateKeyEnvVar: configureEnvWithDeprecatedAlias(mqgovAuditPrivateKeyEnv, deprecatedMqgovAuditPrivateKeyEnv),
 	})
-	safety.Configure(safety.Config{
-		Prompt:         "Proceed with mqgov write? [y/N] ",
-		OperatorEnvVar: configureEnvWithDeprecatedAlias(mqgovOperatorEnv, deprecatedMqgovOperatorEnv),
-	})
+	safety.Configure(safety.Config{Prompt: "Proceed with mqgov write? [y/N] "})
 	telemetry.Configure(telemetry.Config{ServiceName: "mqgov-cli", AttributePrefix: "mqgov", MetricNamePrefix: "mqgov", DomainAttributeName: "resource"})
 }
 
@@ -163,11 +174,15 @@ func newRootCmdWith(f *cliFlags) *cobra.Command {
 			if err := validateOutput(f.Output); err != nil {
 				return err
 			}
+			if err := resolveTrustedOperator(f); err != nil {
+				return err
+			}
 			traceEndpoint, metricsEndpoint, insecure, ctxMeta, ctxName := resolveTelemetryConfig(f)
 			f.telemetryStop = telemetry.Init(c.Context(), traceEndpoint, insecure, v)
 			f.metricsStop = telemetry.InitMetrics(c.Context(), metricsEndpoint, insecure, v)
 			spanCtx, span := telemetry.Tracer().Start(c.Context(), f.commandName)
-			f.metricAttrs = telemetry.SpanAttributes(currentOperator(f), ctxName, ctxMeta.Env, "", f.Ticket, ctxMeta.Protected, true, "")
+			f.metricAttrs = telemetry.SpanAttributes(currentOperator(f), ctxName, ctxMeta.Env, "", "", ctxMeta.Protected, true, "")
+			f.metricAttrs = append(f.metricAttrs, telemetryTicketAttributes(f.Ticket)...)
 			span.SetAttributes(f.metricAttrs...)
 			f.commandCtx = spanCtx
 			f.activeSpan = span
@@ -190,7 +205,7 @@ func newRootCmdWith(f *cliFlags) *cobra.Command {
 	cmd.PersistentFlags().BoolVar(&f.Plan, "plan", false, "Alias for --dry-run plan output")
 	cmd.PersistentFlags().BoolVar(&f.Yes, "yes", false, "Confirm write authorization")
 	cmd.PersistentFlags().StringVar(&f.Ticket, "ticket", "", "Human-supplied change ticket")
-	cmd.PersistentFlags().StringVar(&f.Operator, "operator", "", "Operator identity")
+	cmd.PersistentFlags().StringVar(&f.Operator, "operator", "", "Deprecated compatibility flag; ignored for identity and authorization")
 	cmd.PersistentFlags().StringVar(&f.Reason, "reason", "", "Change reason")
 	cmd.PersistentFlags().BoolVar(&f.NonInter, "non-interactive", false, "Disable interactive confirmation")
 	cmd.PersistentFlags().BoolVar(&f.AllowOffsetReset, "allow-offset-reset", false, "Allow R3 offset reset/seek")
@@ -199,6 +214,10 @@ func newRootCmdWith(f *cliFlags) *cobra.Command {
 	cmd.PersistentFlags().BoolVar(&f.AllowDestructiveACL, "allow-destructive-acl", false, "Allow R3 destructive ACL operation")
 	cmd.PersistentFlags().BoolVar(&f.AllowInternalProd, "allow-internal-produce", false, "Allow R3 produce to internal/system topics")
 	cmd.PersistentFlags().BoolVar(&f.AllowSchemaDelete, "allow-schema-delete", false, "Allow R3 schema delete")
+	cmd.PersistentFlags().BoolVar(&f.AllowContextChange, "allow-context-change", false, "Allow R3 context creation, replacement, selection, import, or credential migration")
+	cmd.PersistentFlags().BoolVar(&f.AllowContextDelete, "allow-context-delete", false, "Allow R3 context deletion")
+	cmd.PersistentFlags().BoolVar(&f.AllowRoleChange, "allow-role-change", false, "Allow R3 context role changes")
+	cmd.PersistentFlags().BoolVar(&f.AllowAuditPrune, "allow-audit-prune", false, "Allow R3 deletion of rotated audit logs")
 	cmd.PersistentFlags().StringVar(&f.OTLPEnd, "otel-endpoint", "", "OTLP trace endpoint")
 	cmd.PersistentFlags().StringVar(&f.OTLPMetrics, "otel-metrics-endpoint", "", "OTLP metrics endpoint")
 	cmd.PersistentFlags().BoolVar(&f.OTLPInsec, "otel-insecure", false, "Disable TLS for OTLP exporter")
@@ -246,8 +265,9 @@ func Execute() {
 func finishTelemetry(ctx context.Context, f *cliFlags, err error) {
 	if f.activeSpan != nil {
 		if err != nil {
-			f.activeSpan.RecordError(err)
-			f.activeSpan.SetStatus(codes.Error, err.Error())
+			errorCode := safeTelemetryErrorCode(err)
+			f.activeSpan.SetAttributes(attribute.String("mqgov.error_code", errorCode))
+			f.activeSpan.SetStatus(codes.Error, errorCode)
 		} else {
 			f.activeSpan.SetStatus(codes.Ok, "")
 		}
@@ -270,6 +290,24 @@ func finishTelemetry(ctx context.Context, f *cliFlags, err error) {
 		}
 		cancel()
 	}
+}
+
+func telemetryTicketAttributes(ticket string) []attribute.KeyValue {
+	fingerprint, size := sensitiveAuditFingerprint("telemetry-ticket", ticket)
+	if fingerprint == "" {
+		return nil
+	}
+	return []attribute.KeyValue{
+		attribute.String("mqgov.ticket_fingerprint", fingerprint),
+		attribute.Int("mqgov.ticket_bytes", size),
+	}
+}
+
+func safeTelemetryErrorCode(err error) string {
+	if err == nil {
+		return ""
+	}
+	return string(apperrors.AsAppError(err).Code)
 }
 
 func buildBroker(f *cliFlags) (mqgov.Broker, mqgovctx.Context, error) {
@@ -412,6 +450,25 @@ func resolvedContext(f *cliFlags) (mqgovctx.Context, string, error) {
 }
 
 func authorize(f *cliFlags, base safety.Risk, meta mqgovctx.Context, required safety.AllowFlag) error {
+	return authorizeWithConfirmation(f, base, meta, required, f.Yes)
+}
+
+func authorizeWithConfirmation(f *cliFlags, base safety.Risk, meta mqgovctx.Context, required safety.AllowFlag, confirmed bool) error {
+	return authorizeForContextWithConfirmation(f, base, meta, required, confirmed, f.contextName())
+}
+
+func authorizeForContextWithConfirmation(
+	f *cliFlags,
+	base safety.Risk,
+	meta mqgovctx.Context,
+	required safety.AllowFlag,
+	confirmed bool,
+	contextName string,
+) error {
+	operator, err := trustedOperatorIdentity(f)
+	if err != nil {
+		return err
+	}
 	risk := safety.EffectiveRisk(base, safety.ContextMeta{
 		Env:             meta.Env,
 		Protected:       meta.Protected,
@@ -419,28 +476,36 @@ func authorize(f *cliFlags, base safety.Risk, meta mqgovctx.Context, required sa
 		TicketValidator: meta.TicketValidator,
 		Roles:           meta.Roles,
 	})
-	err := safety.Authorize(risk, safety.Options{
-		Yes:                f.Yes,
+	err = safety.Authorize(risk, safety.Options{
+		Yes:                confirmed,
 		NonInteractive:     f.NonInter,
 		Ticket:             f.Ticket,
 		TicketPattern:      meta.TicketPattern,
-		Validator:          ticketValidator(meta.TicketValidator, f.contextName(), currentOperator(f)),
+		Validator:          ticketValidator(meta.TicketValidator, contextName, operator),
 		RequiredAllowFlags: requiredAllow(required),
-		GrantedAllowFlags: map[safety.AllowFlag]bool{
-			allowOffsetReset:     f.AllowOffsetReset,
-			allowTopicPurge:      f.AllowTopicPurge,
-			allowTopicDelete:     f.AllowTopicDelete,
-			allowDestructiveACL:  f.AllowDestructiveACL,
-			allowInternalProduce: f.AllowInternalProd,
-			allowSchemaDelete:    f.AllowSchemaDelete,
-		},
-		Roles:    meta.Roles,
-		Operator: currentOperator(f),
+		GrantedAllowFlags:  grantedAllowFlags(f),
+		Roles:              meta.Roles,
+		Operator:           operator,
 	})
 	if err != nil {
 		appendAuditWarn(f, audit.EventAuthorizationDenied, meta, audit.EventTarget{ResourceType: "mq"}, audit.StatusDenied, "", err)
 	}
 	return err
+}
+
+func grantedAllowFlags(f *cliFlags) map[safety.AllowFlag]bool {
+	return map[safety.AllowFlag]bool{
+		allowOffsetReset:     f.AllowOffsetReset,
+		allowTopicPurge:      f.AllowTopicPurge,
+		allowTopicDelete:     f.AllowTopicDelete,
+		allowDestructiveACL:  f.AllowDestructiveACL,
+		allowInternalProduce: f.AllowInternalProd,
+		allowSchemaDelete:    f.AllowSchemaDelete,
+		allowContextChange:   f.AllowContextChange,
+		allowContextDelete:   f.AllowContextDelete,
+		allowRoleChange:      f.AllowRoleChange,
+		allowAuditPrune:      f.AllowAuditPrune,
+	}
 }
 
 func classifyAndAuthorize(f *cliFlags, meta mqgovctx.Context, op mqclass.Operation, target mqclass.Target, allow safety.AllowFlag) error {
@@ -463,26 +528,28 @@ func requiredAllow(flag safety.AllowFlag) []safety.AllowFlag {
 }
 
 func appendAuditWarn(f *cliFlags, typ audit.EventType, ctx mqgovctx.Context, target audit.EventTarget, status, diff string, err error) {
+	appendAuditWarnForContext(f, typ, ctx, "", target, status, diff, mutationAuditMetadata{}, err)
+}
+
+func appendAuditWarnForContext(
+	f *cliFlags,
+	typ audit.EventType,
+	ctx mqgovctx.Context,
+	contextName string,
+	target audit.EventTarget,
+	status string,
+	diff string,
+	metadata mutationAuditMetadata,
+	err error,
+) {
 	path, pathErr := audit.DefaultPath()
 	if pathErr != nil {
 		_, _ = fmt.Fprintf(os.Stderr, "warning: audit path failed: %v\n", pathErr)
 		return
 	}
-	evt := audit.Event{
-		EventType: typ,
-		Operator:  currentOperator(f),
-		Context:   audit.EventContext{Name: f.contextName(), Env: ctx.Env, Protected: ctx.Protected},
-		Ticket:    f.Ticket,
-		Reason:    redact.String(f.Reason),
-		Target:    target,
-		Status:    status,
-		Diff:      redact.String(diff),
-	}
-	if err != nil {
-		appErr := apperrors.AsAppError(err)
-		evt.Error = &audit.EventError{Code: string(appErr.Code), Message: appErr.Message}
-	}
-	if appendErr := audit.AppendWithOptions(path, evt, auditOptions(f)); appendErr != nil {
+	record := newSafeAuditRecord(f, typ, ctx, contextName, target, status, diff, err)
+	record.Metadata = metadata
+	if appendErr := appendQueuedAuditRecord(f, path, record); appendErr != nil {
 		_, _ = fmt.Fprintf(os.Stderr, "warning: audit write failed: %v\n", appendErr)
 	}
 }
@@ -522,19 +589,29 @@ func (f *cliFlags) contextName() string {
 }
 
 func currentOperator(f *cliFlags) string {
-	if f.Operator != "" {
-		return f.Operator
+	operator, _ := trustedOperatorIdentity(f)
+	return operator
+}
+
+func resolveTrustedOperator(f *cliFlags) error {
+	_, err := trustedOperatorIdentity(f)
+	return err
+}
+
+func trustedOperatorIdentity(f *cliFlags) (string, error) {
+	if f.trustedOperator != "" {
+		return f.trustedOperator, nil
 	}
-	if env := envWithDeprecatedAlias(mqgovOperatorEnv, deprecatedMqgovOperatorEnv); env != "" {
-		return env
+	u, err := osuser.Current()
+	if err != nil || u == nil || strings.TrimSpace(u.Username) == "" {
+		return "", apperrors.New(apperrors.CodeAuthorizationRequired, "trusted OS operator identity is unavailable", err)
 	}
-	if u, err := osuser.Current(); err == nil && u != nil && u.Username != "" {
-		if host, herr := os.Hostname(); herr == nil && host != "" {
-			return u.Username + "@" + host
-		}
-		return u.Username
+	host, err := os.Hostname()
+	if err != nil || strings.TrimSpace(host) == "" {
+		return "", apperrors.New(apperrors.CodeAuthorizationRequired, "trusted OS hostname is unavailable", err)
 	}
-	return "unknown"
+	f.trustedOperator = u.Username + "@" + host
+	return f.trustedOperator, nil
 }
 
 func resolveTelemetryConfig(f *cliFlags) (traceEndpoint, metricsEndpoint string, insecure bool, ctxMeta mqgovctx.Context, ctxName string) {

@@ -11,7 +11,8 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/JiangHe12/opskit-core/apperrors"
+	"github.com/JiangHe12/opskit-core/v2/apperrors"
+	"github.com/JiangHe12/opskit-core/v2/audit"
 )
 
 var agentPaths = map[string]string{
@@ -81,13 +82,36 @@ func installSkills(f *cliFlags, target string) error {
 	}
 	dstDir := filepath.Join(installDir, "mqgov-cli")
 	overwriting := skillInstallExists(dstDir)
-	if err := copyEmbeddedSkill(skillFS, "skills/mqgov-cli", dstDir); err != nil {
+	if contextPlanOnly(f) {
+		return newPrinter(f).JSONData("ChangePlan", map[string]any{
+			"resourceType": "file",
+			"action":       "install skill",
+			"path":         dstDir,
+			"overwrite":    overwriting,
+			"dryRun":       true,
+		})
+	}
+	metadata := mutationValueMetadata("mq.install.skill", map[string]any{
+		"path":      dstDir,
+		"overwrite": overwriting,
+	})
+	metadata.Items = 1
+	handle, err := beginMutationAudit(f, mutationAuditSpec{
+		Action:   "mq.install.skill",
+		Target:   audit.EventTarget{ResourceType: "file"},
+		Metadata: metadata,
+	})
+	if err != nil {
 		return err
 	}
-	if err := verifyInstalledSkill(dstDir); err != nil {
-		return err
+	operationErr := copyEmbeddedSkill(skillFS, "skills/mqgov-cli", dstDir)
+	if operationErr == nil {
+		operationErr = verifyInstalledSkill(dstDir)
 	}
-	if err := writeInstallManifest(dstDir); err != nil {
+	if operationErr == nil {
+		operationErr = writeInstallManifest(dstDir)
+	}
+	if err := finishMutationAudit(handle, mutationAuditOutcome{}, operationErr); err != nil {
 		return err
 	}
 	p := newPrinter(f)
@@ -95,11 +119,9 @@ func installSkills(f *cliFlags, target string) error {
 		return p.JSONData("InstallResult", map[string]string{"path": dstDir})
 	}
 	if overwriting {
-		p.Info(fmt.Sprintf("overwriting existing skill at %s", dstDir))
-		return nil
+		return p.Info(fmt.Sprintf("overwriting existing skill at %s", dstDir))
 	}
-	p.Success(fmt.Sprintf("skill installed to %s", dstDir))
-	return nil
+	return p.Success(fmt.Sprintf("skill installed to %s", dstDir))
 }
 
 func writeInstallManifest(dstDir string) error {

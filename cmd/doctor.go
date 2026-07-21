@@ -9,10 +9,10 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/JiangHe12/opskit-core/apperrors"
-	"github.com/JiangHe12/opskit-core/audit"
-	"github.com/JiangHe12/opskit-core/redact"
-	"github.com/JiangHe12/opskit-core/safety"
+	"github.com/JiangHe12/opskit-core/v2/apperrors"
+	"github.com/JiangHe12/opskit-core/v2/audit"
+	"github.com/JiangHe12/opskit-core/v2/redact"
+	"github.com/JiangHe12/opskit-core/v2/safety"
 
 	"github.com/JiangHe12/mqgov-cli/internal/mqgovctx"
 )
@@ -55,6 +55,7 @@ func runDoctor(ctx context.Context, f *cliFlags) error {
 	if backendErr != nil {
 		result.add(doctorFailed("backend", backendErr))
 	} else {
+		defer backend.Close()
 		start := time.Now()
 		err := backend.Ping(ctx)
 		result.add(doctorCheck{Name: "backend", Status: auditStatus(err), Message: doctorMessage("ping ok", err), Backend: backend.Describe().Backend, Context: ctxName, Latency: time.Since(start).String()})
@@ -127,6 +128,5 @@ func printDoctorResult(f *cliFlags, result doctorResult) error {
 	for _, check := range result.Checks {
 		rows = append(rows, []string{check.Name, check.Status, check.Backend, check.Context, check.Latency, check.Message})
 	}
-	newPrinter(f).Table([]string{"CHECK", "STATUS", "BACKEND", "CONTEXT", "LATENCY", "MESSAGE"}, rows)
-	return nil
+	return newPrinter(f).Table([]string{"CHECK", "STATUS", "BACKEND", "CONTEXT", "LATENCY", "MESSAGE"}, rows)
 }

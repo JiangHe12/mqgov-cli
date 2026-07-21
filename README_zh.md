@@ -59,7 +59,7 @@
 | **offset lag / reset** | ✅ | ✅(游标) | ❌(无 offset) | ❌ |
 | alter 分区 | ✅ | ✅ | ❌ | ❌ |
 | purge | ✅ | ✅ | ✅ | ❌ |
-| **DLQ list / peek / redrive / purge** | list ❌;显式 topic peek/redrive/purge ✅ | ✅ `{topic}-{subscription}-DLQ` | ✅ DLX 队列 | list ✅ `%DLQ%group`;其他 ❌ |
+| **DLQ list / peek / redrive / purge** | 显式 topic peek/purge ✅;list/redrive ❌ | list/peek ✅ `{topic}-{subscription}-DLQ`;redrive/purge ❌ | ✅ DLX 队列 | list ✅ `%DLQ%group`;其他 ❌ |
 | **ACL list / grant / revoke** | ✅ | ✅ namespace/topic permissions | ✅ user-vhost permissions | ❌ `NOT_IMPLEMENTED`³ |
 | **schema list / describe / check / register / delete** | ✅ Confluent Schema Registry | ✅ 内建 admin schema API | ❌ `NOT_IMPLEMENTED` | ❌ `NOT_IMPLEMENTED` |
 
@@ -81,7 +81,7 @@ npm install -g mqgov-cli
 <summary>其他安装方式</summary>
 
 - **直接下载** —— 从 [Releases 页](https://github.com/JiangHe12/mqgov-cli/releases)抓取对应平台二进制,用 `checksums.txt`(cosign 签名)校验,放到 `PATH`,重命名为 `mqgov`。
-- **从源码** —— `go install github.com/JiangHe12/mqgov-cli@latest`(Go 1.26+)。
+- **从源码** —— `go install github.com/JiangHe12/mqgov-cli@latest`(Go 1.25+)。
 - **镜像 / 离线** —— 设 `MQGOV_DOWNLOAD_MIRROR=<base-url>` 从你自己的镜像拉取。旧的 `MQGOV_CLI_DOWNLOAD_MIRROR` 仍兼容但已 deprecated。
 
 验证安装:
@@ -98,9 +98,9 @@ mqgov doctor          # 检查 context、后端可达性、审计日志可写性
 ## 🚀 快速上手(60 秒)
 
 ```bash
-# 1. 把 mqgov 指向你的 broker(存为可复用的 "context")
-mqgov ctx set dev --backend kafka --brokers 127.0.0.1:9092
-mqgov ctx use dev
+# 1. 把 mqgov 指向你的 broker（context 控制变更固定为 R3）
+mqgov ctx set dev --backend kafka --brokers 127.0.0.1:9092 --yes --ticket OPS-123 --allow-context-change
+mqgov ctx use dev --yes --ticket OPS-123 --allow-context-change
 mqgov ctx test                       # 经 context ping 一下 broker
 
 # 2. 读 —— 读永远免费(R0),无需任何标志
@@ -129,12 +129,12 @@ mqgov audit query --since 1h -o json
 
 | 档 | 涵盖 | 你必须提供 |
 |:---:|---|---|
-| **R0** | 读与预览(`topic list/describe`、`group list/lag`、`message peek`、`message tail`、`dlq list/peek`、`acl list`、`schema list/describe/check`、`fleet status/topics`、`*-dry-run`、`audit query/verify/prune`、`doctor`) | 无 —— 但仍会审计 |
+| **R0** | 读与预览(`topic list/describe`、`group list/lag`、`message peek`、`message tail`、`dlq list/peek`、`acl list`、`schema list/describe/check`、`fleet status/topics`、`*-dry-run`、`audit query/verify`、`audit prune` 预览、`doctor`) | 无 —— 但仍会审计 |
 | **R1** | 普通写(`message produce`、`message mirror` 目标侧、`topic create`、新 subject 的 `schema register`) | `--yes`(或交互确认) |
 | **R2** | 升级变更(`topic alter`、`group create/delete`、`acl grant`、已有 subject 的 `schema register`、向**保护** topic produce/mirror) | `--yes` **且**非空 `--ticket` |
-| **R3** | 破坏性 / 不可逆(`group reset-offset`、`topic purge`、`topic delete`、`schema delete`、`dlq redrive`、`dlq purge`、宽泛 `acl grant`、`acl revoke`、向**内部/系统** topic produce/mirror) | 以上 **再加**该操作专属的 `--allow-*` 标志 |
+| **R3** | 破坏性 / 不可逆操作（`group reset-offset`、topic/DLQ purge、topic/schema delete、受支持的 DLQ redrive、宽泛 ACL 变更、内部 topic produce/mirror）及治理控制变更（`ctx set/use/delete/import/migrate-credentials`、`ctx role set/unset`、确认执行的 `audit prune`） | 以上 **再加**该操作专属的 `--allow-*` 标志 |
 
-R3 的 allow 标志:`--allow-offset-reset`、`--allow-topic-purge`、`--allow-topic-delete`、`--allow-destructive-acl`、`--allow-internal-produce`、`--allow-schema-delete`。
+R3 的 allow 标志:`--allow-offset-reset`、`--allow-topic-purge`、`--allow-topic-delete`、`--allow-destructive-acl`、`--allow-internal-produce`、`--allow-schema-delete`、`--allow-context-change`、`--allow-context-delete`、`--allow-role-change`、`--allow-audit-prune`。
 
 **保护上下文、保护 topic、内部/系统 topic 都使档位升一级。** 例如向 `__consumer_offsets` 生产被当作破坏性 R3 操作,需要 `--allow-internal-produce`。
 
@@ -143,6 +143,11 @@ R3 的 allow 标志:`--allow-offset-reset`、`--allow-topic-purge`、`--allow-to
 1. **爆炸半径来自工具,不靠猜。** 用 `--dry-run` / `--plan` 看精确的每分区影响,绝不靠推理估算。
 2. **`mqclass` fail-closed 且结构感知。** 所有 offset 变更、purge、topic delete、ACL revoke、宽泛 ACL grant 钉死 R3;通配/glob 目标升级;未知操作失败关闭到最高档 —— 绝不掉到 R0。
 3. **🤖 AI agent 绝不能伪造 `--ticket`、`--allow-*` 或高危 `--yes`。** 这些是*人类*授权输入。agent 应把"此操作需要审批 X"上报给操作者并停下。
+
+授权与审计身份只来自本机 OS 的 `username@hostname`。`--operator`、
+`MQGOV_OPERATOR` 与 `MQGOV_CLI_OPERATOR` 仅为兼容输入，不参与身份或
+授权。这不能区分同一 OS 账户下的 AI 进程与人工进程；若需要这条边界，
+必须使用外部签名批准源或独立受保护的操作者账户。
 
 ---
 
@@ -180,10 +185,11 @@ mqgov group reset-offset <group> <topic> --to <target> --dry-run -o json        
 mqgov group reset-offset <group> <topic> --to <target> --yes --ticket <t> --allow-offset-reset   # R3
 
 #   --to:earliest | latest | offset:N | datetime:<RFC3339> | shift:±N
-#   (offset:N / shift:N 仅 Kafka 支持;不支持的目标/后端返回清晰错误)
+#   (Pulsar reset 只支持可从实时分区 backlog 精确计算的 latest;
+#    其他目标及不支持的后端在 mutation intent 前返回 NOT_IMPLEMENTED)
 ```
 
-offset 是 Kafka 与 Pulsar 的概念。在 RabbitMQ 与 RocketMQ 上,`group lag` / `reset-offset` 以 `NOT_IMPLEMENTED` 失败关闭。
+offset 是 Kafka 与 Pulsar 的概念。Pulsar reset 只支持 `--to latest`;earliest/datetime/绝对 offset/shift 无法取得可靠 affected count,因此 mqgov 明确拒绝。在 RabbitMQ 与 RocketMQ 上,`group lag` / `reset-offset` 以 `NOT_IMPLEMENTED` 失败关闭。
 </details>
 
 <details>
@@ -197,9 +203,9 @@ mqgov message mirror  <source-topic> --to-context <ctx> --to-topic <topic> --lim
 mqgov message produce <topic> [--key <k>] [--body <text>] --yes                    # R1(内部 topic 为 R3 + --allow-internal-produce)
 ```
 
-`peek` 和 `tail` 绝不消费消息、不移动游标,只返回 sha256 指纹(`keySha256`、`bodySha256`、size、可选 timestamp)—— 绝不返回消息体。`tail` 受 `--max-messages` 与 `--timeout` 约束;`--follow` 也只会流式读取到这些边界或取消为止。
+`peek` 和 `tail` 绝不消费消息、不移动游标,只返回 sha256 指纹(`keySha256`、`bodySha256`、size、可选 timestamp)—— 绝不返回消息体。peek count 必须为正数;结果保持 broker 读取顺序、绝不超过 `--count`,到达当前边界时返回真实的较小数量。RabbitMQ 会先把不同消息作为未确认批次保留,完成指纹计算后再整体 requeue;恢复失败则命令失败。`tail` 受 `--max-messages` 与 `--timeout` 约束;`--follow` 也只会流式读取到这些边界或取消为止。
 
-`message mirror` 是有界一次性拷贝,不是 daemon。它执行两次独立授权:源 context 上的非破坏性读取,以及 `--to-context` 上的目标 produce。`--dry-run` / `--plan` 是 R0 预览,只读取/计数,不 produce。Kafka 与 Pulsar 可作为 mirror 源;RabbitMQ 与 RocketMQ 源镜像失败关闭为 `NOT_IMPLEMENTED`,因为可用读取 API 不能保证非破坏性完整消息读取。Key、Body、Headers 只在进程内存中流转;审计只记录 source/target/count 和 body sha256 聚合值。Kafka 支持 `--from earliest|latest|offset:N|timestamp:<RFC3339>` 与 `--partition`;Pulsar 支持 `earliest|latest|timestamp:<RFC3339>` 和全分区读取。headers 在源/目标都能表达时按 string/bytes 形式复制;无法表达的源端概念不会伪造。
+`message mirror` 是有界一次性拷贝,不是 daemon。它只解析一次源/目标 topic,随后分别按源 context 策略授权非破坏性读取、按持久化的 `--to-context` 策略授权目标 produce;任一失败都发生在消息读取和目标写入之前。源与目标分别审计各自的 context、target、请求/结果指纹和计数,不会记录 Key、Body、Headers。`--dry-run` / `--plan` 只读取/计数,不 produce。Kafka 与 Pulsar 可作为 mirror 源;RabbitMQ 与 RocketMQ 源镜像失败关闭为 `NOT_IMPLEMENTED`。Kafka 支持 `--from earliest|latest|offset:N|timestamp:<RFC3339>` 与 `--partition`;Pulsar 支持 `earliest|latest|timestamp:<RFC3339>` 和全分区读取。
 </details>
 
 <details>
@@ -208,13 +214,13 @@ mqgov message produce <topic> [--key <k>] [--body <text>] --yes                 
 ```bash
 mqgov dlq list [--topic <source-or-dlq>] [--group <group-or-sub>] [--pattern <name|glob>] -o json     # R0
 mqgov dlq peek <dlq> [--topic <source>] [--group <group-or-sub>] [--count N] -o json                   # R0,仅指纹
-mqgov dlq redrive <dlq> --target <live-topic> [--count N] --dry-run -o json                            # R0 预览
-mqgov dlq redrive <dlq> --target <live-topic> [--count N] --yes --ticket <t> --allow-internal-produce  # R3
+mqgov dlq redrive <dlq> --target <live-topic> [--count N] --dry-run -o json                            # R0 预览(RabbitMQ)
+mqgov dlq redrive <dlq> --target <live-topic> [--count N] --yes --ticket <t> --allow-internal-produce  # R3(RabbitMQ)
 mqgov dlq purge <dlq> --dry-run -o json                                                                 # R0 预览
 mqgov dlq purge <dlq> --yes --ticket <t> --allow-topic-purge                                           # R3
 ```
 
-DLQ 映射保持后端原生且诚实:RocketMQ 只列出 `%DLQ%{consumerGroup}` topic;RabbitMQ 把 DLQ 视为 dead-letter exchange 喂入的普通队列;Kafka 没有原生 DLQ,也不自动发现,peek/redrive/purge 只针对用户显式指定的 DLQ topic;Pulsar 使用 `{topic}-{subscription}-DLQ`。不支持的动词返回 `NOT_IMPLEMENTED`。
+DLQ 映射保持后端原生且诚实:RabbitMQ redrive 经 publisher confirm 发布,只移除已确认的源消息;Kafka 显式 topic 支持 peek/purge,但无法原子完成精确有界的 copy-and-remove,因此拒绝 redrive;Pulsar 支持 `{topic}-{subscription}-DLQ` 的 list/peek,但 Reader/游标跳过无法提供 redrive/purge 所需的删除语义,因此拒绝二者;RocketMQ 只列出 `%DLQ%{consumerGroup}` topic。不支持的动词返回 `NOT_IMPLEMENTED`,绝不返回“仅复制”或成功 no-op。
 
 Redrive 按 internal-produce 治理:dry-run 是只读预览,真实执行需要 `--allow-internal-produce`。审计仍然只记录指纹/计数,永不记录 message body、key、headers。
 </details>
@@ -291,14 +297,28 @@ mqgov ctx set <name> --backend rocketmq --nameservers <h:p,h:p> [--broker-addr <
 mqgov ctx use|list|current|delete|export|import|role|migrate-credentials|test
 mqgov ctx role set|unset|list <context>
 #   密钥:--password <pw|token|secretKey> 与 --schema-registry-password <pw> 都经 --credential-backend <encrypted-file|keychain|...>(必须用非 plain 后端)
-#   ctx export 默认脱敏凭据;迁移明文凭据时,先运行 ctx migrate-credentials --dry-run,再运行 ctx migrate-credentials --yes。
+#   所有 context 控制变更都可先用 --plan 预览；预览不授权、不写入。
+#   set/use/import/migrate 执行需 --yes --ticket <t> --allow-context-change；delete 用 --allow-context-delete；role set/unset 用 --allow-role-change。
+#   ctx export 默认脱敏凭据;迁移明文凭据时,先运行 ctx migrate-credentials --dry-run,再执行获批命令。
+#   ctx import 会在首次写入前验证全部 context 与凭据后端。配置提交失败时补偿凭据写入;无法安全补偿或补偿不完整时返回明确错误,并在审计中标为 uncertain。
+#   文件导出会拒绝 context/审计/spool/锁文件的同路径与别名，并通过同目录私有临时文件、fsync 和原子替换落盘。
 #   RabbitMQ:非交互运行优先用 --username + MQGOV_PASSWORD;若要落盘密码,用 --password 配 keychain 或 encrypted-file。
 #   如果 --amqp-url 含 userinfo,显式 --username 和密码来源会覆盖它,AMQP 与 management API 使用同一套认证。
 
 # 审计(防篡改,仅指纹)
 mqgov audit query  [--since 24h] [--type <t>] [--operator <o>] [--status <s>] [--limit 100] -o json
 mqgov audit verify [--strict] -o json
-mqgov audit prune  (--before <…> | --older-than <days> | --keep-last <n>) [--yes|--confirm]  # 不确认则 dry-run
+mqgov audit prune  (--before <…> | --older-than <days> | --keep-last <n>)                    # R0 预览
+mqgov audit prune  (--before <…> | --older-than <days> | --keep-last <n>) --confirm --yes --ticket <t> --allow-audit-prune
+
+# 确认清理按已持久化的 current context 策略授权且固定为 R3；
+# 必须同时提供 --confirm 和完整 R3 授权。
+# 确认清理由 opskit-core/v2 完成认证链校验并安全推进 checkpoint；其 intent/outcome 写入 sibling `.<audit-base>-control` 证据日志。
+# 所有变更在接触目标前持久化 intent，完成后持久化 outcome。
+# outcome 被明确判定为未提交时，mqgov 返回 AUDIT_INCOMPLETE，并把它写入 <audit.log>.outcome-spool；下一条 intent 前必须先回放。
+# 回放持久、按序，但刻意采用 at-least-once 语义：若进程在“已追加、未删除 spool”之间崩溃，同一 mutationId 的 outcome 可能重复。
+# 遇到 AUDIT_INCOMPLETE 不要盲目重试；先修复审计存储并执行 audit query/verify，只有明确未提交的队列条目才允许自动回放。
+# opskit-core/v2 会返回追加提交状态。mqgov 仅在明确未提交时排队安全重试；状态不确定的回放会改名并标记为 `.indeterminate`、阻断后续自动回放，必须按 mutationId 核对。
 
 # 诊断与生态
 mqgov doctor -o json            # 只读健康检查(输出已脱敏)
@@ -347,9 +367,15 @@ go test -count=1 ./...
 gofmt -l main.go cmd internal      # 必须无输出
 golangci-lint run --timeout=5m
 go vet -tags=integration ./...
+CGO_ENABLED=0 go build ./...
+go mod tidy -diff
+npm pack --dry-run
 ```
 
 真后端集成测试(`//go:build integration`,env-gated,默认跳过)在 nightly `integration.yml` 工作流里对活的 Kafka/RabbitMQ/Pulsar/RocketMQ 容器运行;本地用自带的 `docker-compose.*.yml` 跑法见 [`docs/`](docs/)。
+
+完整验证流程见 [CONTRIBUTING.md](CONTRIBUTING.md)，漏洞报告方式与安全边界见
+[SECURITY.md](SECURITY.md)。
 
 mqgov-cli 构建在共享的 [`opskit-core`](https://github.com/JiangHe12/opskit-core) 治理引擎之上,是面向 AI agent 的 **opskit** 受治理 CLI 家族的一员 —— 同族还有 [`dbgov-cli`](https://www.npmjs.com/package/dbgov-cli)(数据库)、[`srvgov-cli`](https://www.npmjs.com/package/srvgov-cli)(远程服务器)、[`cfgov-cli`](https://www.npmjs.com/package/cfgov-cli)(配置中心)。
 

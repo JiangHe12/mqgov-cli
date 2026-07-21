@@ -2,15 +2,117 @@ package rabbitmq
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
-	"github.com/JiangHe12/opskit-core/apperrors"
+	"github.com/JiangHe12/opskit-core/v2/apperrors"
+	amqp "github.com/rabbitmq/amqp091-go"
 
 	"github.com/JiangHe12/mqgov-cli/internal/mqgov"
 )
+
+type peekAcknowledger struct {
+	nackTag      uint64
+	nackMultiple bool
+	nackRequeue  bool
+	nackCalls    int
+	nackErr      error
+}
+
+type closeIdleTransport struct {
+	http.RoundTripper
+	calls int
+}
+
+func (transport *closeIdleTransport) CloseIdleConnections() {
+	transport.calls++
+}
+
+func TestCloseIsIdempotent(t *testing.T) {
+	t.Parallel()
+	transport := &closeIdleTransport{}
+	backend := &Broker{httpClient: &http.Client{Transport: transport}}
+
+	backend.Close()
+	backend.Close()
+	if transport.calls != 1 {
+		t.Fatalf("CloseIdleConnections() calls = %d, want 1", transport.calls)
+	}
+}
+
+func (*peekAcknowledger) Ack(uint64, bool) error { return nil }
+
+func (ack *peekAcknowledger) Nack(tag uint64, multiple, requeue bool) error {
+	ack.nackTag = tag
+	ack.nackMultiple = multiple
+	ack.nackRequeue = requeue
+	ack.nackCalls++
+	return ack.nackErr
+}
+
+func (*peekAcknowledger) Reject(uint64, bool) error { return nil }
+
+type peekDeliveryGetter struct {
+	deliveries []amqp.Delivery
+	index      int
+}
+
+func (getter *peekDeliveryGetter) Get(string, bool) (amqp.Delivery, bool, error) {
+	if getter.index >= len(getter.deliveries) {
+		return amqp.Delivery{}, false, nil
+	}
+	delivery := getter.deliveries[getter.index]
+	getter.index++
+	return delivery, true, nil
+}
+
+func TestRabbitMQPeekCollectsDistinctOrderedBatchBeforeRequeue(t *testing.T) {
+	t.Parallel()
+	ack := &peekAcknowledger{}
+	keys := []string{"first", "second", "third"}
+	bodies := []string{"one", "two", "three"}
+	getter := &peekDeliveryGetter{deliveries: []amqp.Delivery{
+		{Acknowledger: ack, DeliveryTag: 1, RoutingKey: keys[0], Body: []byte(bodies[0]), Timestamp: time.Unix(1, 0)},
+		{Acknowledger: ack, DeliveryTag: 2, RoutingKey: keys[1], Body: []byte(bodies[1]), Timestamp: time.Unix(2, 0)},
+		{Acknowledger: ack, DeliveryTag: 3, RoutingKey: keys[2], Body: []byte(bodies[2]), Timestamp: time.Unix(3, 0)},
+	}}
+
+	messages, err := rabbitMQPeekMessages(getter, "orders", 5)
+	if err != nil {
+		t.Fatalf("rabbitMQPeekMessages() error = %v", err)
+	}
+	if len(messages) != 3 {
+		t.Fatalf("len(messages) = %d, want 3", len(messages))
+	}
+	for index := range bodies {
+		want := mqgov.FingerprintMessageAt(0, int64(index), []byte(keys[index]), []byte(bodies[index]), time.Unix(int64(index+1), 0))
+		if messages[index] != want {
+			t.Fatalf("messages[%d] = %+v, want %+v", index, messages[index], want)
+		}
+	}
+	if ack.nackCalls != 1 || ack.nackTag != 3 || !ack.nackMultiple || !ack.nackRequeue {
+		t.Fatalf("batch requeue = calls:%d tag:%d multiple:%t requeue:%t", ack.nackCalls, ack.nackTag, ack.nackMultiple, ack.nackRequeue)
+	}
+}
+
+func TestRabbitMQPeekFailsWhenBatchCannotBeRestored(t *testing.T) {
+	t.Parallel()
+	ack := &peekAcknowledger{nackErr: errors.New("injected nack failure")}
+	getter := &peekDeliveryGetter{deliveries: []amqp.Delivery{{
+		Acknowledger: ack,
+		DeliveryTag:  1,
+		Body:         []byte("one"),
+	}}}
+
+	if _, err := rabbitMQPeekMessages(getter, "orders", 1); err == nil || !strings.Contains(err.Error(), "restore peeked RabbitMQ messages") {
+		t.Fatalf("rabbitMQPeekMessages() error = %v, want restore failure", err)
+	}
+}
 
 func TestSupportsACLTrue(t *testing.T) {
 	backend := &Broker{opts: Options{Cluster: "test"}}
@@ -91,6 +193,76 @@ func TestRabbitMQDefaultsGuestCredentials(t *testing.T) {
 	}
 	if !strings.Contains(backend.amqpURL, "guest:guest@rabbit.example:5672") {
 		t.Fatalf("amqpURL = %q, want guest credentials", backend.amqpURL)
+	}
+}
+
+func TestRabbitMQDLQRedriveRejectsSuccessfulNoOp(t *testing.T) {
+	t.Parallel()
+	backend := &Broker{}
+	dlq := mqgov.TopicCoordinate{Topic: "orders.dlq"}
+	_, err := backend.RedriveDLQ(t.Context(), mqgov.DLQRedriveRequest{DLQ: dlq, Target: dlq, Count: 1})
+	if got := apperrors.AsAppError(err).Code; got != apperrors.CodeUsageError {
+		t.Fatalf("RedriveDLQ(same target) code = %s, want %s; err=%v", got, apperrors.CodeUsageError, err)
+	}
+}
+
+func TestRabbitMQTLSRejectsExplicitPlaintextEndpoints(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		opts Options
+	}{
+		{
+			name: "AMQP URL",
+			opts: Options{
+				TLS:           true,
+				AMQPURL:       "amqp://rabbit.example:5672/%2F",
+				ManagementURL: "https://rabbit.example:15671",
+			},
+		},
+		{
+			name: "management URL",
+			opts: Options{
+				TLS:           true,
+				AMQPURL:       "amqps://rabbit.example:5671/%2F",
+				ManagementURL: "http://rabbit.example:15672",
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			_, err := New(tt.opts)
+			if err == nil {
+				t.Fatal("New() error = nil, want plaintext endpoint rejection")
+			}
+			if got := apperrors.AsAppError(err).Code; got != apperrors.CodeUsageError {
+				t.Fatalf("New() error = %v, code = %s, want %s", err, got, apperrors.CodeUsageError)
+			}
+		})
+	}
+}
+
+func TestRabbitMQTLSDefaultsUseSecureEndpoints(t *testing.T) {
+	t.Parallel()
+
+	backend, err := New(Options{
+		Host:       "rabbit.example",
+		TLS:        true,
+		TLSPinPath: filepath.Join(t.TempDir(), "tls_known_hosts"),
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	if !strings.HasPrefix(backend.amqpURL, "amqps://") {
+		t.Fatalf("amqpURL = %q, want amqps", backend.amqpURL)
+	}
+	if !strings.HasPrefix(backend.manageURL, "https://") {
+		t.Fatalf("manageURL = %q, want https", backend.manageURL)
+	}
+	if backend.tlsConfig == nil {
+		t.Fatal("tlsConfig = nil, want TLS config")
 	}
 }
 

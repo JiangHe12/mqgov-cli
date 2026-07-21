@@ -6,7 +6,7 @@ import (
 	"strconv"
 	"sync"
 
-	"github.com/JiangHe12/opskit-core/apperrors"
+	"github.com/JiangHe12/opskit-core/v2/apperrors"
 
 	"github.com/JiangHe12/mqgov-cli/internal/mqgov"
 )
@@ -71,6 +71,8 @@ func New(cluster, namespace string) *Broker {
 	b.schemas["orders-value"] = mqgov.SchemaDescription{Subject: "orders-value", Version: "1", ID: 1, Type: "AVRO", Schema: schema, SchemaHash: mqgov.SHA256Hex([]byte(schema)), Versions: []string{"1"}}
 	return b
 }
+
+func (*Broker) Close() {}
 
 func (b *Broker) Ping(context.Context) error { return nil }
 
@@ -269,24 +271,9 @@ func (b *Broker) DeleteGroup(_ context.Context, coord mqgov.GroupCoordinate) err
 }
 
 func (b *Broker) Peek(_ context.Context, req mqgov.MessagePeekRequest) (mqgov.MessagePeekResult, error) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	state, ok := b.topics[req.Coordinate.Topic]
-	if !ok {
-		return mqgov.MessagePeekResult{}, apperrors.New(apperrors.CodeResourceNotFound, "topic not found", nil)
-	}
-	count := req.Count
-	if count <= 0 {
-		count = 1
-	}
-	msgs := make([]mqgov.MessageFingerprint, 0, count)
-	for i, msg := range state.messages {
-		if len(msgs) >= count {
-			break
-		}
-		if msg.Coordinate.Partition == req.Partition && msg.Coordinate.Offset >= req.Offset {
-			msgs = append(msgs, mqgov.FingerprintMessage(req.Partition, int64(i), msg.Key, msg.Body))
-		}
+	msgs, err := b.peekMessages(req.Coordinate.Topic, req.Partition, req.Offset, req.Count, "topic not found")
+	if err != nil {
+		return mqgov.MessagePeekResult{}, err
 	}
 	return mqgov.MessagePeekResult{Coordinate: req.Coordinate, Partition: req.Partition, Offset: req.Offset, Count: len(msgs), Messages: msgs}, nil
 }
@@ -373,29 +360,44 @@ func (b *Broker) ListDLQs(_ context.Context, opts mqgov.DLQListOptions) ([]mqgov
 }
 
 func (b *Broker) PeekDLQ(_ context.Context, req mqgov.DLQPeekRequest) (mqgov.DLQPeekResult, error) {
+	msgs, err := b.peekMessages(req.DLQ.Topic, req.Partition, req.Offset, req.Count, "DLQ not found")
+	if err != nil {
+		return mqgov.DLQPeekResult{}, err
+	}
+	return mqgov.DLQPeekResult{DLQ: req.DLQ, Partition: req.Partition, Offset: req.Offset, Count: len(msgs), Messages: msgs}, nil
+}
+
+func (b *Broker) peekMessages(topic string, partition int, offset int64, count int, notFound string) ([]mqgov.MessageFingerprint, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	state, ok := b.topics[req.DLQ.Topic]
-	if !ok {
-		return mqgov.DLQPeekResult{}, apperrors.New(apperrors.CodeResourceNotFound, "DLQ not found", nil)
-	}
-	count := req.Count
 	if count <= 0 {
-		count = 1
+		return nil, apperrors.New(apperrors.CodeUsageError, "peek count must be positive", nil)
 	}
-	msgs := make([]mqgov.MessageFingerprint, 0, count)
-	for i, msg := range state.messages {
-		if len(msgs) >= count {
+	if partition < 0 || offset < 0 {
+		return nil, apperrors.New(apperrors.CodeUsageError, "peek partition and offset must be non-negative", nil)
+	}
+	state, ok := b.topics[topic]
+	if !ok {
+		return nil, apperrors.New(apperrors.CodeResourceNotFound, notFound, nil)
+	}
+	messages := make([]mqgov.MessageFingerprint, 0, count)
+	for index, message := range state.messages {
+		if len(messages) >= count {
 			break
 		}
-		msgs = append(msgs, mqgov.FingerprintMessage(0, int64(i), msg.Key, msg.Body))
+		if message.Coordinate.Partition == partition && message.Coordinate.Offset >= offset {
+			messages = append(messages, mqgov.FingerprintMessage(partition, int64(index), message.Key, message.Body))
+		}
 	}
-	return mqgov.DLQPeekResult{DLQ: req.DLQ, Count: len(msgs), Messages: msgs}, nil
+	return messages, nil
 }
 
 func (b *Broker) RedriveDLQ(_ context.Context, req mqgov.DLQRedriveRequest) (mqgov.DLQRedriveResult, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	if req.DLQ.Topic == req.Target.Topic {
+		return mqgov.DLQRedriveResult{}, apperrors.New(apperrors.CodeUsageError, "redrive target must differ from the DLQ", nil)
+	}
 	dlq, ok := b.topics[req.DLQ.Topic]
 	if !ok {
 		return mqgov.DLQRedriveResult{}, apperrors.New(apperrors.CodeResourceNotFound, "DLQ not found", nil)

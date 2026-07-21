@@ -2,12 +2,42 @@ package rocketmq
 
 import (
 	"context"
+	"errors"
 	"testing"
 
-	"github.com/JiangHe12/opskit-core/apperrors"
+	"github.com/JiangHe12/opskit-core/v2/apperrors"
+	rocketmqclient "github.com/apache/rocketmq-client-go/v2"
 
 	"github.com/JiangHe12/mqgov-cli/internal/mqgov"
 )
+
+type startFailureProducer struct {
+	rocketmqclient.Producer
+	shutdownCalls int
+}
+
+func (*startFailureProducer) Start() error { return errors.New("injected start failure") }
+
+func (producer *startFailureProducer) Shutdown() error {
+	producer.shutdownCalls++
+	return nil
+}
+
+func TestProduceShutsDownProducerWhenStartFails(t *testing.T) {
+	t.Parallel()
+	producer := &startFailureProducer{}
+	backend := &Broker{producerFactory: func() (rocketmqclient.Producer, error) {
+		return producer, nil
+	}}
+
+	_, err := backend.Produce(t.Context(), mqgov.MessageProduceRequest{Coordinate: mqgov.TopicCoordinate{Topic: "orders"}})
+	if err == nil {
+		t.Fatal("Produce() error = nil, want start failure")
+	}
+	if producer.shutdownCalls != 1 {
+		t.Fatalf("Shutdown() calls = %d, want 1", producer.shutdownCalls)
+	}
+}
 
 func TestCapabilitiesAreHonestPartialImplementation(t *testing.T) {
 	backend := &Broker{opts: Options{Cluster: "test"}}

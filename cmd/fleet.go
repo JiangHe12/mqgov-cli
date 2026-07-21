@@ -8,8 +8,8 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/JiangHe12/opskit-core/apperrors"
-	"github.com/JiangHe12/opskit-core/audit"
+	"github.com/JiangHe12/opskit-core/v2/apperrors"
+	"github.com/JiangHe12/opskit-core/v2/audit"
 
 	"github.com/JiangHe12/mqgov-cli/internal/backend/fake"
 	"github.com/JiangHe12/mqgov-cli/internal/mqclass"
@@ -78,8 +78,7 @@ func newFleetStatusCmd(f *cliFlags) *cobra.Command {
 			for _, item := range results {
 				rows = append(rows, []string{item.Context, item.Status, item.Backend, item.Cluster, item.Namespace, strconv.FormatBool(item.Capabilities.SupportsACL), strconv.FormatBool(item.Capabilities.SupportsSchema), item.Error})
 			}
-			targetTable(f, []string{"CONTEXT", "STATUS", "BACKEND", "CLUSTER", "NAMESPACE", "ACL", "SCHEMA", "ERROR"}, rows, opTarget)
-			return nil
+			return targetTable(f, []string{"CONTEXT", "STATUS", "BACKEND", "CLUSTER", "NAMESPACE", "ACL", "SCHEMA", "ERROR"}, rows, opTarget)
 		},
 	}
 	addFleetSelectionFlags(cmd, &flags)
@@ -118,8 +117,7 @@ func newFleetTopicsCmd(f *cliFlags) *cobra.Command {
 					rows = append(rows, []string{item.Context, item.Status, item.Backend, topic.Coordinate.Topic, strconv.Itoa(topic.Partitions), ""})
 				}
 			}
-			targetTable(f, []string{"CONTEXT", "STATUS", "BACKEND", "TOPIC", "PARTITIONS", "ERROR"}, rows, opTarget)
-			return nil
+			return targetTable(f, []string{"CONTEXT", "STATUS", "BACKEND", "TOPIC", "PARTITIONS", "ERROR"}, rows, opTarget)
 		},
 	}
 	addFleetSelectionFlags(cmd, &flags)
@@ -176,6 +174,7 @@ func fleetStatusForContext(cmd *cobra.Command, f *cliFlags, item fleetContext) f
 	if err != nil {
 		return fleetStatusItem{Context: item.name, Status: fleetErrorStatus(err), Error: appErrorMessage(err)}
 	}
+	defer backend.Close()
 	if err := classifyAndAuthorize(f, item.item, mqclass.OperationClusterInfo, mqclass.Target{}, ""); err != nil {
 		return fleetStatusItem{Context: item.name, Status: fleetErrorStatus(err), Error: appErrorMessage(err)}
 	}
@@ -192,6 +191,7 @@ func fleetTopicsForContext(cmd *cobra.Command, f *cliFlags, item fleetContext, p
 	if err != nil {
 		return fleetTopicItem{Context: item.name, Status: fleetErrorStatus(err), Error: appErrorMessage(err)}
 	}
+	defer backend.Close()
 	desc := backend.Describe()
 	if err := classifyAndAuthorize(f, item.item, mqclass.OperationList, mqclass.Target{Topic: pattern}, ""); err != nil {
 		return fleetTopicItem{Context: item.name, Status: fleetErrorStatus(err), Error: appErrorMessage(err), Backend: desc.Backend, Cluster: desc.Cluster, Namespace: desc.Namespace}
@@ -227,6 +227,11 @@ func fleetLocalFlags(f *cliFlags, contextName string) cliFlags {
 		AllowDestructiveACL: f.AllowDestructiveACL,
 		AllowInternalProd:   f.AllowInternalProd,
 		AllowSchemaDelete:   f.AllowSchemaDelete,
+		AllowContextChange:  f.AllowContextChange,
+		AllowContextDelete:  f.AllowContextDelete,
+		AllowRoleChange:     f.AllowRoleChange,
+		AllowAuditPrune:     f.AllowAuditPrune,
+		trustedOperator:     f.trustedOperator,
 	}
 }
 

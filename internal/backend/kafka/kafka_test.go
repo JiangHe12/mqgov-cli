@@ -4,6 +4,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -11,16 +12,76 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/JiangHe12/opskit-core/apperrors"
+	"github.com/JiangHe12/opskit-core/v2/apperrors"
+	"github.com/twmb/franz-go/pkg/kadm"
 
 	"github.com/JiangHe12/mqgov-cli/internal/mqgov"
 )
+
+type closeIdleTransport struct {
+	http.RoundTripper
+	calls int
+}
+
+func (transport *closeIdleTransport) CloseIdleConnections() {
+	transport.calls++
+}
+
+func TestCloseIsIdempotent(t *testing.T) {
+	t.Parallel()
+	transport := &closeIdleTransport{}
+	backend := &Broker{srHTTP: &http.Client{Transport: transport}}
+
+	backend.Close()
+	backend.Close()
+	if transport.calls != 1 {
+		t.Fatalf("CloseIdleConnections() calls = %d, want 1", transport.calls)
+	}
+}
 
 func TestCapabilitiesAdvertiseACL(t *testing.T) {
 	backend := &Broker{opts: Options{Cluster: "test"}}
 	caps := backend.Capabilities()
 	if !caps.SupportsACL {
 		t.Fatalf("SupportsACL = false, want true")
+	}
+}
+
+func TestKafkaDLQRedriveFailsClosed(t *testing.T) {
+	t.Parallel()
+	backend := &Broker{opts: Options{Cluster: "test"}}
+	if backend.Capabilities().SupportsDLQRedrive {
+		t.Fatal("SupportsDLQRedrive = true, want false until exact move semantics are available")
+	}
+	if _, err := backend.RedriveDLQ(t.Context(), mqgov.DLQRedriveRequest{}); apperrors.AsAppError(err).Code != apperrors.CodeNotImplemented {
+		t.Fatalf("RedriveDLQ() error = %v, want NotImplemented", err)
+	}
+}
+
+func TestAppliedDeleteRecordsImpactCountsOnlySuccessfulPartitions(t *testing.T) {
+	t.Parallel()
+	start := kadm.ListedOffsets{
+		"orders-dlq": {
+			0: {Topic: "orders-dlq", Partition: 0, Offset: 4},
+			1: {Topic: "orders-dlq", Partition: 1, Offset: 7},
+		},
+	}
+	responses := kadm.DeleteRecordsResponses{
+		"orders-dlq": {
+			0: {Topic: "orders-dlq", Partition: 0, LowWatermark: 10},
+			1: {Topic: "orders-dlq", Partition: 1, Err: errors.New("partition unavailable")},
+		},
+	}
+
+	impact, total := appliedDeleteRecordsImpact(start, responses)
+	if total != 6 {
+		t.Fatalf("total = %d, want 6", total)
+	}
+	if len(impact) != 1 {
+		t.Fatalf("len(impact) = %d, want 1; impact=%+v", len(impact), impact)
+	}
+	if got := impact[0]; got.Partition != 0 || got.From != 4 || got.To != 10 || got.Count != 6 {
+		t.Fatalf("impact[0] = %+v, want partition=0 from=4 to=10 count=6", got)
 	}
 }
 

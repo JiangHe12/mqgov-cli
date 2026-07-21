@@ -4,10 +4,12 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"sort"
 
-	"github.com/JiangHe12/opskit-core/apperrors"
-	"github.com/JiangHe12/opskit-core/credstore"
-	corectx "github.com/JiangHe12/opskit-core/ctx"
+	"github.com/JiangHe12/opskit-core/v2/apperrors"
+	"github.com/JiangHe12/opskit-core/v2/credstore"
+	corectx "github.com/JiangHe12/opskit-core/v2/ctx"
+	"github.com/JiangHe12/opskit-core/v2/safety"
 )
 
 const SupportedContextAPIVersion = "mqgov-cli.io/context/v1"
@@ -76,15 +78,87 @@ func Configure() {
 
 func SetConfigPath(path string) { corectx.SetConfigPath(path) }
 
-func Load() (*corectx.Config[Context], error) { return store.Load() }
+func Load() (*corectx.Config[Context], error) {
+	cfg, err := store.Load()
+	if err != nil {
+		return nil, err
+	}
+	if err := validatePersistedRoles(cfg); err != nil {
+		return nil, err
+	}
+	return cfg, nil
+}
 
-func Current() (*Context, string, error) { return store.Current() }
+func Current() (*Context, string, error) {
+	cfg, err := Load()
+	if err != nil {
+		return nil, "", err
+	}
+	if cfg.CurrentContext == "" {
+		return nil, "", apperrors.New(apperrors.CodeUsageError, "no current context set", nil)
+	}
+	item, ok := cfg.Contexts[cfg.CurrentContext]
+	if !ok {
+		return nil, "", apperrors.New(apperrors.CodeUsageError, fmt.Sprintf("context %q not found", cfg.CurrentContext), nil)
+	}
+	return &item, cfg.CurrentContext, nil
+}
 
-func Set(name string, item Context) error { return store.SetContext(name, item) }
+func Set(name string, item Context) error {
+	if err := validateContextRoles(name, item); err != nil {
+		return err
+	}
+	return store.SetContext(name, item)
+}
+
+func Update(fn func(cfg *corectx.Config[Context]) error) error {
+	return store.Update(func(cfg *corectx.Config[Context]) error {
+		if err := validatePersistedRoles(cfg); err != nil {
+			return err
+		}
+		if err := fn(cfg); err != nil {
+			return err
+		}
+		return validatePersistedRoles(cfg)
+	})
+}
 
 func Use(name string) error { return store.UseContext(name) }
 
 func Delete(name string) error { return store.DeleteContext(name) }
+
+func validatePersistedRoles(cfg *corectx.Config[Context]) error {
+	names := make([]string, 0, len(cfg.Contexts))
+	for name := range cfg.Contexts {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		if err := validateContextRoles(name, cfg.Contexts[name]); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateContextRoles(contextName string, item Context) error {
+	operators := make([]string, 0, len(item.Roles))
+	for operator := range item.Roles {
+		operators = append(operators, operator)
+	}
+	sort.Strings(operators)
+	for _, operator := range operators {
+		role := item.Roles[operator]
+		if role != safety.RoleReader && role != safety.RoleWriter && role != safety.RoleAdmin {
+			return apperrors.New(
+				apperrors.CodeValidationFailed,
+				fmt.Sprintf("context %q has unsupported role %q for operator %q", contextName, role, operator),
+				nil,
+			)
+		}
+	}
+	return nil
+}
 
 func ResolvePassword(ctx context.Context, name string, item Context) (string, error) {
 	if item.Password == "" {
