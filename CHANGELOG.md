@@ -2,6 +2,16 @@
 
 All notable changes to this project are documented in this file.
 
+## v0.6.2
+
+### Security
+
+- Upgraded `golang.org/x/text` to `v0.39.0`, removing the dependency version affected by `GO-2026-5970`; no reachable vulnerable symbol was found in mqgov-cli.
+
+### Fixed
+
+- Release checksum aggregation now merges matrix artifacts without Unix binary/directory name collisions, verifies all six per-platform checksum files, and fails unless the global manifest contains exactly six binaries. The v0.6.1 per-platform checksums and Cosign signatures remain valid, but its global manifest omitted the four Unix binaries.
+
 ## v0.6.1
 
 ### Changed
