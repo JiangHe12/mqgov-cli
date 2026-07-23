@@ -167,9 +167,15 @@ func sanitizeAuditRecord(data []byte) (safeAuditRecord, error) {
 	record.Diff = ""
 	record.Error = nil
 	record.APIVersion = mutationAuditAPIVersion
-	if record.Kind != mutationAuditKind {
+	switch record.Kind {
+	case mutationAuditKind:
+		record.OperationID = ""
+	case readAuditKind:
+		record.MutationID = ""
+	default:
 		record.Kind = safeAuditKind
 		record.MutationID = ""
+		record.OperationID = ""
 		record.Phase = ""
 		record.Action = ""
 		record.Outcome = nil
@@ -219,6 +225,7 @@ func validateSanitizedAuditMetadata(record safeAuditRecord) error {
 			record.Outcome.Failed,
 			record.Outcome.Skipped,
 			record.Outcome.Uncertain,
+			record.Outcome.ResultCount,
 		)
 	}
 	for _, count := range counts {

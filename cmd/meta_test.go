@@ -53,6 +53,9 @@ func TestCapabilitiesJSONFamilySchema(t *testing.T) {
 		Supported struct {
 			ContextAPIVersions []string        `json:"contextApiVersions"`
 			AuditAPIVersions   []string        `json:"auditApiVersions"`
+			ReadAudit          string          `json:"readAudit"`
+			ReadAuditScope     string          `json:"readAuditScope"`
+			ReadLimits         capReadLimits   `json:"readLimits"`
 			Commands           json.RawMessage `json:"commands"`
 		} `json:"supported"`
 		Domain struct {
@@ -70,6 +73,16 @@ func TestCapabilitiesJSONFamilySchema(t *testing.T) {
 	}
 	if strings.Join(env.Supported.AuditAPIVersions, ",") != auditAPIVersion {
 		t.Fatalf("audit API versions = %#v", env.Supported.AuditAPIVersions)
+	}
+	if env.Supported.ReadAudit != "required-intent-outcome" {
+		t.Fatalf("read audit = %q, want required-intent-outcome", env.Supported.ReadAudit)
+	}
+	if env.Supported.ReadAuditScope != "all-backend-reads-and-mutation-preflights" ||
+		env.Supported.ReadLimits.PeekMessages != maxPeekMessages ||
+		env.Supported.ReadLimits.TailMessages != maxTailMessages ||
+		env.Supported.ReadLimits.MirrorMessages != maxMirrorMessages ||
+		env.Supported.ReadLimits.MirrorBufferAccountingBytes != maxMirrorBufferedBytes {
+		t.Fatalf("read audit scope/limits = %q %+v", env.Supported.ReadAuditScope, env.Supported.ReadLimits)
 	}
 	if len(env.Supported.Commands) != 0 || top["backend"] != nil {
 		t.Fatalf("domain fields leaked outside domain: %s", string(payload))

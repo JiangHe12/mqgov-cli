@@ -40,6 +40,7 @@ const (
 )
 
 type Target struct {
+	Backend        string
 	Topic          string
 	Group          string
 	ProtectedTopic bool
@@ -115,7 +116,7 @@ func applyDestructivePins(result Result, op Operation, target Target) Result {
 }
 
 func applyInternalProducePins(result Result, op Operation, target Target) Result {
-	if (op == OperationProduce || op == OperationMirror) && (target.InternalTopic || isInternalTopic(target.Topic)) && !target.Plan {
+	if (op == OperationProduce || op == OperationMirror) && (target.InternalTopic || IsInternalTopic(target.Backend, target.Topic)) && !target.Plan {
 		return pinR3(result, "produce to internal/system topic is destructive")
 	}
 	return result
@@ -193,9 +194,19 @@ func isAllTarget(value string) bool {
 	return normalized == "all" || normalized == "any"
 }
 
-func isInternalTopic(topic string) bool {
+func IsInternalTopic(backend, topic string) bool {
 	name := strings.ToLower(strings.TrimSpace(topic))
-	return strings.HasPrefix(name, "__") || strings.HasPrefix(name, "_system") || strings.Contains(name, "consumer_offsets")
+	if strings.HasPrefix(name, "__") || strings.HasPrefix(name, "_system") || strings.Contains(name, "consumer_offsets") {
+		return true
+	}
+	if !strings.EqualFold(strings.TrimSpace(backend), "rocketmq") {
+		return false
+	}
+	return strings.HasPrefix(name, "%retry%") ||
+		strings.HasPrefix(name, "%dlq%") ||
+		strings.HasPrefix(name, "rmq_sys_") ||
+		strings.HasPrefix(name, "schedule_topic_") ||
+		name == "tbw102"
 }
 
 func broadACLGrant(target ACLTarget) bool {

@@ -1,6 +1,6 @@
 {
   "name": "mqgov-cli",
-  "version": "0.6.2",
+  "version": "0.6.3",
   "description": "Governed message-broker operations CLI for AI agents (Kafka, RabbitMQ, Pulsar, RocketMQ)",
   "bin": {
     "mqgov": "bin/mqgov-cli.js",
@@ -13,7 +13,8 @@
     "LICENSE"
   ],
   "scripts": {
-    "postinstall": "node scripts/install.js"
+    "postinstall": "node scripts/install.js",
+    "test": "node --test test/install.test.js"
   },
   "keywords": [
     "kafka",
@@ -30,6 +31,12 @@
   "repository": {
     "type": "git",
     "url": "git+https://github.com/JiangHe12/mqgov-cli.git"
+  },
+  "binaryManifest": {
+    "schema": 1,
+    "repository": "JiangHe12/mqgov-cli",
+    "version": "0.6.3",
+    "binaries": {}
   },
   "homepage": "https://github.com/JiangHe12/mqgov-cli",
   "engines": {

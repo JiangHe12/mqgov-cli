@@ -22,6 +22,8 @@ import (
 	"github.com/JiangHe12/opskit-core/v2/redact"
 	"github.com/JiangHe12/opskit-core/v2/safety"
 
+	"github.com/JiangHe12/mqgov-cli/internal/mqclass"
+	"github.com/JiangHe12/mqgov-cli/internal/mqgov"
 	"github.com/JiangHe12/mqgov-cli/internal/mqgovctx"
 )
 
@@ -292,7 +294,7 @@ func ctxSetCmd(f *cliFlags) *cobra.Command { //nolint:gocyclo // Backend-specifi
 				return err
 			}
 			if contextPlanOnly(f) {
-				appendContextAuditWarn(f, audit.EventType("ctx.set"), preChange.meta, audit.StatusSuccess, "ctx set dryRun=true", nil)
+				appendContextAuditWarn(f, audit.EventType("ctx.set"), preChange.meta, "ctx set dryRun=true")
 				return printContextControlPlan(f, "set", args[0], item)
 			}
 			if err := authorizeContextControl(f, args[0], preChange, allowContextChange); err != nil {
@@ -515,7 +517,7 @@ func ctxUseCmd(f *cliFlags) *cobra.Command {
 				return err
 			}
 			if contextPlanOnly(f) {
-				appendContextAuditWarn(f, audit.EventType("ctx.use"), item, audit.StatusSuccess, "ctx use dryRun=true", nil)
+				appendContextAuditWarn(f, audit.EventType("ctx.use"), item, "ctx use dryRun=true")
 				return printContextControlPlan(f, "use", args[0], item)
 			}
 			if err := authorizeContextControl(f, args[0], preChange, allowContextChange); err != nil {
@@ -619,7 +621,7 @@ func ctxDeleteCmd(f *cliFlags) *cobra.Command {
 				return err
 			}
 			if contextPlanOnly(f) {
-				appendContextAuditWarn(f, audit.EventType("ctx.delete"), item, audit.StatusSuccess, "ctx delete dryRun=true", nil)
+				appendContextAuditWarn(f, audit.EventType("ctx.delete"), item, "ctx delete dryRun=true")
 				return printContextControlPlan(f, "delete", args[0], item)
 			}
 			if err := authorizeContextControl(f, args[0], preChange, allowContextDelete); err != nil {
@@ -788,22 +790,25 @@ func ctxTestCmd(f *cliFlags) *cobra.Command {
 				f.Context = args[0]
 				ctxName = args[0]
 			}
-			backend, meta, err := buildBroker(f)
+			backendName, _, err := runMandatoryBrokerRead(f, readAuditSpec{
+				Action:      "mq.context.test",
+				ContextName: ctxName,
+				Target:      audit.EventTarget{ResourceType: "context", Resource: ctxName},
+				Metadata: mutationValueMetadata("mq.context.test", map[string]string{
+					"context": ctxName,
+				}),
+			}, func(meta mqgovctx.Context) error {
+				return classifyAndAuthorize(f, meta, mqclass.OperationClusterInfo, mqclass.Target{}, "")
+			}, func(backend mqgov.Broker, _ mqgovctx.Context) (string, error) {
+				name := backend.Describe().Backend
+				return name, backend.Ping(cmd.Context())
+			}, func(string) int {
+				return 1
+			})
 			if err != nil {
-				appendContextAuditWarn(f, audit.EventContextTest, mqgovctx.Context{}, audit.StatusFailed, "ctx test", err)
 				return err
 			}
-			defer backend.Close()
-			err = backend.Ping(cmd.Context())
-			status := audit.StatusSuccess
-			if err != nil {
-				status = audit.StatusFailed
-			}
-			appendContextAuditWarn(f, audit.EventContextTest, meta, status, "backend="+backend.Describe().Backend, err)
-			if err != nil {
-				return err
-			}
-			return newPrinter(f).JSONData("ContextTestResult", map[string]any{"name": ctxName, "backend": backend.Describe().Backend, "ok": true})
+			return newPrinter(f).JSONData("ContextTestResult", map[string]any{"name": ctxName, "backend": backendName, "ok": true})
 		},
 	}
 }
@@ -837,7 +842,7 @@ func runCtxExport(f *cliFlags, name string, opts ctxExportOptions) error {
 		}
 	}
 	if contextPlanOnly(f) {
-		appendContextAuditWarn(f, audit.EventContextExport, item, audit.StatusSuccess, "ctx export dryRun=true", nil)
+		appendContextAuditWarn(f, audit.EventContextExport, item, "ctx export dryRun=true")
 		return newPrinter(f).JSONData("ChangePlan", map[string]any{
 			"resourceType": "file",
 			"action":       "context export",
@@ -850,7 +855,7 @@ func runCtxExport(f *cliFlags, name string, opts ctxExportOptions) error {
 		if err := writeContextExport(f, "", data); err != nil {
 			return err
 		}
-		appendContextAuditWarn(f, audit.EventContextExport, item, audit.StatusSuccess, "ctx export stdout", nil)
+		appendContextAuditWarn(f, audit.EventContextExport, item, "ctx export stdout")
 		return nil
 	}
 	metadata := mutationPayloadMetadata("mq.ctx.export", data)
@@ -1241,7 +1246,7 @@ func runCtxImportOne(f *cliFlags, doc contextExportDocument, opts ctxImportOptio
 		return err
 	}
 	if contextPlanOnly(f) {
-		appendContextAuditWarn(f, audit.EventContextImport, preChange.meta, audit.StatusSuccess, "ctx import dryRun=true", nil)
+		appendContextAuditWarn(f, audit.EventContextImport, preChange.meta, "ctx import dryRun=true")
 		return newPrinter(f).JSONData("ChangePlan", map[string]any{
 			"resourceType":       "context",
 			"action":             "import",
@@ -1374,7 +1379,7 @@ func runCtxImportMany(f *cliFlags, doc contextExportDocument, opts ctxImportOpti
 	}
 	if contextPlanOnly(f) {
 		for _, name := range names {
-			appendContextAuditWarn(f, audit.EventContextImport, preChanges[name].meta, audit.StatusSuccess, "ctx import --all dryRun=true", nil)
+			appendContextAuditWarn(f, audit.EventContextImport, preChanges[name].meta, "ctx import --all dryRun=true")
 		}
 		return newPrinter(f).JSONData("ChangePlan", map[string]any{
 			"resourceType":       "context",
@@ -2344,8 +2349,8 @@ func tlsClientConfigured(item mqgovctx.Context) bool {
 		item.RocketMQClientCertFile != "" || item.RocketMQClientKeyFile != ""
 }
 
-func appendContextAuditWarn(f *cliFlags, eventType audit.EventType, item mqgovctx.Context, status, diff string, err error) {
-	appendAuditWarn(f, eventType, item, audit.EventTarget{ResourceType: "context", Resource: f.contextName()}, status, diff, err)
+func appendContextAuditWarn(f *cliFlags, eventType audit.EventType, item mqgovctx.Context, diff string) {
+	appendAuditWarn(f, eventType, item, audit.EventTarget{ResourceType: "context", Resource: f.contextName()}, audit.StatusSuccess, diff, nil)
 }
 
 func appendRoleAuditWarn(f *cliFlags, eventType audit.EventType, contextName string, item mqgovctx.Context, operator, role string) {

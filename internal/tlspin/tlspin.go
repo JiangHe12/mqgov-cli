@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"net"
 	"net/url"
-	"os"
 	"path/filepath"
 	"strings"
 
@@ -120,9 +119,11 @@ func Fingerprint(material []byte) string {
 	return "SHA256:" + base64.StdEncoding.EncodeToString(sum[:])
 }
 
-func NotifyStderr(event Event) {
-	_, _ = fmt.Fprintf(os.Stderr, "TOFU: pinned TLS certificate for %s (%s %s)\n", event.Address, event.Algorithm, event.Fingerprint)
+func FormatNotification(event Event) string {
+	return fmt.Sprintf("TOFU: pinned TLS certificate for %s (%s %s)\n", event.Address, event.Algorithm, event.Fingerprint)
 }
+
+func NotifyDiscard(Event) {}
 
 func AppError(err error) *apperrors.AppError {
 	var appErr *apperrors.AppError

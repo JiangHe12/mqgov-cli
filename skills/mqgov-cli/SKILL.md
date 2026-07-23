@@ -15,6 +15,7 @@ Hard rules:
   and MQGOV operator environment variables are ignored. This does not separate
   an AI from a human under the same OS account.
 - Message body, key, and headers must not be copied into audit summaries or tickets. Use fingerprints and counts.
+- All broker access, including mutation preflights, is fail-closed audited: intent must be durable, then local R0/context-role authorization must pass, before any client is built or connected. The paired outcome with the same `operationId` must be durable before output or advanced mutation authorization/intent/write. Treat `LOCAL_IO_ERROR` as no-result/no-mutation; never retry past a broken audit store.
 - Check `mqgov capabilities -o json` before assuming a backend supports offsets, partitions, ACL, DLQ verbs, peek, or tail.
 - Unsupported backend operations fail closed with `NOT_IMPLEMENTED`.
 - TLS for Kafka, RabbitMQ, and Pulsar pins the server leaf SPKI-SHA256 on first use in `.mqgov-cli/tls_known_hosts`; never suggest insecure-skip-verify or deleting pins without human certificate-rotation review.
@@ -60,7 +61,7 @@ mqgov fleet status --all -o json
 mqgov fleet topics --contexts dev,staging -o json
 ```
 
-Peek counts must be positive. Results preserve broker read order, return at most the requested count, and report the actual shorter count at the current boundary. RabbitMQ restores the complete unacknowledged batch after fingerprinting and fails the read if requeue fails.
+Peek counts and tail `--max-messages` must be between 1 and 10,000. Results preserve broker read order, return at most the requested count, and report the actual shorter count at the current boundary. RabbitMQ message/DLQ peek returns `NOT_IMPLEMENTED` because consume/requeue cannot prove a truly non-consuming read. Tail uses a small initial buffer and releases no result before the read outcome is durable.
 
 Writes require human authorization according to risk:
 
@@ -103,8 +104,9 @@ ACL governance:
 Message mirror governance:
 
 - `message mirror SOURCE --to-context NAME --to-topic NAME --limit N` is a bounded one-shot copy only. Never use it as a daemon and never add `--follow`.
+- Mirror `--limit` is 1–1,000. Source staging is bounded by both that exact request limit and a conservative 64 MiB accounting budget charging actual key/body/header bytes plus fixed per-message/per-header overhead; a backend emission past either boundary fails closed, wipes staged copies, and performs zero target writes.
 - Mirror resolves each topic once, then uses two independent authorizations: source-side non-destructive read under the source context policy, then target-side produce under the persisted target context policy. Either failure precedes message reads and target writes. Protected source contexts can require approval before exfiltration; protected/internal targets follow produce risk and internal targets require `--allow-internal-produce`.
-- `--dry-run` / `--plan` is an R0 preview driven by the same dry-run flag that suppresses target produce. It may read/count from the source but must not mutate the target.
+- Source intent precedes authorization/client construction and source outcome durability precedes target mutation intent/produce. `--dry-run` / `--plan` follows the same mandatory source audit pair and must not mutate the target.
 - Kafka and Pulsar can be mirror sources. RabbitMQ and RocketMQ sources fail closed with `NOT_IMPLEMENTED` because their available reads cannot guarantee non-destructive full-message reads.
 - Key/body/headers may flow only in process memory from source to target. Source and destination must be audited separately with their own context, target, request/result fingerprint, and count; never raw key, body, or headers.
 
@@ -121,14 +123,14 @@ Schema governance:
 Fleet governance:
 
 - Fleet verbs are `fleet status|topics`; both are R0 read-only aggregation across configured contexts selected by `--all` or `--contexts a,b,c`.
-- Fleet is only fan-out: each selected context still uses its own stored credentials and the same per-context R0 classify/authorize path as the equivalent single-context read. Partial failures are reported per context as `denied`, `unreachable`, or `error`; the command still exits 0 after completing the dashboard.
+- Fleet is only fan-out: one batch-read intent precedes all backend access; each selected context still uses its own stored credentials and the same per-context R0 classify/authorize path as the equivalent single-context read; one aggregate outcome precedes dashboard output. Audit stores only a selection fingerprint and bounded counts. Partial backend failures are reported per context as `denied`, `unreachable`, or `error`; an audit persistence failure returns `LOCAL_IO_ERROR` and suppresses the dashboard.
 - Never use fleet for cross-broker copy, mirror, migration, or any write path.
 
 DLQ governance:
 
 - DLQ verbs are `dlq list|peek|redrive|purge`. `list` and `peek` are R0 and fingerprint-only; dry-run redrive/purge are R0 previews.
 - Real `dlq redrive` is R3 and requires `--allow-internal-produce`; real `dlq purge` is R3 and requires `--allow-topic-purge`.
-- RabbitMQ uses DLX-fed queues and supports all four verbs; redrive confirms the publish before acknowledging the source message. Kafka explicit DLQ topics support peek/purge but redrive is `NOT_IMPLEMENTED` because exact bounded copy-and-remove cannot be atomic. Pulsar supports list/peek for `{topic}-{subscription}-DLQ` but refuses redrive/purge because Reader/cursor operations do not provide those deletion semantics. RocketMQ only supports listing `%DLQ%{consumerGroup}` topics.
+- RabbitMQ uses DLX-fed queues and supports list/redrive/purge; peek is `NOT_IMPLEMENTED` because consume/requeue cannot prove a non-consuming read. Redrive confirms the publish before acknowledging the source message. Kafka explicit DLQ topics support peek/purge but redrive is `NOT_IMPLEMENTED` because exact bounded copy-and-remove cannot be atomic. Pulsar supports list/peek for `{topic}-{subscription}-DLQ` but refuses redrive/purge because Reader/cursor operations do not provide those deletion semantics. RocketMQ only supports listing `%DLQ%{consumerGroup}` topics.
 - Pulsar offset reset supports only `--to latest`, using live per-partition subscription backlog as the affected count. Earliest/datetime/offset/shift resets return `NOT_IMPLEMENTED` before mutation intent because their impact cannot be measured reliably.
 
 Audit:
@@ -161,4 +163,14 @@ fail closed without blind replay. An indeterminate replay is renamed with an
 `.indeterminate` suffix, blocks later automatic replay, and must be reconciled
 by `mutationId`.
 
-`message tail` is fingerprint-only and non-destructive. It is supported by Kafka and Pulsar. RabbitMQ and RocketMQ return `NOT_IMPLEMENTED` for tail; RocketMQ also returns `NOT_IMPLEMENTED` for peek.
+All broker reads and mutation preflights write `ReadAuditRecord` intent/outcome
+pairs through the same serialized append queue and durable replay spool. Intent
+is followed by local R0/context-role authorization before client construction.
+Intent/authorization failure prevents backend access; outcome failure suppresses
+result output and mutation; audit failure surfaces as `LOCAL_IO_ERROR`,
+preserving any backend error in the cause chain.
+Only request fingerprints/byte counts and bounded operation/result counts enter
+these records. Mutation dry-run/plan preview calls and mutation metadata reads
+are included in this mandatory preflight lifecycle.
+
+`message tail` is fingerprint-only and non-destructive. It is supported by Kafka and Pulsar. RabbitMQ and RocketMQ return `NOT_IMPLEMENTED` for tail; both also return `NOT_IMPLEMENTED` for peek.

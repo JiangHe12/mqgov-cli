@@ -19,6 +19,7 @@ import (
 	"time"
 
 	pulsarclient "github.com/apache/pulsar-client-go/pulsar"
+	pulsarlog "github.com/apache/pulsar-client-go/pulsar/log"
 
 	"github.com/JiangHe12/opskit-core/v2/apperrors"
 
@@ -38,6 +39,7 @@ type Options struct {
 	ClientCertFile string
 	ClientKeyFile  string
 	TLSPinPath     string
+	TLSNotify      tlspin.NotifyFunc
 	Timeout        time.Duration
 }
 
@@ -93,19 +95,12 @@ func New(opts Options) (*Broker, error) {
 	}
 	var serviceTLSConfig *tls.Config
 	if baseTLSConfig != nil && strings.HasPrefix(strings.ToLower(strings.TrimSpace(opts.ServiceURL)), "pulsar+ssl://") {
-		serviceTLSConfig, err = tlspin.CloneForEndpoint(baseTLSConfig, opts.TLSPinPath, opts.ServiceURL, tlspin.NotifyStderr)
+		serviceTLSConfig, err = tlspin.CloneForEndpoint(baseTLSConfig, opts.TLSPinPath, opts.ServiceURL, pulsarTLSNotify(opts))
 		if err != nil {
 			return nil, err
 		}
 	}
-	clientOpts := pulsarclient.ClientOptions{
-		URL:                        opts.ServiceURL,
-		ConnectionTimeout:          timeout(opts),
-		OperationTimeout:           timeout(opts),
-		TLSAllowInsecureConnection: false,
-		TLSValidateHostname:        true,
-		TLSConfig:                  serviceTLSConfig,
-	}
+	clientOpts := pulsarClientOptions(opts, serviceTLSConfig)
 	if opts.CACertFile != "" {
 		clientOpts.TLSTrustCertsFilePath = opts.CACertFile
 	}
@@ -125,7 +120,7 @@ func New(opts Options) (*Broker, error) {
 	}
 	httpClient := &http.Client{Timeout: timeout(opts)}
 	if baseTLSConfig != nil && strings.HasPrefix(strings.ToLower(strings.TrimSpace(opts.AdminURL)), "https://") {
-		adminTLSConfig, err := tlspin.CloneForEndpoint(baseTLSConfig, opts.TLSPinPath, opts.AdminURL, tlspin.NotifyStderr)
+		adminTLSConfig, err := tlspin.CloneForEndpoint(baseTLSConfig, opts.TLSPinPath, opts.AdminURL, pulsarTLSNotify(opts))
 		if err != nil {
 			client.Close()
 			return nil, err
@@ -133,6 +128,25 @@ func New(opts Options) (*Broker, error) {
 		httpClient.Transport = &http.Transport{TLSClientConfig: adminTLSConfig}
 	}
 	return &Broker{opts: opts, client: client, httpClient: httpClient, tlsConfig: serviceTLSConfig}, nil
+}
+
+func pulsarClientOptions(opts Options, serviceTLSConfig *tls.Config) pulsarclient.ClientOptions {
+	return pulsarclient.ClientOptions{
+		URL:                        opts.ServiceURL,
+		ConnectionTimeout:          timeout(opts),
+		OperationTimeout:           timeout(opts),
+		TLSAllowInsecureConnection: false,
+		TLSValidateHostname:        true,
+		TLSConfig:                  serviceTLSConfig,
+		Logger:                     pulsarlog.DefaultNopLogger(),
+	}
+}
+
+func pulsarTLSNotify(opts Options) tlspin.NotifyFunc {
+	if opts.TLSNotify != nil {
+		return opts.TLSNotify
+	}
+	return tlspin.NotifyDiscard
 }
 
 func (b *Broker) Close() {
@@ -327,6 +341,9 @@ func (b *Broker) Peek(ctx context.Context, req mqgov.MessagePeekRequest) (mqgov.
 	if req.Count <= 0 {
 		return mqgov.MessagePeekResult{}, apperrors.New(apperrors.CodeUsageError, "peek count must be positive", nil)
 	}
+	if req.Count > mqgov.MaxMessageBatchSize {
+		return mqgov.MessagePeekResult{}, apperrors.New(apperrors.CodeUsageError, "peek count exceeds the safe batch limit", nil)
+	}
 	if req.Partition < 0 || req.Offset < 0 {
 		return mqgov.MessagePeekResult{}, apperrors.New(apperrors.CodeUsageError, "peek partition and offset must be non-negative", nil)
 	}
@@ -376,6 +393,9 @@ func (b *Broker) Produce(ctx context.Context, req mqgov.MessageProduceRequest) (
 }
 
 func (b *Broker) Tail(ctx context.Context, req mqgov.MessageTailRequest, emit func(mqgov.MessageFingerprint) error) (mqgov.MessageTailResult, error) {
+	if req.MaxMessages <= 0 || req.MaxMessages > mqgov.MaxMessageBatchSize {
+		return mqgov.MessageTailResult{}, apperrors.New(apperrors.CodeUsageError, "tail max messages must be within the safe batch limit", nil)
+	}
 	start, inclusive, err := pulsarTailStart(req.From)
 	if err != nil {
 		return mqgov.MessageTailResult{}, err
@@ -416,8 +436,8 @@ func (b *Broker) Tail(ctx context.Context, req mqgov.MessageTailRequest, emit fu
 }
 
 func (b *Broker) MirrorMessages(ctx context.Context, req mqgov.MessageMirrorRequest, emit func(mqgov.Message) error) (mqgov.MessageMirrorResult, error) {
-	if req.Limit <= 0 {
-		return mqgov.MessageMirrorResult{}, apperrors.New(apperrors.CodeUsageError, "mirror limit must be positive", nil)
+	if req.Limit <= 0 || req.Limit > mqgov.MaxMirrorBatchSize {
+		return mqgov.MessageMirrorResult{}, apperrors.New(apperrors.CodeUsageError, "mirror limit must be within the safe batch limit", nil)
 	}
 	if req.Partition >= 0 {
 		return mqgov.MessageMirrorResult{}, apperrors.New(apperrors.CodeNotImplemented, "Pulsar partition-specific mirror is not supported by this backend", nil)
@@ -510,21 +530,56 @@ func (b *Broker) PurgeTopic(ctx context.Context, req mqgov.TopicPurgeRequest) (m
 		return mqgov.TopicPurgeResult{}, err
 	}
 	total := stats.totalBacklog()
-	if !req.DryRun {
-		for _, sub := range stats.subscriptionNames() {
-			_, err := b.adminJSON(ctx, http.MethodPost, b.topicPath(req.Coordinate.Topic)+"/subscription/"+pathEscape(sub)+"/skip_all", nil)
-			if err != nil {
-				return mqgov.TopicPurgeResult{}, err
-			}
-		}
-	}
-	return mqgov.TopicPurgeResult{
+	result := mqgov.TopicPurgeResult{
 		Coordinate:  req.Coordinate,
 		DryRun:      req.DryRun,
 		Impact:      []mqgov.PartitionImpact{{Partition: 0, Count: total}},
 		Total:       total,
 		Fingerprint: mqgov.ResourceFingerprints{Count: total},
-	}, nil
+	}
+	if req.DryRun {
+		return result, nil
+	}
+	for _, sub := range stats.subscriptionNames() {
+		_, err := b.adminJSON(ctx, http.MethodPost, b.topicPath(req.Coordinate.Topic)+"/subscription/"+pathEscape(sub)+"/skip_all", nil)
+		if err == nil {
+			result.Succeeded++
+			continue
+		}
+		if pulsarPurgeFailureIsUncertain(err) {
+			result.Uncertain++
+		} else {
+			result.Failed++
+		}
+		if result.Succeeded > 0 || result.Uncertain > 0 {
+			return result, pulsarPurgePartialFailure(result.BatchOutcome, err)
+		}
+		return result, err
+	}
+	return result, nil
+}
+
+func pulsarPurgeFailureIsUncertain(err error) bool {
+	code := apperrors.AsAppError(err).Code
+	return code != apperrors.CodeUsageError &&
+		code != apperrors.CodeAuthFailed &&
+		code != apperrors.CodeResourceNotFound &&
+		code != apperrors.CodeResourceAlreadyExists &&
+		code != apperrors.CodeValidationFailed &&
+		code != apperrors.CodeConflict
+}
+
+func pulsarPurgePartialFailure(outcome mqgov.BatchOutcome, cause error) error {
+	return apperrors.New(
+		apperrors.CodePartialFailure,
+		fmt.Sprintf(
+			"Pulsar purge did not complete atomically (succeeded=%d failed=%d uncertain=%d)",
+			outcome.Succeeded,
+			outcome.Failed,
+			outcome.Uncertain,
+		),
+		cause,
+	)
 }
 
 func (b *Broker) ListDLQs(ctx context.Context, opts mqgov.DLQListOptions) ([]mqgov.DLQDescription, error) {
@@ -1439,12 +1494,21 @@ func (b *Broker) adminJSONWithContentType(ctx context.Context, method, path stri
 	case resp.StatusCode >= 200 && resp.StatusCode < 300:
 		return data, nil
 	case resp.StatusCode == http.StatusNotFound:
-		return nil, apperrors.New(apperrors.CodeResourceNotFound, "topic not found", fmt.Errorf("pulsar admin status %d", resp.StatusCode))
+		return nil, apperrors.New(apperrors.CodeResourceNotFound, "topic not found", pulsarAdminResponseError(resp.StatusCode, data))
 	case resp.StatusCode == http.StatusConflict || resp.StatusCode == http.StatusPreconditionFailed:
-		return nil, apperrors.New(apperrors.CodeResourceAlreadyExists, "topic already exists", fmt.Errorf("pulsar admin status %d", resp.StatusCode))
+		return nil, apperrors.New(apperrors.CodeResourceAlreadyExists, "topic already exists", pulsarAdminResponseError(resp.StatusCode, data))
 	default:
-		return nil, backendErr(fmt.Errorf("pulsar admin status %d: %s", resp.StatusCode, string(data)))
+		return nil, backendErr(pulsarAdminResponseError(resp.StatusCode, data))
 	}
+}
+
+func pulsarAdminResponseError(status int, body []byte) error {
+	return fmt.Errorf(
+		"pulsar admin status %d response-bytes=%d response-sha256=%s",
+		status,
+		len(body),
+		mqgov.SHA256Hex(body),
+	)
 }
 
 func (b *Broker) fqn(topic string) string {

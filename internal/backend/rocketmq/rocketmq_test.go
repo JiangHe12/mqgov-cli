@@ -3,7 +3,10 @@ package rocketmq
 import (
 	"context"
 	"errors"
+	"os"
+	"os/exec"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -12,9 +15,28 @@ import (
 	rmqadmin "github.com/apache/rocketmq-client-go/v2/admin"
 	rmqerrors "github.com/apache/rocketmq-client-go/v2/errors"
 	"github.com/apache/rocketmq-client-go/v2/primitive"
+	"github.com/apache/rocketmq-client-go/v2/rlog"
 
 	"github.com/JiangHe12/mqgov-cli/internal/mqgov"
 )
+
+func TestRocketMQClientLoggerIsSilent(t *testing.T) {
+	const marker = "rocketmq-governed-read-success-must-not-leak"
+	if os.Getenv("MQGOV_TEST_ROCKETMQ_LOG_HELPER") == "1" {
+		rlog.Info(marker, map[string]interface{}{"topic": "orders"})
+		return
+	}
+
+	command := exec.CommandContext(t.Context(), os.Args[0], "-test.run=^TestRocketMQClientLoggerIsSilent$")
+	command.Env = append(os.Environ(), "MQGOV_TEST_ROCKETMQ_LOG_HELPER=1")
+	output, err := command.CombinedOutput()
+	if err != nil {
+		t.Fatalf("RocketMQ logger helper error = %v, output=%s", err, output)
+	}
+	if strings.Contains(string(output), marker) {
+		t.Fatalf("RocketMQ global logger released third-party diagnostics: %s", output)
+	}
+}
 
 type startFailureProducer struct {
 	rocketmqclient.Producer

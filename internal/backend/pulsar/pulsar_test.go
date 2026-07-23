@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -19,6 +20,24 @@ import (
 type closeIdleTransport struct {
 	http.RoundTripper
 	calls int
+}
+
+func TestPeekRejectsOversizedBatchBeforeReaderCreation(t *testing.T) {
+	t.Parallel()
+	backend := &Broker{}
+
+	_, err := backend.Peek(t.Context(), mqgov.MessagePeekRequest{Count: mqgov.MaxMessageBatchSize + 1})
+	if code := apperrors.AsAppError(err).Code; code != apperrors.CodeUsageError {
+		t.Fatalf("Peek() error = %v, code = %s, want USAGE_ERROR", err, code)
+	}
+	_, err = backend.Tail(t.Context(), mqgov.MessageTailRequest{MaxMessages: mqgov.MaxMessageBatchSize + 1}, nil)
+	if code := apperrors.AsAppError(err).Code; code != apperrors.CodeUsageError {
+		t.Fatalf("Tail() error = %v, code = %s, want USAGE_ERROR", err, code)
+	}
+	_, err = backend.MirrorMessages(t.Context(), mqgov.MessageMirrorRequest{Limit: mqgov.MaxMirrorBatchSize + 1}, nil)
+	if code := apperrors.AsAppError(err).Code; code != apperrors.CodeUsageError {
+		t.Fatalf("MirrorMessages() error = %v, code = %s, want USAGE_ERROR", err, code)
+	}
 }
 
 func (transport *closeIdleTransport) CloseIdleConnections() {
@@ -66,6 +85,14 @@ func TestSupportsSchemaTrue(t *testing.T) {
 	}
 	if _, ok := mqgov.SupportsSchema(backend); !ok {
 		t.Fatalf("SupportsSchema capability assertion = false, want true")
+	}
+}
+
+func TestPulsarClientUsesExplicitSilentLogger(t *testing.T) {
+	t.Parallel()
+	options := pulsarClientOptions(Options{ServiceURL: "pulsar://127.0.0.1:6650"}, nil)
+	if options.Logger == nil {
+		t.Fatal("Pulsar client logger is nil; the library would fall back to its process-global stderr logger")
 	}
 }
 
@@ -251,6 +278,42 @@ func TestPulsarLatestResetImpactFailsClosedOnUnparseablePartition(t *testing.T) 
 	}
 }
 
+func TestPulsarPurgeReportsPartialAndUncertainSubscriptions(t *testing.T) {
+	t.Parallel()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/orders/partitions"):
+			http.NotFound(w, r)
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/orders/stats"):
+			_, _ = w.Write([]byte(`{"subscriptions":{"a":{"msgBacklog":1},"b":{"msgBacklog":2}}}`))
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/subscription/a/skip_all"):
+			w.WriteHeader(http.StatusNoContent)
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/subscription/b/skip_all"):
+			http.Error(w, "sensitive broker detail", http.StatusInternalServerError)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(server.Close)
+	backend := &Broker{
+		opts:       Options{AdminURL: server.URL, Tenant: "public", Namespace: "default"},
+		httpClient: server.Client(),
+	}
+
+	result, err := backend.PurgeTopic(t.Context(), mqgov.TopicPurgeRequest{
+		Coordinate: mqgov.TopicCoordinate{Topic: "orders"},
+	})
+	if got := apperrors.AsAppError(err).Code; got != apperrors.CodePartialFailure {
+		t.Fatalf("PurgeTopic() code = %s, want %s; err=%v", got, apperrors.CodePartialFailure, err)
+	}
+	if result.BatchOutcome != (mqgov.BatchOutcome{Succeeded: 1, Uncertain: 1}) {
+		t.Fatalf("PurgeTopic() outcome = %+v", result.BatchOutcome)
+	}
+	if result.Total != 3 || result.Fingerprint.Count != 3 {
+		t.Fatalf("PurgeTopic() impact = total:%d fingerprint:%d, want 3", result.Total, result.Fingerprint.Count)
+	}
+}
+
 func TestPulsarDLQMutationCapabilitiesFailClosed(t *testing.T) {
 	t.Parallel()
 	backend := &Broker{}
@@ -302,6 +365,38 @@ func TestPulsarSchemaDescribeAndCheck(t *testing.T) {
 	}
 	if !check.Compatible || check.SchemaHash == "" {
 		t.Fatalf("CheckCompatibility() = %+v, want compatible with hash", check)
+	}
+}
+
+func TestPulsarAdminErrorsExposeOnlyResponseFingerprint(t *testing.T) {
+	t.Parallel()
+	const responseBody = `{"error":"admin-secret"}`
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(responseBody))
+	}))
+	t.Cleanup(server.Close)
+	backend := &Broker{
+		opts:       Options{AdminURL: server.URL},
+		httpClient: server.Client(),
+	}
+
+	_, err := backend.adminJSON(t.Context(), http.MethodGet, "/admin/v2/test", nil)
+	if got := apperrors.AsAppError(err).Code; got != apperrors.CodeBackendError {
+		t.Fatalf("adminJSON() code = %s, want %s; err=%v", got, apperrors.CodeBackendError, err)
+	}
+	detail := err.Error()
+	if strings.Contains(detail, "admin-secret") {
+		t.Fatalf("adminJSON() leaked response body: %v", err)
+	}
+	for _, want := range []string{
+		"status 500",
+		"response-bytes=" + strconv.Itoa(len(responseBody)),
+		"response-sha256=" + mqgov.SHA256Hex([]byte(responseBody)),
+	} {
+		if !strings.Contains(detail, want) {
+			t.Fatalf("adminJSON() error = %q, want %q", detail, want)
+		}
 	}
 }
 

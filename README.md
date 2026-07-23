@@ -55,16 +55,16 @@ It's built on the shared [`opskit-core`](https://github.com/JiangHe12/opskit-cor
 | topic list / describe / create | ✅ | ✅ | ✅ | ✅ |
 | topic delete | ✅ | ✅ | ✅ | ❌ `NOT_IMPLEMENTED`⁴ |
 | produce | ✅ | ✅ | ✅ | ✅ |
-| **non-destructive peek** | ✅ | ✅ (Reader) | ✅ (get+requeue) | ❌ `NOT_IMPLEMENTED`¹ |
+| **non-destructive peek** | ✅ | ✅ (Reader) | ❌ `NOT_IMPLEMENTED`² | ❌ `NOT_IMPLEMENTED`¹ |
 | **non-destructive tail** | ✅ | ✅ (Reader) | ❌ `NOT_IMPLEMENTED`² | ❌ `NOT_IMPLEMENTED`¹ |
 | **offset lag / reset** | ✅ | ✅ (cursor) | ❌ (no offsets) | ❌ |
 | alter partitions | ✅ | ✅ | ❌ | ❌ |
 | purge | ✅ | ✅ | ✅ | ❌ |
-| **DLQ list / peek / redrive / purge** | explicit topic peek/purge ✅; list/redrive ❌ | list/peek ✅ `{topic}-{subscription}-DLQ`; redrive/purge ❌ | ✅ DLX queues | list ✅ `%DLQ%group`; others ❌ |
+| **DLQ list / peek / redrive / purge** | explicit topic peek/purge ✅; list/redrive ❌ | list/peek ✅ `{topic}-{subscription}-DLQ`; redrive/purge ❌ | list/redrive/purge ✅; peek ❌ | list ✅ `%DLQ%group`; others ❌ |
 | **ACL list / grant / revoke** | ✅ | ✅ namespace/topic permissions | ✅ user-vhost permissions | ❌ `NOT_IMPLEMENTED`³ |
 | **schema list / describe / check / register / delete** | ✅ Confluent Schema Registry | ✅ built-in admin schema API | ❌ `NOT_IMPLEMENTED` | ❌ `NOT_IMPLEMENTED` |
 
-¹ RocketMQ's Go v2 `PullConsumer` enters the consumer-group lifecycle and commits offsets, so it cannot guarantee non-destructive peek/tail — mqgov fails closed instead of silently advancing offsets. ² RabbitMQ has no forward non-destructive tail because reads are consume/requeue oriented. Unsupported operations always return `NOT_IMPLEMENTED` (exit 12), never a fake success.
+¹ RocketMQ's Go v2 `PullConsumer` enters the consumer-group lifecycle and commits offsets, so it cannot guarantee non-destructive peek/tail — mqgov fails closed instead of silently advancing offsets. ² RabbitMQ reads are consume/requeue oriented, so they cannot prove a truly non-consuming peek or forward tail. Unsupported operations always return `NOT_IMPLEMENTED` (exit 12), never a fake success.
 
 ³ RocketMQ broker ACLs live in broker-side `plain_acl.yml`, but `rocketmq-client-go/v2` does not expose a public, cgo-free admin API for reading or changing that config. mqgov does not shell out to the Java `mqadmin` tool and does not hand-roll remoting commands; manage RocketMQ ACLs out of band with broker configuration or official mqadmin until the Go client exposes a clean API.
 
@@ -137,6 +137,8 @@ Every command is sorted into one of four **risk tiers** by the fail-closed `mqcl
 | **R2** | Elevated mutations (`topic alter`, RocketMQ `topic create`, `group create/delete`, `acl grant`, `schema register` for an existing subject, produce/mirror to a **protected** topic) | `--yes` **and** a non-empty `--ticket` |
 | **R3** | Destructive / irreversible operations (`group reset-offset`, topic/DLQ purge, supported topic/schema delete, supported DLQ redrive, broad ACL changes, internal-topic produce/mirror), protected RocketMQ topic upserts, and governance-control changes (`ctx set/use/delete/import/migrate-credentials`, `ctx role set/unset`, confirmed `audit prune`) | The above **plus** the exact `--allow-*` flag |
 
+All broker access, including mutation metadata/impact preflights, fails closed on read-audit durability. mqgov durably writes a `ReadAuditRecord` intent, performs the local R0/context-role authorization, and only then constructs or connects a broker client. The paired outcome with the same `operationId` must be durable before a read result is printed or before advanced mutation authorization, mutation intent, and write execution can begin. Intent or authorization failure means zero client builds; outcome failure suppresses output and mutation and returns `LOCAL_IO_ERROR` while retaining the backend cause. Records contain only bounded request fingerprints/byte counts and result/operation counts, never response bodies or lists. `capabilities -o json` advertises `supported.readAudit: "required-intent-outcome"`, scope `all-backend-reads-and-mutation-preflights`, and the enforced message batch limits.
+
 The R3 allow flags: `--allow-offset-reset`, `--allow-topic-purge`, `--allow-topic-delete`, `--allow-topic-upsert`, `--allow-destructive-acl`, `--allow-internal-produce`, `--allow-schema-delete`, `--allow-context-change`, `--allow-context-delete`, `--allow-role-change`, `--allow-audit-prune`.
 
 **Protected contexts, protected topics, and internal/system topics raise the tier by one.** For example, producing to `__consumer_offsets` is treated as a destructive R3 operation and needs `--allow-internal-produce`.
@@ -165,7 +167,7 @@ protected operator account.
 
 ```bash
 # Read (R0)
-mqgov topic list     [--pattern <name|glob>] -o json
+mqgov topic list     [--pattern <exact-name>] -o json
 mqgov topic describe <topic> -o json
 
 # Write
@@ -177,6 +179,8 @@ mqgov topic purge  <topic> [--dlq] --dry-run                                    
 mqgov topic purge  <topic> [--dlq] --yes --ticket <t> --allow-topic-purge          # R3
 mqgov topic delete <topic> --yes --ticket <t> --allow-topic-delete                 # supported backends R3; RocketMQ NOT_IMPLEMENTED
 ```
+
+List-command `--pattern` values are exact-name filters. Glob metacharacters (`*`, `?`, `[` and `]`) are rejected explicitly.
 </details>
 
 <details>
@@ -210,16 +214,16 @@ mqgov message mirror  <source-topic> --to-context <ctx> --to-topic <topic> --lim
 mqgov message produce <topic> [--key <k>] [--body <text>] --yes                    # R1 (R3 + --allow-internal-produce for internal topics)
 ```
 
-`peek` and `tail` never consume a message or move a cursor, and return only sha256 fingerprints (`keySha256`, `bodySha256`, size, optional timestamp) — never the body. Peek counts must be positive; results preserve broker read order, never exceed `--count`, and report the actual shorter count at the current boundary. RabbitMQ holds the distinct batch unacknowledged and requeues it together only after fingerprinting; a requeue failure fails the command. `tail` is bounded by `--max-messages` and `--timeout`; `--follow` streams new messages only until those bounds or cancellation.
+`peek` and `tail` never consume a message or move a cursor, and return only sha256 fingerprints (`keySha256`, `bodySha256`, size, optional timestamp) — never the body. Peek `--count` and tail `--max-messages` must be between 1 and 10,000. The command and backend boundaries both reject larger values before allocation or broker access; tail starts with a small bounded buffer rather than preallocating the full request. Results preserve broker read order, never exceed the requested bound, and report the actual shorter count at the current boundary. RabbitMQ message/DLQ peek returns `NOT_IMPLEMENTED` because its queue API cannot guarantee a non-consuming read. `tail` is also bounded by `--timeout`; `--follow` streams new messages only until those bounds or cancellation. Tail fingerprints are not released until the read outcome is durable.
 
-`message mirror` is a bounded one-shot copy, never a daemon. It resolves both topics once, then performs two independent authorizations: a source-side non-destructive read under the source context policy and a target-side produce under the persisted `--to-context` policy. Either failure occurs before message reads or target writes. Source and destination are audited separately with their own context, target, request/result fingerprint, and count; bodies, keys, and headers never enter audit. `--dry-run` / `--plan` reads/counts but does not produce. Kafka and Pulsar can be mirror sources; RabbitMQ and RocketMQ source mirroring fail closed with `NOT_IMPLEMENTED`. Kafka supports `--from earliest|latest|offset:N|timestamp:<RFC3339>` and `--partition`; Pulsar supports `earliest|latest|timestamp:<RFC3339>` and all-partition reads.
+`message mirror` is a bounded one-shot copy, never a daemon. `--limit` is restricted to 1–1,000. The source intent is durable before source authorization or client construction; source messages are staged in memory only after that point, with both the requested message-count bound and a conservative 64 MiB accounting budget that charges actual key/body/header bytes plus fixed per-message and per-header overhead. The source outcome must be durable before target mutation intent or produce; any source read/audit/buffer failure wipes the staged copies and guarantees zero target writes. An erroneous backend cannot emit past the requested limit. `--dry-run` / `--plan` follows the same mandatory source pair and never produces. Source and destination records use separate contexts and fingerprint/count-only metadata; raw bodies, keys, and headers never enter audit or output. Kafka and Pulsar can be mirror sources; RabbitMQ and RocketMQ source mirroring fail closed with `NOT_IMPLEMENTED`. Kafka supports `--from earliest|latest|offset:N|timestamp:<RFC3339>` and `--partition`; Pulsar supports `earliest|latest|timestamp:<RFC3339>` and all-partition reads.
 </details>
 
 <details>
 <summary><b>dlq</b> — dead-letter queue governance</summary>
 
 ```bash
-mqgov dlq list [--topic <source-or-dlq>] [--group <group-or-sub>] [--pattern <name|glob>] -o json     # R0
+mqgov dlq list [--topic <source-or-dlq>] [--group <group-or-sub>] [--pattern <exact-name>] -o json     # R0
 mqgov dlq peek <dlq> [--topic <source>] [--group <group-or-sub>] [--count N] -o json                   # R0, fingerprints only
 mqgov dlq redrive <dlq> --target <live-topic> [--count N] --dry-run -o json                            # R0 preview (RabbitMQ)
 mqgov dlq redrive <dlq> --target <live-topic> [--count N] --yes --ticket <t> --allow-internal-produce  # R3 (RabbitMQ)
@@ -255,7 +259,7 @@ mqgov fleet status --all -o json
 mqgov fleet topics --contexts dev,staging --pattern orders -o json
 ```
 
-`fleet status` fans out `Ping`, `Describe`, and `Capabilities` across selected contexts. `fleet topics` fans out topic listing and tags every row with its source context. Select contexts with exactly one of `--all` or `--contexts a,b,c`. Fleet is R0 only: each per-context read still runs through the same R0 classification and authorization path as a single-context command, using that context's own stored credentials. Partial failures are reported per context as `denied`, `unreachable`, or `error` data and the command still exits 0.
+`fleet status` fans out `Ping`, `Describe`, and `Capabilities` across selected contexts. `fleet topics` fans out topic listing and tags every row with its source context. Select contexts with exactly one of `--all` or `--contexts a,b,c`. Fleet is R0 only: one mandatory batch-read intent is durable before fanout, every context still uses its own stored credentials and R0 classification/authorization path, and one aggregate outcome is durable before output. The audit stores only a selection fingerprint and bounded success/failure/result counts. Partial backend failures are reported per context as `denied`, `unreachable`, or `error` data and the command exits 0; an audit persistence failure instead returns `LOCAL_IO_ERROR` with no dashboard output.
 </details>
 
 <details>
@@ -362,7 +366,7 @@ mqgov install claude --skills     # also: codex, opencode, copilot, cursor, wind
 - **Verified release tags** — publication starts only from a GitHub-verified signed annotated tag that exactly matches `package.json`, `CHANGELOG.md`, and freshly fetched `origin/main`; CI and the complete real-broker matrix rerun on that tag commit.
 - **Signed binaries** — every release artifact is signed with [cosign](https://github.com/sigstore/cosign) (keyless / OIDC). A `checksums.txt` (also signed) covers all platforms.
 - **npm provenance** — the npm package is published from CI via OpenID Connect with [provenance attestations](https://docs.npmjs.com/generating-provenance-statements) linking it to this exact repo and workflow.
-- **Verified installs** — the npm postinstall downloads the binary over an allow-listed host and checks its SHA-256 against the signed `checksums.txt` before installing.
+- **Verified installs** — the npm postinstall trusts only the six platform SHA-256 digests embedded in `package.json` and covered by npm provenance. Mirrors may supply binary bytes but never verification data; verified bytes are fsynced and atomically replace the previous binary. There is no verification bypass.
 - **Tamper-evident audit** — `mqgov audit verify --strict` re-walks the hash chain and reports any gap or modification.
 - **No insecure transport** — SASL/TLS and mTLS only; mqgov never offers an insecure-skip-verify escape hatch. TLS broker/admin/Schema Registry connections for Kafka, RabbitMQ, and Pulsar add TOFU SPKI-SHA256 pinning on top of normal CA validation; pins live in `.mqgov-cli/tls_known_hosts`.
 

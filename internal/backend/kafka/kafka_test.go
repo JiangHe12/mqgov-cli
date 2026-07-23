@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -21,6 +22,24 @@ import (
 type closeIdleTransport struct {
 	http.RoundTripper
 	calls int
+}
+
+func TestPeekRejectsOversizedBatchBeforeClientCreation(t *testing.T) {
+	t.Parallel()
+	backend := &Broker{}
+
+	_, err := backend.Peek(t.Context(), mqgov.MessagePeekRequest{Count: mqgov.MaxMessageBatchSize + 1})
+	if code := apperrors.AsAppError(err).Code; code != apperrors.CodeUsageError {
+		t.Fatalf("Peek() error = %v, code = %s, want USAGE_ERROR", err, code)
+	}
+	_, err = backend.Tail(t.Context(), mqgov.MessageTailRequest{MaxMessages: mqgov.MaxMessageBatchSize + 1}, nil)
+	if code := apperrors.AsAppError(err).Code; code != apperrors.CodeUsageError {
+		t.Fatalf("Tail() error = %v, code = %s, want USAGE_ERROR", err, code)
+	}
+	_, err = backend.MirrorMessages(t.Context(), mqgov.MessageMirrorRequest{Limit: mqgov.MaxMirrorBatchSize + 1}, nil)
+	if code := apperrors.AsAppError(err).Code; code != apperrors.CodeUsageError {
+		t.Fatalf("MirrorMessages() error = %v, code = %s, want USAGE_ERROR", err, code)
+	}
 }
 
 func (transport *closeIdleTransport) CloseIdleConnections() {
@@ -82,6 +101,36 @@ func TestAppliedDeleteRecordsImpactCountsOnlySuccessfulPartitions(t *testing.T) 
 	}
 	if got := impact[0]; got.Partition != 0 || got.From != 4 || got.To != 10 || got.Count != 6 {
 		t.Fatalf("impact[0] = %+v, want partition=0 from=4 to=10 count=6", got)
+	}
+}
+
+func TestKafkaOffsetCommitOutcomePreservesPerPartitionCounts(t *testing.T) {
+	t.Parallel()
+	plan := mqgov.OffsetPlan{
+		Topic: mqgov.TopicCoordinate{Topic: "orders"},
+		Impact: []mqgov.PartitionImpact{
+			{Partition: 0},
+			{Partition: 1},
+			{Partition: 2},
+		},
+	}
+	responses := kadm.OffsetResponses{
+		"orders": {
+			0: {Offset: kadm.Offset{Topic: "orders", Partition: 0}},
+			1: {Offset: kadm.Offset{Topic: "orders", Partition: 1}, Err: errors.New("partition unavailable")},
+		},
+	}
+
+	outcome, err := kafkaOffsetCommitOutcome(plan, responses)
+	if outcome != (mqgov.BatchOutcome{Succeeded: 1, Failed: 1, Uncertain: 1}) {
+		t.Fatalf("outcome = %+v", outcome)
+	}
+	if err == nil {
+		t.Fatal("kafkaOffsetCommitOutcome() error = nil, want first failure")
+	}
+	partialErr := kafkaOffsetCommitPartialFailure(outcome, err)
+	if got := apperrors.AsAppError(partialErr).Code; got != apperrors.CodePartialFailure {
+		t.Fatalf("partial failure code = %s, want %s", got, apperrors.CodePartialFailure)
 	}
 }
 
@@ -213,5 +262,37 @@ func TestSchemaRegistryRequests(t *testing.T) {
 	}
 	if !check.Compatible || check.SchemaHash == "" || !sawCheck {
 		t.Fatalf("CheckCompatibility() = %+v, sawCheck=%v", check, sawCheck)
+	}
+}
+
+func TestSchemaRegistryErrorsExposeOnlyResponseFingerprint(t *testing.T) {
+	t.Parallel()
+	const responseBody = `{"error":"registry-secret"}`
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(responseBody))
+	}))
+	t.Cleanup(server.Close)
+	backend := &Broker{
+		opts:   Options{SchemaRegistryURL: server.URL},
+		srHTTP: server.Client(),
+	}
+
+	_, err := backend.schemaRegistryJSON(t.Context(), http.MethodGet, "/subjects", nil)
+	if got := apperrors.AsAppError(err).Code; got != apperrors.CodeBackendError {
+		t.Fatalf("schemaRegistryJSON() code = %s, want %s; err=%v", got, apperrors.CodeBackendError, err)
+	}
+	detail := err.Error()
+	if strings.Contains(detail, "registry-secret") {
+		t.Fatalf("schemaRegistryJSON() leaked response body: %v", err)
+	}
+	for _, want := range []string{
+		"status 500",
+		"response-bytes=" + strconv.Itoa(len(responseBody)),
+		"response-sha256=" + mqgov.SHA256Hex([]byte(responseBody)),
+	} {
+		if !strings.Contains(detail, want) {
+			t.Fatalf("schemaRegistryJSON() error = %q, want %q", detail, want)
+		}
 	}
 }

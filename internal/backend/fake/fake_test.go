@@ -8,6 +8,31 @@ import (
 	"github.com/JiangHe12/mqgov-cli/internal/mqgov"
 )
 
+func TestPeekRejectsOversizedBatchBeforeAllocation(t *testing.T) {
+	t.Parallel()
+	backend := New("test", "")
+
+	_, err := backend.Peek(t.Context(), mqgov.MessagePeekRequest{
+		Coordinate: mqgov.TopicCoordinate{Cluster: "test", Topic: "orders"},
+		Count:      mqgov.MaxMessageBatchSize + 1,
+	})
+
+	if code := apperrors.AsAppError(err).Code; code != apperrors.CodeUsageError {
+		t.Fatalf("Peek() error = %v, code = %s, want USAGE_ERROR", err, code)
+	}
+}
+
+func TestRedriveRejectsOversizedBatch(t *testing.T) {
+	t.Parallel()
+	backend := New("test", "")
+
+	_, err := backend.RedriveDLQ(t.Context(), mqgov.DLQRedriveRequest{Count: mqgov.MaxMessageBatchSize + 1})
+
+	if code := apperrors.AsAppError(err).Code; code != apperrors.CodeUsageError {
+		t.Fatalf("RedriveDLQ() error = %v, code = %s, want USAGE_ERROR", err, code)
+	}
+}
+
 func TestDLQRedrivePlanAndExecutionUseMoveSemantics(t *testing.T) {
 	t.Parallel()
 	backend := New("test", "")

@@ -21,6 +21,7 @@ import (
 	"github.com/JiangHe12/opskit-core/v2/audit"
 	"github.com/JiangHe12/opskit-core/v2/lockfile"
 
+	"github.com/JiangHe12/mqgov-cli/internal/mqgov"
 	"github.com/JiangHe12/mqgov-cli/internal/mqgovctx"
 )
 
@@ -28,6 +29,7 @@ const (
 	codeAuditIncomplete              apperrors.ErrorCode = "AUDIT_INCOMPLETE"
 	mutationAuditAPIVersion                              = "mqgov-cli.io/mutation-audit/v1"
 	mutationAuditKind                                    = "MutationAuditRecord"
+	readAuditKind                                        = "ReadAuditRecord"
 	safeAuditKind                                        = "AuditRecord"
 	mutationAuditPhaseIntent                             = "intent"
 	mutationAuditPhaseOutcome                            = "outcome"
@@ -63,6 +65,7 @@ type mutationAuditOutcome struct {
 	Uncertain          int    `json:"uncertain,omitempty"`
 	Revision           string `json:"revision,omitempty"`
 	CompensationStatus string `json:"compensationStatus,omitempty"`
+	ResultCount        int    `json:"resultCount,omitempty"`
 	counted            bool
 }
 
@@ -73,6 +76,7 @@ type mutationAuditSpec struct {
 	Target      audit.EventTarget
 	Metadata    mutationAuditMetadata
 	AuditPath   string
+	Read        bool
 }
 
 // safeAuditRecord is the only audit shape emitted or returned by mqgov. The
@@ -82,6 +86,7 @@ type safeAuditRecord struct {
 	Kind       string `json:"kind"`
 	audit.Event
 	MutationID        string                `json:"mutationId,omitempty"`
+	OperationID       string                `json:"operationId,omitempty"`
 	Phase             string                `json:"phase,omitempty"`
 	Action            string                `json:"action,omitempty"`
 	TicketFingerprint string                `json:"ticketFingerprint,omitempty"`
@@ -278,22 +283,35 @@ func finishBatchMutationAudit(
 	failed int,
 	operationErr error,
 ) error {
-	skipped := total - succeeded - failed
+	return finishBatchMutationAuditWithOutcome(handle, total, mqgov.BatchOutcome{
+		Succeeded: succeeded,
+		Failed:    failed,
+	}, operationErr)
+}
+
+func finishBatchMutationAuditWithOutcome(
+	handle *mutationAuditHandle,
+	total int,
+	outcome mqgov.BatchOutcome,
+	operationErr error,
+) error {
+	skipped := total - outcome.Count()
 	if skipped < 0 {
 		skipped = 0
 	}
 	status := audit.StatusSuccess
-	if failed > 0 || operationErr != nil {
+	if outcome.Failed > 0 || outcome.Uncertain > 0 || operationErr != nil {
 		status = audit.StatusFailed
-		if succeeded > 0 {
+		if outcome.Succeeded > 0 {
 			status = audit.StatusPartialFailed
 		}
 	}
 	return finishMutationAudit(handle, mutationAuditOutcome{
 		Status:    status,
-		Succeeded: succeeded,
-		Failed:    failed,
+		Succeeded: outcome.Succeeded,
+		Failed:    outcome.Failed,
 		Skipped:   skipped,
+		Uncertain: outcome.Uncertain,
 		counted:   true,
 	}, operationErr)
 }
@@ -309,9 +327,17 @@ func (handle *mutationAuditHandle) record(phase string, outcome *mutationAuditOu
 	if outcome != nil {
 		status = outcome.Status
 	}
+	kind := mutationAuditKind
+	mutationID := handle.id
+	operationID := ""
+	if handle.spec.Read {
+		kind = readAuditKind
+		mutationID = ""
+		operationID = handle.id
+	}
 	return safeAuditRecord{
 		APIVersion: mutationAuditAPIVersion,
-		Kind:       mutationAuditKind,
+		Kind:       kind,
 		Event: audit.Event{
 			Timestamp: mutationAuditRuntimeFor(handle.f).now().UTC(),
 			EventType: audit.EventType(handle.spec.Action + "." + phase),
@@ -324,7 +350,8 @@ func (handle *mutationAuditHandle) record(phase string, outcome *mutationAuditOu
 			Target: handle.spec.Target,
 			Status: status,
 		},
-		MutationID:        handle.id,
+		MutationID:        mutationID,
+		OperationID:       operationID,
 		Phase:             phase,
 		Action:            handle.spec.Action,
 		TicketFingerprint: ticketFingerprint,
@@ -499,7 +526,7 @@ func appendQueuedAuditRecord(f *cliFlags, path string, record safeAuditRecord) e
 
 func validateSafeAuditRecord(record safeAuditRecord) error {
 	if record.APIVersion != mutationAuditAPIVersion ||
-		(record.Kind != mutationAuditKind && record.Kind != safeAuditKind) ||
+		(record.Kind != mutationAuditKind && record.Kind != readAuditKind && record.Kind != safeAuditKind) ||
 		record.Ticket != "" ||
 		record.Reason != "" ||
 		record.Diff != "" ||
@@ -626,7 +653,7 @@ func writeMutationSpoolRecord(_ *cliFlags, spoolPath string, record safeAuditRec
 	if err != nil {
 		return err
 	}
-	name := fmt.Sprintf("%020d-%s.json", sequence, record.MutationID)
+	name := fmt.Sprintf("%020d-%s.json", sequence, auditRecordID(record))
 	finalPath := filepath.Join(spoolPath, name)
 	tempPath := finalPath + ".tmp"
 	file, err := os.OpenFile(tempPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600) //nolint:gosec // Path is inside the validated owner-only spool.
@@ -829,9 +856,9 @@ func handleMutationSpoolReplayAppendError(
 	state, hasState := mutationAuditCommitState(appendErr)
 	if hasState && state == audit.AppendCommitIndeterminate {
 		if markErr := markMutationSpoolIndeterminate(path); markErr != nil {
-			return auditIncompleteError(record.MutationID, true)
+			return auditIncompleteError(auditRecordID(record), true)
 		}
-		return indeterminateMutationSpoolError(record.MutationID)
+		return indeterminateMutationSpoolError(auditRecordID(record))
 	}
 	if !mutationAuditAppendCommitted(appendErr) {
 		return appendErr
@@ -967,11 +994,12 @@ func validateMutationSpoolRecord(record safeAuditRecord, name string) error {
 	if err := validateSanitizedAuditMetadata(record); err != nil {
 		return apperrors.New(apperrors.CodeLocalIOError, "invalid mutation outcome spool metadata", nil)
 	}
-	if _, err := hex.DecodeString(record.MutationID); err != nil {
-		return apperrors.New(apperrors.CodeLocalIOError, "invalid mutation outcome spool mutation id", nil)
+	recordID := auditRecordID(record)
+	if _, err := hex.DecodeString(recordID); err != nil {
+		return apperrors.New(apperrors.CodeLocalIOError, "invalid operation outcome spool id", nil)
 	}
 	if !validMutationSpoolName(name) ||
-		!strings.HasSuffix(strings.TrimSuffix(name, ".json"), "-"+record.MutationID) {
+		!strings.HasSuffix(strings.TrimSuffix(name, ".json"), "-"+recordID) {
 		return apperrors.New(apperrors.CodeLocalIOError, "mutation outcome spool filename does not match its record", nil)
 	}
 	if record.EventType != audit.EventType(record.Action+"."+mutationAuditPhaseOutcome) ||
@@ -1000,13 +1028,23 @@ func validateMutationSpoolRecord(record safeAuditRecord, name string) error {
 }
 
 func validMutationSpoolRecordIdentity(record safeAuditRecord) bool {
-	return record.Kind == mutationAuditKind &&
+	recordID := auditRecordID(record)
+	return (record.Kind == mutationAuditKind || record.Kind == readAuditKind) &&
 		record.Phase == mutationAuditPhaseOutcome &&
 		validMutationAuditAction(record.Action) &&
-		len(record.MutationID) == 32 &&
-		record.MutationID == strings.ToLower(record.MutationID) &&
+		len(recordID) == 32 &&
+		recordID == strings.ToLower(recordID) &&
+		((record.Kind == mutationAuditKind && record.MutationID != "" && record.OperationID == "") ||
+			(record.Kind == readAuditKind && record.OperationID != "" && record.MutationID == "")) &&
 		!record.Timestamp.IsZero() &&
 		record.Outcome != nil
+}
+
+func auditRecordID(record safeAuditRecord) string {
+	if record.Kind == readAuditKind {
+		return record.OperationID
+	}
+	return record.MutationID
 }
 
 func validateMutationSpoolOutcomeStatus(outcome mutationAuditOutcome) error {

@@ -14,6 +14,7 @@ import (
 	"github.com/JiangHe12/opskit-core/v2/redact"
 	"github.com/JiangHe12/opskit-core/v2/safety"
 
+	"github.com/JiangHe12/mqgov-cli/internal/mqclass"
 	"github.com/JiangHe12/mqgov-cli/internal/mqgovctx"
 )
 
@@ -50,18 +51,13 @@ func runDoctor(ctx context.Context, f *cliFlags) error {
 	} else {
 		result.add(doctorCheck{Name: "context", Status: audit.StatusSuccess, Context: ctxName, Message: redact.String("context loaded")})
 		result.add(doctorWriteProbeCheck(ctxMeta, ctxName))
-	}
-	backend, _, backendErr := buildBroker(f)
-	if backendErr != nil {
-		result.add(doctorFailed("backend", backendErr))
-	} else {
-		defer backend.Close()
-		start := time.Now()
-		err := backend.Ping(ctx)
-		result.add(doctorCheck{Name: "backend", Status: auditStatus(err), Message: doctorMessage("ping ok", err), Backend: backend.Describe().Backend, Context: ctxName, Latency: time.Since(start).String()})
+		backendCheck, err := doctorBackendCheck(ctx, f, ctxMeta, ctxName)
+		if err != nil {
+			return err
+		}
+		result.add(backendCheck)
 	}
 	result.add(doctorAuditCheck(f))
-	appendAuditWarn(f, auditEventDiagnostic, ctxMeta, audit.EventTarget{ResourceType: "diagnostic"}, audit.StatusSuccess, fmt.Sprintf("doctor checks=%d", len(result.Checks)), nil)
 	if err := printDoctorResult(f, result); err != nil {
 		return err
 	}
@@ -69,6 +65,52 @@ func runDoctor(ctx context.Context, f *cliFlags) error {
 		return apperrors.New(apperrors.CodeValidationFailed, "doctor checks failed", nil)
 	}
 	return nil
+}
+
+func doctorBackendCheck(ctx context.Context, f *cliFlags, meta mqgovctx.Context, contextName string) (doctorCheck, error) {
+	handle, err := beginReadAudit(f, readAuditSpec{
+		Action:      "mq.doctor.ping",
+		ContextName: contextName,
+		Context:     meta,
+		Target:      audit.EventTarget{ResourceType: "diagnostic", Resource: "backend"},
+		Metadata:    mutationValueMetadata("mq.doctor.ping", map[string]string{"context": contextName}),
+	})
+	if err != nil {
+		return doctorCheck{}, err
+	}
+	if authorizeErr := classifyAndAuthorize(f, meta, mqclass.OperationClusterInfo, mqclass.Target{}, ""); authorizeErr != nil {
+		return doctorAuditedFailure(handle, authorizeErr)
+	}
+	backend, buildErr := buildBrokerForResolvedContext(f, meta, contextName)
+	if buildErr != nil {
+		return doctorAuditedFailure(handle, buildErr)
+	}
+	start := time.Now()
+	backendName := backend.Describe().Backend
+	pingErr := backend.Ping(ctx)
+	backend.Close()
+	resultCount := 0
+	if pingErr == nil {
+		resultCount = 1
+	}
+	if err := persistReadAuditOutcome(handle, singleReadAuditOutcome(resultCount, pingErr), pingErr); err != nil {
+		return doctorCheck{}, err
+	}
+	return doctorCheck{
+		Name:    "backend",
+		Status:  auditStatus(pingErr),
+		Message: doctorMessage("ping ok", pingErr),
+		Backend: backendName,
+		Context: contextName,
+		Latency: time.Since(start).String(),
+	}, nil
+}
+
+func doctorAuditedFailure(handle *readAuditHandle, operationErr error) (doctorCheck, error) {
+	if err := persistReadAuditOutcome(handle, singleReadAuditOutcome(0, operationErr), operationErr); err != nil {
+		return doctorCheck{}, err
+	}
+	return doctorFailed("backend", operationErr), nil
 }
 
 func (r *doctorResult) add(check doctorCheck) {

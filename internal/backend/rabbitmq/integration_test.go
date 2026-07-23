@@ -70,7 +70,7 @@ func TestRabbitMQIntegration(t *testing.T) {
 		t.Fatalf("messages before produce = %q, want 0", got)
 	}
 
-	produced, err := backend.Produce(ctx, mqgov.MessageProduceRequest{Coordinate: coord, Body: []byte("body")})
+	_, err = backend.Produce(ctx, mqgov.MessageProduceRequest{Coordinate: coord, Body: []byte("body")})
 	if err != nil {
 		t.Fatalf("Produce() error = %v", err)
 	}
@@ -82,15 +82,8 @@ func TestRabbitMQIntegration(t *testing.T) {
 	if beforePeek != 1 {
 		t.Fatalf("messages after produce = %d, want 1", beforePeek)
 	}
-	peeked, err := backend.Peek(ctx, mqgov.MessagePeekRequest{Coordinate: coord, Count: 1})
-	if err != nil {
-		t.Fatalf("Peek() error = %v", err)
-	}
-	if peeked.Count != 1 || len(peeked.Messages) != 1 {
-		t.Fatalf("Peek() = %+v, want one fingerprint", peeked)
-	}
-	if peeked.Messages[0].BodySHA256 != produced.Fingerprint.BodySHA256 {
-		t.Fatalf("peek body fingerprint = %s, want %s", peeked.Messages[0].BodySHA256, produced.Fingerprint.BodySHA256)
+	if _, err := backend.Peek(ctx, mqgov.MessagePeekRequest{Coordinate: coord, Count: 1}); apperrors.AsAppError(err).Code != apperrors.CodeNotImplemented {
+		t.Fatalf("Peek() error = %v, want %s", err, apperrors.CodeNotImplemented)
 	}
 	desc, err = backend.DescribeTopic(ctx, coord)
 	if err != nil {
@@ -170,7 +163,7 @@ func TestRabbitMQIntegration(t *testing.T) {
 	defer func() { _ = backend.DeleteTopic(context.Background(), sourceCoord) }()
 	defer func() { _ = backend.DeleteTopic(context.Background(), dlqCoord) }()
 	declareRabbitMQDLXQueues(t, ctx, backend, source, dlq)
-	producedDLQ, err := backend.Produce(ctx, mqgov.MessageProduceRequest{Coordinate: sourceCoord, Body: []byte("dead")})
+	_, err = backend.Produce(ctx, mqgov.MessageProduceRequest{Coordinate: sourceCoord, Body: []byte("dead")})
 	if err != nil {
 		t.Fatalf("Produce(source for DLQ) error = %v", err)
 	}
@@ -187,12 +180,15 @@ func TestRabbitMQIntegration(t *testing.T) {
 	if len(dlqs) != 1 || dlqs[0].Coordinate.Topic != dlq {
 		t.Fatalf("ListDLQs() = %+v, want %q", dlqs, dlq)
 	}
-	dlqPeek, err := dlqManager.PeekDLQ(ctx, mqgov.DLQPeekRequest{DLQ: dlqCoord, Count: 1})
-	if err != nil {
-		t.Fatalf("PeekDLQ() error = %v", err)
+	if _, err := dlqManager.PeekDLQ(ctx, mqgov.DLQPeekRequest{DLQ: dlqCoord, Count: 1}); apperrors.AsAppError(err).Code != apperrors.CodeNotImplemented {
+		t.Fatalf("PeekDLQ() error = %v, want %s", err, apperrors.CodeNotImplemented)
 	}
-	if dlqPeek.Count != 1 || dlqPeek.Messages[0].BodySHA256 != producedDLQ.Fingerprint.BodySHA256 {
-		t.Fatalf("PeekDLQ() = %+v, want %+v", dlqPeek, producedDLQ.Fingerprint)
+	dlqDescription, err := backend.DescribeTopic(ctx, dlqCoord)
+	if err != nil {
+		t.Fatalf("DescribeTopic(DLQ after PeekDLQ) error = %v", err)
+	}
+	if got := messageCount(t, dlqDescription); got != 1 {
+		t.Fatalf("DLQ peek changed message count: got=%d want=1", got)
 	}
 	redrivePlan, err := dlqManager.RedriveDLQ(ctx, mqgov.DLQRedriveRequest{DLQ: dlqCoord, Target: coord, Count: 1, DryRun: true})
 	if err != nil {

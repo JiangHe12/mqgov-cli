@@ -47,6 +47,7 @@ type Options struct {
 	SchemaRegistryUsername string
 	SchemaRegistryPassword string
 	TLSPinPath             string
+	TLSNotify              tlspin.NotifyFunc
 	Timeout                time.Duration
 }
 
@@ -248,6 +249,9 @@ func (b *Broker) Peek(ctx context.Context, req mqgov.MessagePeekRequest) (mqgov.
 	if req.Count <= 0 {
 		return mqgov.MessagePeekResult{}, apperrors.New(apperrors.CodeUsageError, "peek count must be positive", nil)
 	}
+	if req.Count > mqgov.MaxMessageBatchSize {
+		return mqgov.MessagePeekResult{}, apperrors.New(apperrors.CodeUsageError, "peek count exceeds the safe batch limit", nil)
+	}
 	if req.Partition < 0 || req.Offset < 0 {
 		return mqgov.MessagePeekResult{}, apperrors.New(apperrors.CodeUsageError, "peek partition and offset must be non-negative", nil)
 	}
@@ -370,6 +374,9 @@ func (b *Broker) RevokeACL(ctx context.Context, binding mqgov.ACLBinding) error 
 }
 
 func (b *Broker) Tail(ctx context.Context, req mqgov.MessageTailRequest, emit func(mqgov.MessageFingerprint) error) (mqgov.MessageTailResult, error) {
+	if req.MaxMessages <= 0 || req.MaxMessages > mqgov.MaxMessageBatchSize {
+		return mqgov.MessageTailResult{}, apperrors.New(apperrors.CodeUsageError, "tail max messages must be within the safe batch limit", nil)
+	}
 	starts, ends, err := b.tailOffsets(ctx, req)
 	if err != nil {
 		return mqgov.MessageTailResult{}, err
@@ -408,8 +415,8 @@ func (b *Broker) Tail(ctx context.Context, req mqgov.MessageTailRequest, emit fu
 }
 
 func (b *Broker) MirrorMessages(ctx context.Context, req mqgov.MessageMirrorRequest, emit func(mqgov.Message) error) (mqgov.MessageMirrorResult, error) {
-	if req.Limit <= 0 {
-		return mqgov.MessageMirrorResult{}, apperrors.New(apperrors.CodeUsageError, "mirror limit must be positive", nil)
+	if req.Limit <= 0 || req.Limit > mqgov.MaxMirrorBatchSize {
+		return mqgov.MessageMirrorResult{}, apperrors.New(apperrors.CodeUsageError, "mirror limit must be within the safe batch limit", nil)
 	}
 	starts, ends, err := b.mirrorOffsets(ctx, req)
 	if err != nil {
@@ -808,25 +815,81 @@ func (b *Broker) ResetOffset(ctx context.Context, req mqgov.OffsetPlanRequest) (
 	if err != nil {
 		return mqgov.OffsetPlan{}, err
 	}
-	if !req.DryRun {
-		offsets := make(kadm.Offsets)
-		offsets[req.Topic.Topic] = make(map[int32]kadm.Offset)
-		for _, item := range plan.Impact {
-			partition, err := safeInt32(item.Partition, "partition")
-			if err != nil {
-				return mqgov.OffsetPlan{}, err
-			}
-			offsets[req.Topic.Topic][partition] = kadm.Offset{Topic: req.Topic.Topic, Partition: partition, At: item.To}
-		}
-		responses, err := b.admin.CommitOffsets(ctx, req.Group.Group, offsets)
+	if req.DryRun {
+		return plan, nil
+	}
+	offsets := make(kadm.Offsets)
+	offsets[req.Topic.Topic] = make(map[int32]kadm.Offset)
+	for _, item := range plan.Impact {
+		partition, err := safeInt32(item.Partition, "partition")
 		if err != nil {
-			return mqgov.OffsetPlan{}, backendErr(err)
+			return mqgov.OffsetPlan{}, err
 		}
-		if err := responses.Error(); err != nil {
-			return mqgov.OffsetPlan{}, backendErr(err)
+		offsets[req.Topic.Topic][partition] = kadm.Offset{Topic: req.Topic.Topic, Partition: partition, At: item.To}
+	}
+	return b.commitOffsetPlan(ctx, req.Group.Group, plan, offsets)
+}
+
+func (b *Broker) commitOffsetPlan(ctx context.Context, group string, plan mqgov.OffsetPlan, offsets kadm.Offsets) (mqgov.OffsetPlan, error) {
+	responses, err := b.admin.CommitOffsets(ctx, group, offsets)
+	if err != nil {
+		plan.Uncertain = len(plan.Impact)
+		return plan, kafkaOffsetCommitPartialFailure(plan.BatchOutcome, backendErr(err))
+	}
+	outcome, responseErr := kafkaOffsetCommitOutcome(plan, responses)
+	plan.BatchOutcome = outcome
+	if outcome.Failed > 0 || outcome.Uncertain > 0 {
+		if outcome.Succeeded > 0 || outcome.Uncertain > 0 {
+			return plan, kafkaOffsetCommitPartialFailure(outcome, responseErr)
 		}
+		return plan, backendErr(responseErr)
 	}
 	return plan, nil
+}
+
+func kafkaOffsetCommitOutcome(plan mqgov.OffsetPlan, responses kadm.OffsetResponses) (mqgov.BatchOutcome, error) {
+	var outcome mqgov.BatchOutcome
+	var firstErr error
+	for _, item := range plan.Impact {
+		partition, err := safeInt32(item.Partition, "partition")
+		if err != nil {
+			outcome.Failed++
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		response, found := responses.Lookup(plan.Topic.Topic, partition)
+		if !found {
+			outcome.Uncertain++
+			if firstErr == nil {
+				firstErr = fmt.Errorf("missing Kafka offset commit response for partition %d", item.Partition)
+			}
+			continue
+		}
+		if response.Err != nil {
+			outcome.Failed++
+			if firstErr == nil {
+				firstErr = response.Err
+			}
+			continue
+		}
+		outcome.Succeeded++
+	}
+	return outcome, firstErr
+}
+
+func kafkaOffsetCommitPartialFailure(outcome mqgov.BatchOutcome, cause error) error {
+	return apperrors.New(
+		apperrors.CodePartialFailure,
+		fmt.Sprintf(
+			"Kafka offset commit did not complete atomically (succeeded=%d failed=%d uncertain=%d)",
+			outcome.Succeeded,
+			outcome.Failed,
+			outcome.Uncertain,
+		),
+		cause,
+	)
 }
 
 func (b *Broker) offsetPlan(ctx context.Context, req mqgov.OffsetPlanRequest) (mqgov.OffsetPlan, error) {
@@ -1194,7 +1257,7 @@ func kgoOptions(opts Options) ([]kgo.Opt, error) {
 		return nil, err
 	}
 	if tlsConfig != nil {
-		kopts = append(kopts, kgo.Dialer(kafkaTLSDialer(tlsConfig, opts.TLSPinPath, kafkaDialTimeout(opts))))
+		kopts = append(kopts, kgo.Dialer(kafkaTLSDialer(tlsConfig, opts.TLSPinPath, kafkaDialTimeout(opts), kafkaTLSNotify(opts))))
 	}
 	mechanism, err := saslMechanism(opts)
 	if err != nil {
@@ -1229,7 +1292,7 @@ func schemaRegistryHTTPClient(opts Options) (*http.Client, error) {
 		if tlsConfig == nil {
 			tlsConfig = &tls.Config{MinVersion: tls.VersionTLS12}
 		}
-		tlsConfig, err = tlspin.CloneForEndpoint(tlsConfig, opts.TLSPinPath, opts.SchemaRegistryURL, tlspin.NotifyStderr)
+		tlsConfig, err = tlspin.CloneForEndpoint(tlsConfig, opts.TLSPinPath, opts.SchemaRegistryURL, kafkaTLSNotify(opts))
 		if err != nil {
 			return nil, err
 		}
@@ -1287,10 +1350,19 @@ func (b *Broker) schemaRegistryJSON(ctx context.Context, method, path string, pa
 	case resp.StatusCode >= 200 && resp.StatusCode < 300:
 		return data, nil
 	case resp.StatusCode == http.StatusNotFound:
-		return nil, apperrors.New(apperrors.CodeResourceNotFound, "schema subject or version not found", fmt.Errorf("schema registry status %d", resp.StatusCode))
+		return nil, apperrors.New(apperrors.CodeResourceNotFound, "schema subject or version not found", schemaRegistryResponseError(resp.StatusCode, data))
 	default:
-		return nil, backendErr(fmt.Errorf("schema registry status %d: %s", resp.StatusCode, string(data)))
+		return nil, backendErr(schemaRegistryResponseError(resp.StatusCode, data))
 	}
+}
+
+func schemaRegistryResponseError(status int, body []byte) error {
+	return fmt.Errorf(
+		"schema registry status %d response-bytes=%d response-sha256=%s",
+		status,
+		len(body),
+		mqgov.SHA256Hex(body),
+	)
 }
 
 func schemaRegistryEndpoint(opts Options, path string) (string, error) {
@@ -1336,10 +1408,15 @@ func buildTLSConfig(opts Options) (*tls.Config, error) {
 	return cfg, nil
 }
 
-func kafkaTLSDialer(base *tls.Config, pinPath string, dialTimeout time.Duration) func(context.Context, string, string) (net.Conn, error) {
+func kafkaTLSDialer(
+	base *tls.Config,
+	pinPath string,
+	dialTimeout time.Duration,
+	notify tlspin.NotifyFunc,
+) func(context.Context, string, string) (net.Conn, error) {
 	dialer := &net.Dialer{Timeout: dialTimeout}
 	return func(ctx context.Context, network, host string) (net.Conn, error) {
-		cfg, err := kafkaTLSConfigForHost(base, pinPath, host)
+		cfg, err := kafkaTLSConfigForHostWithNotify(base, pinPath, host, notify)
 		if err != nil {
 			return nil, err
 		}
@@ -1348,7 +1425,23 @@ func kafkaTLSDialer(base *tls.Config, pinPath string, dialTimeout time.Duration)
 }
 
 func kafkaTLSConfigForHost(base *tls.Config, pinPath, host string) (*tls.Config, error) {
-	return tlspin.CloneForEndpoint(base, pinPath, host, tlspin.NotifyStderr)
+	return kafkaTLSConfigForHostWithNotify(base, pinPath, host, tlspin.NotifyDiscard)
+}
+
+func kafkaTLSConfigForHostWithNotify(
+	base *tls.Config,
+	pinPath string,
+	host string,
+	notify tlspin.NotifyFunc,
+) (*tls.Config, error) {
+	return tlspin.CloneForEndpoint(base, pinPath, host, notify)
+}
+
+func kafkaTLSNotify(opts Options) tlspin.NotifyFunc {
+	if opts.TLSNotify != nil {
+		return opts.TLSNotify
+	}
+	return tlspin.NotifyDiscard
 }
 
 func kafkaDialTimeout(opts Options) time.Duration {

@@ -1,7 +1,6 @@
 package cmd
 
 import (
-	"fmt"
 	"slices"
 	"strconv"
 
@@ -29,20 +28,22 @@ func newTopicListCmd(f *cliFlags) *cobra.Command {
 		Short: "List topics",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			backend, meta, err := buildBroker(f)
+			if err := validateExactPattern(pattern); err != nil {
+				return err
+			}
+			options := mqgov.TopicListOptions{Namespace: f.Namespace, Pattern: pattern}
+			items, opTarget, err := runMandatoryBrokerList(f, readAuditSpec{
+				Action:   "mq.topic.list",
+				Target:   audit.EventTarget{ResourceType: "topic"},
+				Metadata: mutationValueMetadata("mq.topic.list", options),
+			}, func(meta mqgovctx.Context) error {
+				return classifyAndAuthorize(f, meta, mqclass.OperationList, mqclass.Target{Topic: pattern}, "")
+			}, func(backend mqgov.Broker, _ mqgovctx.Context) ([]mqgov.TopicDescription, error) {
+				return backend.ListTopics(cmd.Context(), options)
+			})
 			if err != nil {
 				return err
 			}
-			defer backend.Close()
-			opTarget := operationTargetFromBroker(f, backend)
-			if err := classifyAndAuthorize(f, meta, mqclass.OperationList, mqclass.Target{Topic: pattern}, ""); err != nil {
-				return err
-			}
-			items, err := backend.ListTopics(cmd.Context(), mqgov.TopicListOptions{Namespace: f.Namespace, Pattern: pattern})
-			if err != nil {
-				return err
-			}
-			appendAuditWarn(f, auditEventTopic, meta, audit.EventTarget{ResourceType: "topic"}, audit.StatusSuccess, fmt.Sprintf("list count=%d", len(items)), nil)
 			if f.Output == "json" {
 				return targetJSONList(f, "TopicList", items, len(items), len(items), opTarget)
 			}
@@ -53,7 +54,7 @@ func newTopicListCmd(f *cliFlags) *cobra.Command {
 			return targetTable(f, []string{"TOPIC", "PARTITIONS", "PROTECTED", "INTERNAL"}, rows, opTarget)
 		},
 	}
-	cmd.Flags().StringVar(&pattern, "pattern", "", "Exact topic name or wildcard pattern")
+	cmd.Flags().StringVar(&pattern, "pattern", "", "Exact topic name")
 	return cmd
 }
 
@@ -63,21 +64,29 @@ func newTopicDescribeCmd(f *cliFlags) *cobra.Command {
 		Short: "Describe a topic",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			backend, meta, err := buildBroker(f)
-			if err != nil {
-				return err
-			}
-			defer backend.Close()
-			opTarget := operationTargetFromBroker(f, backend)
 			topic := args[0]
-			resolved, err := resolveTopicTarget(cmd.Context(), backend, f, meta, topic, false)
+			resolved, opTarget, err := runMandatoryBrokerRead(f, readAuditSpec{
+				Action:   "mq.topic.describe",
+				Target:   audit.EventTarget{ResourceType: "topic", Resource: topic},
+				Metadata: mutationValueMetadata("mq.topic.describe", map[string]string{"topic": topic}),
+			}, func(meta mqgovctx.Context) error {
+				target := declaredTopicTarget(meta, firstNonEmpty(f.Backend, meta.Backend, defaultFakeBackend), topic, false)
+				return classifyAndAuthorize(f, meta, mqclass.OperationDescribe, target, "")
+			}, func(backend mqgov.Broker, meta mqgovctx.Context) (resolvedTopicTarget, error) {
+				resolved, resolveErr := resolveTopicTarget(cmd.Context(), backend, f, meta, topic, false)
+				if resolveErr != nil {
+					return resolvedTopicTarget{}, resolveErr
+				}
+				if authorizeErr := classifyAndAuthorize(f, meta, mqclass.OperationDescribe, resolved.Classification, ""); authorizeErr != nil {
+					return resolvedTopicTarget{}, authorizeErr
+				}
+				return resolved, nil
+			}, func(resolvedTopicTarget) int {
+				return 1
+			})
 			if err != nil {
 				return err
 			}
-			if err := classifyAndAuthorize(f, meta, mqclass.OperationDescribe, resolved.Classification, ""); err != nil {
-				return err
-			}
-			appendAuditWarn(f, auditEventTopic, meta, audit.EventTarget{ResourceType: "topic", Resource: topic}, audit.StatusSuccess, "describe", nil)
 			return targetJSONData(f, "TopicDescription", resolved.Description, opTarget, operationTargetRead)
 		},
 	}
@@ -93,40 +102,56 @@ func newTopicCreateCmd(f *cliFlags) *cobra.Command {
 			if contextPlanOnly(f) {
 				return printBrokerChangePlan(f, "create", "topic", args[0], map[string]any{"partitions": partitions})
 			}
-			backend, meta, err := buildBroker(f)
+			topic := args[0]
+			preflight, err := runMandatoryBrokerPreflight(f, readAuditSpec{
+				Action:   "mq.topic.create.preflight",
+				Target:   audit.EventTarget{ResourceType: "topic", Resource: topic},
+				Metadata: mutationValueMetadata("mq.topic.create.preflight", map[string]any{"topic": topic, "partitions": partitions}),
+			}, func(backend mqgov.Broker, meta mqgovctx.Context) (topicCreatePreflight, error) {
+				coordinate, coordinateErr := topicCoord(f, meta, backend, topic)
+				return topicCreatePreflight{Coordinate: coordinate, Backend: backend.Describe().Backend}, coordinateErr
+			}, func(topicCreatePreflight) int { return 1 })
 			if err != nil {
 				return err
 			}
-			defer backend.Close()
-			opTarget := operationTargetFromBroker(f, backend)
-			topic := args[0]
-			target, allow := topicCreateAuthorizationTarget(meta, backend.Describe().Backend, topic)
-			if err := classifyAndAuthorize(f, meta, mqclass.OperationCreateTopic, target, allow); err != nil {
+			defer preflight.Backend.Close()
+			target, allow := topicCreateAuthorizationTarget(preflight.Context, preflight.Value.Backend, topic)
+			if err := classifyAndAuthorize(f, preflight.Context, mqclass.OperationCreateTopic, target, allow); err != nil {
 				return err
 			}
-			request := mqgov.TopicCreateRequest{Coordinate: topicCoord(f, meta, topic), Partitions: partitions, Protected: target.ProtectedTopic}
+			request := mqgov.TopicCreateRequest{Coordinate: preflight.Value.Coordinate, Partitions: partitions, Protected: target.ProtectedTopic}
 			handle, err := beginMutationAudit(f, mutationAuditSpec{
 				Action:   "mq.topic.create",
-				Context:  meta,
+				Context:  preflight.Context,
 				Target:   audit.EventTarget{ResourceType: "topic", Resource: topic},
 				Metadata: mutationValueMetadata("mq.topic.create", request),
 			})
 			if err != nil {
 				return err
 			}
-			desc, operationErr := backend.CreateTopic(cmd.Context(), request)
+			desc, operationErr := preflight.Backend.CreateTopic(cmd.Context(), request)
 			if err := finishMutationAudit(handle, topicCreateAuditOutcome(operationErr), operationErr); err != nil {
 				return err
 			}
-			return targetJSONData(f, "TopicDescription", desc, opTarget, operationTargetWrite)
+			return targetJSONData(f, "TopicDescription", desc, preflight.Target, operationTargetWrite)
 		},
 	}
 	cmd.Flags().IntVar(&partitions, "partitions", 1, "Partition count")
 	return cmd
 }
 
+type topicCreatePreflight struct {
+	Coordinate mqgov.TopicCoordinate
+	Backend    string
+}
+
+type topicPartitionPreflight struct {
+	Manager  mqgov.PartitionManager
+	Resolved resolvedTopicTarget
+}
+
 func topicCreateAuthorizationTarget(meta mqgovctx.Context, backend, topic string) (mqclass.Target, safety.AllowFlag) {
-	target := declaredTopicTarget(meta, topic, false)
+	target := declaredTopicTarget(meta, backend, topic, false)
 	if backend != "rocketmq" {
 		return target, ""
 	}
@@ -151,39 +176,41 @@ func newTopicAlterCmd(f *cliFlags) *cobra.Command {
 			if contextPlanOnly(f) {
 				return printBrokerChangePlan(f, "alter", "topic", args[0], map[string]any{"partitions": partitions})
 			}
-			backend, meta, err := buildBroker(f)
-			if err != nil {
-				return err
-			}
-			defer backend.Close()
-			opTarget := operationTargetFromBroker(f, backend)
-			manager, ok := mqgov.SupportsPartitions(backend)
-			if !ok {
-				return apperrors.New(apperrors.CodeNotImplemented, "backend does not support partition management", nil)
-			}
 			topic := args[0]
-			resolved, err := resolveTopicTarget(cmd.Context(), backend, f, meta, topic, false)
+			preflight, err := runMandatoryBrokerPreflight(f, readAuditSpec{
+				Action:   "mq.topic.alter.preflight",
+				Target:   audit.EventTarget{ResourceType: "topic", Resource: topic},
+				Metadata: mutationValueMetadata("mq.topic.alter.preflight", map[string]any{"topic": topic, "partitions": partitions}),
+			}, func(backend mqgov.Broker, meta mqgovctx.Context) (topicPartitionPreflight, error) {
+				manager, ok := mqgov.SupportsPartitions(backend)
+				if !ok {
+					return topicPartitionPreflight{}, apperrors.New(apperrors.CodeNotImplemented, "backend does not support partition management", nil)
+				}
+				resolved, resolveErr := resolveTopicTarget(cmd.Context(), backend, f, meta, topic, false)
+				return topicPartitionPreflight{Manager: manager, Resolved: resolved}, resolveErr
+			}, func(topicPartitionPreflight) int { return 1 })
 			if err != nil {
 				return err
 			}
-			if err := classifyAndAuthorize(f, meta, mqclass.OperationAlterTopic, resolved.Classification, ""); err != nil {
+			defer preflight.Backend.Close()
+			if err := classifyAndAuthorize(f, preflight.Context, mqclass.OperationAlterTopic, preflight.Value.Resolved.Classification, ""); err != nil {
 				return err
 			}
-			request := mqgov.TopicAlterRequest{Coordinate: resolved.Coordinate, Partitions: partitions}
+			request := mqgov.TopicAlterRequest{Coordinate: preflight.Value.Resolved.Coordinate, Partitions: partitions}
 			handle, err := beginMutationAudit(f, mutationAuditSpec{
 				Action:   "mq.topic.alter",
-				Context:  meta,
+				Context:  preflight.Context,
 				Target:   audit.EventTarget{ResourceType: "topic", Resource: topic},
 				Metadata: mutationValueMetadata("mq.topic.alter", request),
 			})
 			if err != nil {
 				return err
 			}
-			changed, operationErr := manager.AlterTopic(cmd.Context(), request)
+			changed, operationErr := preflight.Value.Manager.AlterTopic(cmd.Context(), request)
 			if err := finishMutationAudit(handle, mutationAuditOutcome{}, operationErr); err != nil {
 				return err
 			}
-			return targetJSONData(f, "TopicDescription", changed, opTarget, operationTargetWrite)
+			return targetJSONData(f, "TopicDescription", changed, preflight.Target, operationTargetWrite)
 		},
 	}
 	cmd.Flags().IntVar(&partitions, "partitions", 0, "New partition count")
@@ -202,38 +229,39 @@ func newTopicDeleteCmd(f *cliFlags) *cobra.Command {
 				}
 				return printBrokerChangePlan(f, "delete", "topic", args[0], nil)
 			}
-			backend, meta, err := buildBroker(f)
-			if err != nil {
-				return err
-			}
-			defer backend.Close()
-			if !slices.Contains(backend.Capabilities().Verbs, "delete") {
-				return apperrors.New(apperrors.CodeNotImplemented, "backend does not support topic delete", nil)
-			}
-			opTarget := operationTargetFromBroker(f, backend)
 			topic := args[0]
-			resolved, err := resolveTopicTarget(cmd.Context(), backend, f, meta, topic, false)
+			preflight, err := runMandatoryBrokerPreflight(f, readAuditSpec{
+				Action:   "mq.topic.delete.preflight",
+				Target:   audit.EventTarget{ResourceType: "topic", Resource: topic},
+				Metadata: mutationValueMetadata("mq.topic.delete.preflight", map[string]string{"topic": topic}),
+			}, func(backend mqgov.Broker, meta mqgovctx.Context) (resolvedTopicTarget, error) {
+				if !slices.Contains(backend.Capabilities().Verbs, "delete") {
+					return resolvedTopicTarget{}, apperrors.New(apperrors.CodeNotImplemented, "backend does not support topic delete", nil)
+				}
+				return resolveTopicTarget(cmd.Context(), backend, f, meta, topic, false)
+			}, func(resolvedTopicTarget) int { return 1 })
 			if err != nil {
 				return err
 			}
-			if err := classifyAndAuthorize(f, meta, mqclass.OperationDeleteTopic, resolved.Classification, allowTopicDelete); err != nil {
+			defer preflight.Backend.Close()
+			if err := classifyAndAuthorize(f, preflight.Context, mqclass.OperationDeleteTopic, preflight.Value.Classification, allowTopicDelete); err != nil {
 				return err
 			}
-			coordinate := resolved.Coordinate
+			coordinate := preflight.Value.Coordinate
 			handle, err := beginMutationAudit(f, mutationAuditSpec{
 				Action:   "mq.topic.delete",
-				Context:  meta,
+				Context:  preflight.Context,
 				Target:   audit.EventTarget{ResourceType: "topic", Resource: topic},
 				Metadata: mutationValueMetadata("mq.topic.delete", coordinate),
 			})
 			if err != nil {
 				return err
 			}
-			operationErr := backend.DeleteTopic(cmd.Context(), coordinate)
+			operationErr := preflight.Backend.DeleteTopic(cmd.Context(), coordinate)
 			if err := finishMutationAudit(handle, mutationAuditOutcome{}, operationErr); err != nil {
 				return err
 			}
-			return targetJSONData(f, "DeleteResult", map[string]string{"topic": topic, "status": audit.StatusSuccess}, opTarget, operationTargetWrite)
+			return targetJSONData(f, "DeleteResult", map[string]string{"topic": topic, "status": audit.StatusSuccess}, preflight.Target, operationTargetWrite)
 		},
 	}
 }
@@ -253,68 +281,100 @@ func newTopicPurgeCmd(f *cliFlags) *cobra.Command {
 		Short: "Purge topic or DLQ messages",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			backend, meta, err := buildBroker(f)
-			if err != nil {
-				return err
-			}
-			defer backend.Close()
-			opTarget := operationTargetFromBroker(f, backend)
-			manager, ok := mqgov.SupportsPartitions(backend)
-			if !ok {
-				return apperrors.New(apperrors.CodeNotImplemented, "backend does not support topic purge", nil)
-			}
 			topic := args[0]
 			op := mqclass.OperationPurgeTopic
 			if dlq {
 				op = mqclass.OperationPurgeDLQ
 			}
 			dryRun := f.DryRun || f.Plan
-			resolved, err := resolveTopicTarget(cmd.Context(), backend, f, meta, topic, dryRun)
+			preflight, err := runMandatoryBrokerPreflight(f, readAuditSpec{
+				Action:   "mq.topic.purge.preflight",
+				Target:   audit.EventTarget{ResourceType: "topic", Resource: topic},
+				Metadata: mutationValueMetadata("mq.topic.purge.preflight", map[string]any{"topic": topic, "dlq": dlq, "dryRun": dryRun}),
+			}, func(backend mqgov.Broker, meta mqgovctx.Context) (topicPurgePreflight, error) {
+				manager, ok := mqgov.SupportsPartitions(backend)
+				if !ok {
+					return topicPurgePreflight{}, apperrors.New(apperrors.CodeNotImplemented, "backend does not support topic purge", nil)
+				}
+				resolved, resolveErr := resolveTopicTarget(cmd.Context(), backend, f, meta, topic, dryRun)
+				if resolveErr != nil {
+					return topicPurgePreflight{}, resolveErr
+				}
+				value := topicPurgePreflight{Manager: manager, Resolved: resolved}
+				if !dryRun {
+					return value, nil
+				}
+				if authorizeErr := classifyAndAuthorize(f, meta, op, resolved.Classification, ""); authorizeErr != nil {
+					return topicPurgePreflight{}, authorizeErr
+				}
+				request := mqgov.TopicPurgeRequest{Coordinate: resolved.Coordinate, DLQ: dlq, DryRun: true}
+				value.Preview, resolveErr = manager.PurgeTopic(cmd.Context(), request)
+				value.HasPreview = resolveErr == nil
+				return value, resolveErr
+			}, func(value topicPurgePreflight) int {
+				if value.HasPreview {
+					return int(value.Preview.Fingerprint.Count)
+				}
+				return 1
+			})
 			if err != nil {
 				return err
 			}
+			defer preflight.Backend.Close()
+			resolved := preflight.Value.Resolved
 			allow := allowTopicPurge
 			if dryRun {
 				allow = ""
 			}
-			if err := classifyAndAuthorize(f, meta, op, resolved.Classification, allow); err != nil {
-				return err
+			if !dryRun {
+				if err := classifyAndAuthorize(f, preflight.Context, op, resolved.Classification, allow); err != nil {
+					return err
+				}
 			}
 			request := mqgov.TopicPurgeRequest{Coordinate: resolved.Coordinate, DLQ: dlq, DryRun: dryRun}
 			if dryRun {
-				result, err := manager.PurgeTopic(cmd.Context(), request)
-				if err != nil {
-					appendAuditWarn(f, auditEventTopic, meta, audit.EventTarget{ResourceType: "topic", Resource: topic}, audit.StatusFailed, "purge plan", err)
-					return err
-				}
-				appendAuditWarn(f, auditEventTopic, meta, audit.EventTarget{ResourceType: "topic", Resource: topic}, audit.StatusSuccess, fmt.Sprintf("purge plan count=%d", result.Fingerprint.Count), nil)
-				return targetJSONData(f, "TopicPurgeResult", result, opTarget, operationTargetWrite)
+				return targetJSONData(f, "TopicPurgeResult", preflight.Value.Preview, preflight.Target, operationTargetWrite)
 			}
 			handle, err := beginMutationAudit(f, mutationAuditSpec{
 				Action:   "mq.topic.purge",
-				Context:  meta,
+				Context:  preflight.Context,
 				Target:   audit.EventTarget{ResourceType: "topic", Resource: topic},
 				Metadata: mutationValueMetadata("mq.topic.purge", request),
 			})
 			if err != nil {
 				return err
 			}
-			result, operationErr := manager.PurgeTopic(cmd.Context(), request)
-			failed := 0
-			if operationErr != nil {
-				failed = 1
+			result, operationErr := preflight.Value.Manager.PurgeTopic(cmd.Context(), request)
+			outcome := result.BatchOutcome
+			total := outcome.Count()
+			if outcome.Empty() {
+				outcome.Succeeded = int(result.Fingerprint.Count)
+				if operationErr != nil {
+					outcome.Failed = 1
+				}
+				total = outcome.Count()
 			}
-			total := int(result.Fingerprint.Count) + failed
-			if err := finishBatchMutationAudit(handle, total, int(result.Fingerprint.Count), failed, operationErr); err != nil {
+			if err := finishBatchMutationAuditWithOutcome(handle, total, outcome, operationErr); err != nil {
 				return err
 			}
-			return targetJSONData(f, "TopicPurgeResult", result, opTarget, operationTargetWrite)
+			return targetJSONData(f, "TopicPurgeResult", result, preflight.Target, operationTargetWrite)
 		},
 	}
 	cmd.Flags().BoolVar(&dlq, "dlq", false, "Purge DLQ")
 	return cmd
 }
 
-func topicCoord(f *cliFlags, meta mqgovctx.Context, topic string) mqgov.TopicCoordinate {
-	return mqgov.TopicCoordinate{Cluster: firstNonEmpty(f.Cluster, meta.Cluster, "fake"), Namespace: firstNonEmpty(f.Namespace, meta.Namespace), Topic: topic}
+type topicPurgePreflight struct {
+	Manager    mqgov.PartitionManager
+	Resolved   resolvedTopicTarget
+	Preview    mqgov.TopicPurgeResult
+	HasPreview bool
+}
+
+func topicCoord(f *cliFlags, meta mqgovctx.Context, backend mqgov.Broker, topic string) (mqgov.TopicCoordinate, error) {
+	scope, err := canonicalBrokerScope(f, meta, backend)
+	if err != nil {
+		return mqgov.TopicCoordinate{}, err
+	}
+	return mqgov.TopicCoordinate{Cluster: scope.Cluster, Namespace: scope.Namespace, Topic: topic}, nil
 }

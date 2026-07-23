@@ -373,6 +373,9 @@ func (b *Broker) peekMessages(topic string, partition int, offset int64, count i
 	if count <= 0 {
 		return nil, apperrors.New(apperrors.CodeUsageError, "peek count must be positive", nil)
 	}
+	if count > mqgov.MaxMessageBatchSize {
+		return nil, apperrors.New(apperrors.CodeUsageError, "peek count exceeds the safe batch limit", nil)
+	}
 	if partition < 0 || offset < 0 {
 		return nil, apperrors.New(apperrors.CodeUsageError, "peek partition and offset must be non-negative", nil)
 	}
@@ -395,6 +398,9 @@ func (b *Broker) peekMessages(topic string, partition int, offset int64, count i
 func (b *Broker) RedriveDLQ(_ context.Context, req mqgov.DLQRedriveRequest) (mqgov.DLQRedriveResult, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	if req.Count <= 0 || req.Count > mqgov.MaxMessageBatchSize {
+		return mqgov.DLQRedriveResult{}, apperrors.New(apperrors.CodeUsageError, "redrive count must be within the safe batch limit", nil)
+	}
 	if req.DLQ.Topic == req.Target.Topic {
 		return mqgov.DLQRedriveResult{}, apperrors.New(apperrors.CodeUsageError, "redrive target must differ from the DLQ", nil)
 	}

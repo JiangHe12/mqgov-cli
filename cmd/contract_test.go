@@ -122,8 +122,10 @@ func TestAuditDoesNotPersistSchemaPlaintext(t *testing.T) {
 	if strings.Contains(text, "SecretSchema") || strings.Contains(text, schema) {
 		t.Fatalf("audit log contains schema plaintext: %s", text)
 	}
-	if !strings.Contains(text, `"detailFingerprint":"sha256:`) || !strings.Contains(text, `"detailBytes":`) {
-		t.Fatalf("audit log missing safe detail fingerprint: %s", text)
+	if !strings.Contains(text, `"kind":"ReadAuditRecord"`) ||
+		!strings.Contains(text, `"payloadFingerprint":"sha256:`) ||
+		!strings.Contains(text, `"payloadBytes":`) {
+		t.Fatalf("audit log missing safe read-request fingerprint: %s", text)
 	}
 }
 
@@ -267,6 +269,31 @@ func TestAuthorizeProtectedContextEscalatesR1ToTicket(t *testing.T) {
 	f.Ticket = "OPS-1"
 	if err := authorize(f, safety.R1, meta, ""); err != nil {
 		t.Fatalf("authorize() with ticket error = %v", err)
+	}
+}
+
+func TestListPatternFlagsRejectGlobMetacharacters(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+	}{
+		{name: "topic star", args: []string{"topic", "list", "--pattern", "orders-*"}},
+		{name: "group question", args: []string{"group", "list", "--pattern", "billing?"}},
+		{name: "DLQ character class", args: []string{"dlq", "list", "--pattern", "orders[12].dlq"}},
+		{name: "schema star", args: []string{"schema", "list", "--pattern", "orders-*"}},
+		{name: "fleet star", args: []string{"fleet", "topics", "--all", "--pattern", "orders-*"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := runCommandForTest(t, tt.args...)
+			appErr := apperrors.AsAppError(err)
+			if appErr.Code != apperrors.CodeUsageError {
+				t.Fatalf("error code = %s, want %s; err=%v", appErr.Code, apperrors.CodeUsageError, err)
+			}
+			if !strings.Contains(appErr.Message, "exact name") {
+				t.Fatalf("error message = %q, want exact-name contract", appErr.Message)
+			}
+		})
 	}
 }
 

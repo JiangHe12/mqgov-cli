@@ -1,7 +1,6 @@
 package cmd
 
 import (
-	"fmt"
 	"strconv"
 
 	"github.com/spf13/cobra"
@@ -27,20 +26,22 @@ func newGroupListCmd(f *cliFlags) *cobra.Command {
 		Short: "List groups",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			backend, meta, err := buildBroker(f)
+			if err := validateExactPattern(pattern); err != nil {
+				return err
+			}
+			options := mqgov.GroupListOptions{Namespace: f.Namespace, Pattern: pattern}
+			items, opTarget, err := runMandatoryBrokerList(f, readAuditSpec{
+				Action:   "mq.group.list",
+				Target:   audit.EventTarget{ResourceType: "group"},
+				Metadata: mutationValueMetadata("mq.group.list", options),
+			}, func(meta mqgovctx.Context) error {
+				return classifyAndAuthorize(f, meta, mqclass.OperationList, mqclass.Target{Group: pattern}, "")
+			}, func(backend mqgov.Broker, _ mqgovctx.Context) ([]mqgov.GroupDescription, error) {
+				return backend.ListGroups(cmd.Context(), options)
+			})
 			if err != nil {
 				return err
 			}
-			defer backend.Close()
-			opTarget := operationTargetFromBroker(f, backend)
-			if err := classifyAndAuthorize(f, meta, mqclass.OperationList, mqclass.Target{Group: pattern}, ""); err != nil {
-				return err
-			}
-			items, err := backend.ListGroups(cmd.Context(), mqgov.GroupListOptions{Namespace: f.Namespace, Pattern: pattern})
-			if err != nil {
-				return err
-			}
-			appendAuditWarn(f, auditEventGroup, meta, audit.EventTarget{ResourceType: "group"}, audit.StatusSuccess, fmt.Sprintf("list count=%d", len(items)), nil)
 			if f.Output == "json" {
 				return targetJSONList(f, "GroupList", items, len(items), len(items), opTarget)
 			}
@@ -51,7 +52,7 @@ func newGroupListCmd(f *cliFlags) *cobra.Command {
 			return targetTable(f, []string{"GROUP", "MEMBERS", "STATE"}, rows, opTarget)
 		},
 	}
-	cmd.Flags().StringVar(&pattern, "pattern", "", "Exact group name or wildcard pattern")
+	cmd.Flags().StringVar(&pattern, "pattern", "", "Exact group name")
 	return cmd
 }
 
@@ -64,31 +65,36 @@ func newGroupCreateCmd(f *cliFlags) *cobra.Command {
 			if contextPlanOnly(f) {
 				return printBrokerChangePlan(f, "create", "group", args[0], nil)
 			}
-			backend, meta, err := buildBroker(f)
+			group := args[0]
+			preflight, err := runMandatoryBrokerPreflight(f, readAuditSpec{
+				Action:   "mq.group.create.preflight",
+				Target:   audit.EventTarget{ResourceType: "group", Resource: group},
+				Metadata: mutationValueMetadata("mq.group.create.preflight", map[string]string{"group": group}),
+			}, func(backend mqgov.Broker, meta mqgovctx.Context) (mqgov.GroupCoordinate, error) {
+				return groupCoord(f, meta, backend, group)
+			}, func(mqgov.GroupCoordinate) int { return 1 })
 			if err != nil {
 				return err
 			}
-			defer backend.Close()
-			opTarget := operationTargetFromBroker(f, backend)
-			group := args[0]
-			if err := classifyAndAuthorize(f, meta, mqclass.OperationCreateGroup, mqclass.Target{Group: group}, ""); err != nil {
+			defer preflight.Backend.Close()
+			if err := classifyAndAuthorize(f, preflight.Context, mqclass.OperationCreateGroup, mqclass.Target{Group: group}, ""); err != nil {
 				return err
 			}
-			coordinate := groupCoord(f, meta, group)
+			coordinate := preflight.Value
 			handle, err := beginMutationAudit(f, mutationAuditSpec{
 				Action:   "mq.group.create",
-				Context:  meta,
+				Context:  preflight.Context,
 				Target:   audit.EventTarget{ResourceType: "group", Resource: group},
 				Metadata: mutationValueMetadata("mq.group.create", coordinate),
 			})
 			if err != nil {
 				return err
 			}
-			desc, operationErr := backend.CreateGroup(cmd.Context(), coordinate)
+			desc, operationErr := preflight.Backend.CreateGroup(cmd.Context(), coordinate)
 			if err := finishMutationAudit(handle, mutationAuditOutcome{}, operationErr); err != nil {
 				return err
 			}
-			return targetJSONData(f, "GroupDescription", desc, opTarget, operationTargetWrite)
+			return targetJSONData(f, "GroupDescription", desc, preflight.Target, operationTargetWrite)
 		},
 	}
 }
@@ -102,31 +108,36 @@ func newGroupDeleteCmd(f *cliFlags) *cobra.Command {
 			if contextPlanOnly(f) {
 				return printBrokerChangePlan(f, "delete", "group", args[0], nil)
 			}
-			backend, meta, err := buildBroker(f)
+			group := args[0]
+			preflight, err := runMandatoryBrokerPreflight(f, readAuditSpec{
+				Action:   "mq.group.delete.preflight",
+				Target:   audit.EventTarget{ResourceType: "group", Resource: group},
+				Metadata: mutationValueMetadata("mq.group.delete.preflight", map[string]string{"group": group}),
+			}, func(backend mqgov.Broker, meta mqgovctx.Context) (mqgov.GroupCoordinate, error) {
+				return groupCoord(f, meta, backend, group)
+			}, func(mqgov.GroupCoordinate) int { return 1 })
 			if err != nil {
 				return err
 			}
-			defer backend.Close()
-			opTarget := operationTargetFromBroker(f, backend)
-			group := args[0]
-			if err := classifyAndAuthorize(f, meta, mqclass.OperationDeleteGroup, mqclass.Target{Group: group}, ""); err != nil {
+			defer preflight.Backend.Close()
+			if err := classifyAndAuthorize(f, preflight.Context, mqclass.OperationDeleteGroup, mqclass.Target{Group: group}, ""); err != nil {
 				return err
 			}
-			coordinate := groupCoord(f, meta, group)
+			coordinate := preflight.Value
 			handle, err := beginMutationAudit(f, mutationAuditSpec{
 				Action:   "mq.group.delete",
-				Context:  meta,
+				Context:  preflight.Context,
 				Target:   audit.EventTarget{ResourceType: "group", Resource: group},
 				Metadata: mutationValueMetadata("mq.group.delete", coordinate),
 			})
 			if err != nil {
 				return err
 			}
-			operationErr := backend.DeleteGroup(cmd.Context(), coordinate)
+			operationErr := preflight.Backend.DeleteGroup(cmd.Context(), coordinate)
 			if err := finishMutationAudit(handle, mutationAuditOutcome{}, operationErr); err != nil {
 				return err
 			}
-			return targetJSONData(f, "DeleteResult", map[string]string{"group": group, "status": audit.StatusSuccess}, opTarget, operationTargetWrite)
+			return targetJSONData(f, "DeleteResult", map[string]string{"group": group, "status": audit.StatusSuccess}, preflight.Target, operationTargetWrite)
 		},
 	}
 }
@@ -137,31 +148,40 @@ func newGroupLagCmd(f *cliFlags) *cobra.Command {
 		Short: "Show group lag",
 		Args:  cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			backend, meta, err := buildBroker(f)
-			if err != nil {
-				return err
-			}
-			defer backend.Close()
-			opTarget := operationTargetFromBroker(f, backend)
-			manager, ok := mqgov.SupportsOffsets(backend)
-			if !ok {
-				return apperrors.New(apperrors.CodeNotImplemented, "backend does not support offsets", nil)
-			}
 			group, topic := args[0], args[1]
-			resolved, err := resolveTopicTarget(cmd.Context(), backend, f, meta, topic, false)
+			plan, opTarget, err := runMandatoryBrokerRead(f, readAuditSpec{
+				Action:   "mq.group.lag",
+				Target:   audit.EventTarget{ResourceType: "offset", Resource: group + "/" + topic},
+				Metadata: mutationValueMetadata("mq.group.lag", map[string]string{"group": group, "topic": topic}),
+			}, func(meta mqgovctx.Context) error {
+				target := declaredTopicTarget(meta, firstNonEmpty(f.Backend, meta.Backend, defaultFakeBackend), topic, false)
+				target.Group = group
+				return classifyAndAuthorize(f, meta, mqclass.OperationLag, target, "")
+			}, func(backend mqgov.Broker, meta mqgovctx.Context) (mqgov.OffsetPlan, error) {
+				manager, ok := mqgov.SupportsOffsets(backend)
+				if !ok {
+					return mqgov.OffsetPlan{}, apperrors.New(apperrors.CodeNotImplemented, "backend does not support offsets", nil)
+				}
+				resolved, resolveErr := resolveTopicTarget(cmd.Context(), backend, f, meta, topic, false)
+				if resolveErr != nil {
+					return mqgov.OffsetPlan{}, resolveErr
+				}
+				target := resolved.Classification
+				target.Group = group
+				if authorizeErr := classifyAndAuthorize(f, meta, mqclass.OperationLag, target, ""); authorizeErr != nil {
+					return mqgov.OffsetPlan{}, authorizeErr
+				}
+				groupCoordinate, coordinateErr := groupCoord(f, meta, backend, group)
+				if coordinateErr != nil {
+					return mqgov.OffsetPlan{}, coordinateErr
+				}
+				return manager.Lag(cmd.Context(), groupCoordinate, resolved.Coordinate)
+			}, func(plan mqgov.OffsetPlan) int {
+				return len(plan.Impact)
+			})
 			if err != nil {
 				return err
 			}
-			target := resolved.Classification
-			target.Group = group
-			if err := classifyAndAuthorize(f, meta, mqclass.OperationLag, target, ""); err != nil {
-				return err
-			}
-			plan, err := manager.Lag(cmd.Context(), groupCoord(f, meta, group), resolved.Coordinate)
-			if err != nil {
-				return err
-			}
-			appendAuditWarn(f, auditEventOffset, meta, audit.EventTarget{ResourceType: "offset", Resource: group + "/" + topic}, audit.StatusSuccess, fmt.Sprintf("lag count=%d", plan.Total), nil)
 			return targetJSONData(f, "LagResult", plan, opTarget, operationTargetRead)
 		},
 	}
@@ -174,51 +194,65 @@ func newGroupResetOffsetCmd(f *cliFlags) *cobra.Command {
 		Short: "Plan or reset group offsets",
 		Args:  cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			backend, meta, err := buildBroker(f)
-			if err != nil {
-				return err
-			}
-			defer backend.Close()
-			opTarget := operationTargetFromBroker(f, backend)
-			manager, ok := mqgov.SupportsOffsets(backend)
-			if !ok {
-				return apperrors.New(apperrors.CodeNotImplemented, "backend does not support offsets", nil)
-			}
 			group, topic := args[0], args[1]
 			dryRun := f.DryRun || f.Plan
-			resolved, err := resolveTopicTarget(cmd.Context(), backend, f, meta, topic, dryRun)
+			preflight, err := runMandatoryBrokerPreflight(f, readAuditSpec{
+				Action:   "mq.offset.reset.preflight",
+				Target:   audit.EventTarget{ResourceType: "offset", Resource: group + "/" + topic},
+				Metadata: mutationValueMetadata("mq.offset.reset.preflight", map[string]any{"group": group, "topic": topic, "to": to, "dryRun": dryRun}),
+			}, func(backend mqgov.Broker, meta mqgovctx.Context) (offsetResetPreflight, error) {
+				manager, ok := mqgov.SupportsOffsets(backend)
+				if !ok {
+					return offsetResetPreflight{}, apperrors.New(apperrors.CodeNotImplemented, "backend does not support offsets", nil)
+				}
+				resolved, resolveErr := resolveTopicTarget(cmd.Context(), backend, f, meta, topic, dryRun)
+				if resolveErr != nil {
+					return offsetResetPreflight{}, resolveErr
+				}
+				target := resolved.Classification
+				target.Group = group
+				readOperation := mqclass.OperationLag
+				if dryRun {
+					readOperation = mqclass.OperationResetOffset
+				}
+				if authorizeErr := classifyAndAuthorize(f, meta, readOperation, target, ""); authorizeErr != nil {
+					return offsetResetPreflight{}, authorizeErr
+				}
+				groupCoordinate, coordinateErr := groupCoord(f, meta, backend, group)
+				if coordinateErr != nil {
+					return offsetResetPreflight{}, coordinateErr
+				}
+				request := mqgov.OffsetPlanRequest{Group: groupCoordinate, Topic: resolved.Coordinate, To: to, DryRun: dryRun, Partition: -1}
+				previewRequest := request
+				previewRequest.DryRun = true
+				preview, previewErr := manager.PlanOffsetReset(cmd.Context(), previewRequest)
+				return offsetResetPreflight{Manager: manager, Resolved: resolved, Request: request, Preview: preview}, previewErr
+			}, func(value offsetResetPreflight) int {
+				return len(value.Preview.Impact)
+			})
 			if err != nil {
 				return err
 			}
+			defer preflight.Backend.Close()
 			allow := allowOffsetReset
 			if dryRun {
 				allow = ""
 			}
-			target := resolved.Classification
+			target := preflight.Value.Resolved.Classification
 			target.Group = group
-			if err := classifyAndAuthorize(f, meta, mqclass.OperationResetOffset, target, allow); err != nil {
-				return err
-			}
-			req := mqgov.OffsetPlanRequest{Group: groupCoord(f, meta, group), Topic: resolved.Coordinate, To: to, DryRun: dryRun, Partition: -1}
-			if req.DryRun {
-				plan, planErr := manager.PlanOffsetReset(cmd.Context(), req)
-				if planErr != nil {
-					appendAuditWarn(f, auditEventOffset, meta, audit.EventTarget{ResourceType: "offset", Resource: group + "/" + topic}, audit.StatusFailed, "reset-offset", planErr)
-					return planErr
+			if !dryRun {
+				if err := classifyAndAuthorize(f, preflight.Context, mqclass.OperationResetOffset, target, allow); err != nil {
+					return err
 				}
-				appendAuditWarn(f, auditEventOffset, meta, audit.EventTarget{ResourceType: "offset", Resource: group + "/" + topic}, audit.StatusSuccess, fmt.Sprintf("reset-offset plan count=%d", plan.Total), nil)
-				return targetJSONData(f, "OffsetPlan", plan, opTarget, operationTargetWrite)
 			}
-			previewRequest := req
-			previewRequest.DryRun = true
-			preview, previewErr := manager.PlanOffsetReset(cmd.Context(), previewRequest)
-			if previewErr != nil {
-				appendAuditWarn(f, auditEventOffset, meta, audit.EventTarget{ResourceType: "offset", Resource: group + "/" + topic}, audit.StatusFailed, "reset-offset preflight", previewErr)
-				return previewErr
+			req := preflight.Value.Request
+			if req.DryRun {
+				return targetJSONData(f, "OffsetPlan", preflight.Value.Preview, preflight.Target, operationTargetWrite)
 			}
+			preview := preflight.Value.Preview
 			handle, auditErr := beginMutationAudit(f, mutationAuditSpec{
 				Action:  "mq.offset.reset",
-				Context: meta,
+				Context: preflight.Context,
 				Target:  audit.EventTarget{ResourceType: "offset", Resource: group + "/" + topic},
 				Metadata: mutationValueMetadata("mq.offset.reset", struct {
 					Request mqgov.OffsetPlanRequest
@@ -228,22 +262,41 @@ func newGroupResetOffsetCmd(f *cliFlags) *cobra.Command {
 			if auditErr != nil {
 				return auditErr
 			}
-			plan, operationErr := manager.ResetOffset(cmd.Context(), req)
-			failed := 0
-			if operationErr != nil {
-				failed = 1
+			plan, operationErr := preflight.Value.Manager.ResetOffset(cmd.Context(), req)
+			outcome := plan.BatchOutcome
+			total := outcome.Count()
+			if outcome.Empty() {
+				outcome.Succeeded = len(plan.Impact)
+				if operationErr != nil {
+					outcome.Succeeded = 0
+					outcome.Failed = 1
+				}
+				total = len(plan.Impact)
+				if total == 0 && operationErr != nil {
+					total = 1
+				}
 			}
-			total := int(plan.Total) + failed
-			if auditErr := finishBatchMutationAudit(handle, total, int(plan.Total), failed, operationErr); auditErr != nil {
+			if auditErr := finishBatchMutationAuditWithOutcome(handle, total, outcome, operationErr); auditErr != nil {
 				return auditErr
 			}
-			return targetJSONData(f, "OffsetPlan", plan, opTarget, operationTargetWrite)
+			return targetJSONData(f, "OffsetPlan", plan, preflight.Target, operationTargetWrite)
 		},
 	}
 	cmd.Flags().StringVar(&to, "to", "earliest", "Target offset: earliest | latest | offset:N | datetime:<RFC3339> | shift:±N (some targets are backend-specific and unsupported backends return clear errors)")
 	return cmd
 }
 
-func groupCoord(f *cliFlags, meta mqgovctx.Context, group string) mqgov.GroupCoordinate {
-	return mqgov.GroupCoordinate{Cluster: firstNonEmpty(f.Cluster, meta.Cluster, "fake"), Namespace: firstNonEmpty(f.Namespace, meta.Namespace), Group: group}
+type offsetResetPreflight struct {
+	Manager  mqgov.OffsetManager
+	Resolved resolvedTopicTarget
+	Request  mqgov.OffsetPlanRequest
+	Preview  mqgov.OffsetPlan
+}
+
+func groupCoord(f *cliFlags, meta mqgovctx.Context, backend mqgov.Broker, group string) (mqgov.GroupCoordinate, error) {
+	scope, err := canonicalBrokerScope(f, meta, backend)
+	if err != nil {
+		return mqgov.GroupCoordinate{}, err
+	}
+	return mqgov.GroupCoordinate{Cluster: scope.Cluster, Namespace: scope.Namespace, Group: group}, nil
 }

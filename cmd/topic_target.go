@@ -2,7 +2,6 @@ package cmd
 
 import (
 	"context"
-	"strings"
 
 	"github.com/JiangHe12/opskit-core/v2/apperrors"
 
@@ -25,7 +24,10 @@ func resolveTopicTarget(
 	topic string,
 	plan bool,
 ) (resolvedTopicTarget, error) {
-	coordinate := topicCoord(f, meta, topic)
+	coordinate, err := topicCoord(f, meta, backend, topic)
+	if err != nil {
+		return resolvedTopicTarget{}, err
+	}
 	description, err := backend.DescribeTopic(ctx, coordinate)
 	if err != nil {
 		appErr := apperrors.AsAppError(err)
@@ -40,32 +42,49 @@ func resolveTopicTarget(
 		Coordinate:  coordinate,
 		Description: description,
 		Classification: mqclass.Target{
+			Backend:        backend.Describe().Backend,
 			Topic:          topic,
 			ProtectedTopic: isProtectedTopic(meta, topic, description),
-			InternalTopic:  description.Internal || isInternalTopicName(topic),
+			InternalTopic:  description.Internal || mqclass.IsInternalTopic(backend.Describe().Backend, topic),
 			Plan:           plan,
 		},
 	}, nil
 }
 
-func declaredTopicTarget(meta mqgovctx.Context, topic string, plan bool) mqclass.Target {
+func declaredTopicTarget(meta mqgovctx.Context, backend, topic string, plan bool) mqclass.Target {
 	return mqclass.Target{
+		Backend:        backend,
 		Topic:          topic,
 		ProtectedTopic: isProtectedTopic(meta, topic, mqgov.TopicDescription{}),
-		InternalTopic:  isInternalTopicName(topic),
+		InternalTopic:  mqclass.IsInternalTopic(backend, topic),
 		Plan:           plan,
 	}
 }
 
 func sameTopicClassification(left, right mqclass.Target) bool {
-	return left.Topic == right.Topic &&
+	return left.Backend == right.Backend &&
+		left.Topic == right.Topic &&
 		left.ProtectedTopic == right.ProtectedTopic &&
 		left.InternalTopic == right.InternalTopic &&
 		left.CreateMayAlter == right.CreateMayAlter &&
 		left.Plan == right.Plan
 }
 
-func isInternalTopicName(topic string) bool {
-	name := strings.ToLower(strings.TrimSpace(topic))
-	return strings.HasPrefix(name, "__") || strings.HasPrefix(name, "_system") || strings.Contains(name, "consumer_offsets")
+func canonicalBrokerScope(f *cliFlags, meta mqgovctx.Context, backend mqgov.Broker) (mqgov.Description, error) {
+	description := backend.Describe()
+	capabilities := backend.Capabilities()
+	if description.Backend == "" || capabilities.Backend == "" || description.Backend != capabilities.Backend {
+		return mqgov.Description{}, apperrors.New(apperrors.CodeValidationFailed, "backend description and capabilities identify different backends", nil)
+	}
+	requestedCluster := firstNonEmpty(f.Cluster, meta.Cluster)
+	if requestedCluster != "" && description.Cluster != "" && requestedCluster != description.Cluster {
+		return mqgov.Description{}, apperrors.New(apperrors.CodeValidationFailed, "requested cluster does not match the backend cluster", nil)
+	}
+	requestedNamespace := firstNonEmpty(f.Namespace, meta.Namespace)
+	if requestedNamespace != "" && description.Namespace != "" && requestedNamespace != description.Namespace {
+		return mqgov.Description{}, apperrors.New(apperrors.CodeValidationFailed, "requested namespace does not match the backend namespace", nil)
+	}
+	description.Cluster = firstNonEmpty(description.Cluster, requestedCluster)
+	description.Namespace = firstNonEmpty(description.Namespace, requestedNamespace)
+	return description, nil
 }

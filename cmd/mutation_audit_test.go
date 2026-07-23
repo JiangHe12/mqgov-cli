@@ -17,6 +17,7 @@ import (
 	"github.com/JiangHe12/opskit-core/v2/apperrors"
 	"github.com/JiangHe12/opskit-core/v2/audit"
 
+	"github.com/JiangHe12/mqgov-cli/internal/mqgov"
 	"github.com/JiangHe12/mqgov-cli/internal/mqgovctx"
 )
 
@@ -1310,17 +1311,23 @@ func TestProduceCommandWritesPairedMutationRecords(t *testing.T) {
 		t.Fatalf("message produce error = %v", err)
 	}
 	records := readSafeAuditRecords(t, filepath.Join(os.Getenv("HOME"), ".mqgov-cli", "audit.log"))
-	if len(records) != 2 {
-		t.Fatalf("audit records = %d, want 2: %+v", len(records), records)
+	if len(records) != 4 {
+		t.Fatalf("audit records = %d, want 4: %+v", len(records), records)
 	}
-	if records[0].Action != "mq.message.produce" ||
+	if records[0].Kind != readAuditKind ||
+		records[0].Action != "mq.message.produce.preflight" ||
 		records[0].Phase != mutationAuditPhaseIntent ||
-		records[0].Status != audit.StatusPending ||
 		records[1].Phase != mutationAuditPhaseOutcome ||
-		records[1].Status != audit.StatusSuccess ||
-		records[0].MutationID != records[1].MutationID ||
-		records[1].Outcome == nil ||
-		records[1].Outcome.Succeeded != 1 {
+		records[0].OperationID == "" ||
+		records[0].OperationID != records[1].OperationID ||
+		records[2].Action != "mq.message.produce" ||
+		records[2].Phase != mutationAuditPhaseIntent ||
+		records[2].Status != audit.StatusPending ||
+		records[3].Phase != mutationAuditPhaseOutcome ||
+		records[3].Status != audit.StatusSuccess ||
+		records[2].MutationID != records[3].MutationID ||
+		records[3].Outcome == nil ||
+		records[3].Outcome.Succeeded != 1 {
 		t.Fatalf("paired mutation records = %+v", records)
 	}
 }
@@ -1346,15 +1353,16 @@ func TestFinishBatchMutationAuditPersistsCounts(t *testing.T) {
 		t.Fatalf("beginMutationAudit() error = %v", err)
 	}
 	operationErr := apperrors.New(apperrors.CodeBackendError, "batch target failed", nil)
-	if err := finishBatchMutationAudit(handle, 5, 2, 1, operationErr); !errors.Is(err, operationErr) {
-		t.Fatalf("finishBatchMutationAudit() error = %v, want original operation error", err)
+	if err := finishBatchMutationAuditWithOutcome(handle, 5, mqgov.BatchOutcome{Succeeded: 2, Failed: 1, Uncertain: 1}, operationErr); !errors.Is(err, operationErr) {
+		t.Fatalf("finishBatchMutationAuditWithOutcome() error = %v, want original operation error", err)
 	}
 	outcome := records[len(records)-1].Outcome
 	if outcome == nil ||
 		outcome.Status != audit.StatusPartialFailed ||
 		outcome.Succeeded != 2 ||
 		outcome.Failed != 1 ||
-		outcome.Skipped != 2 ||
+		outcome.Uncertain != 1 ||
+		outcome.Skipped != 1 ||
 		outcome.ErrorCode != string(apperrors.CodeBackendError) {
 		t.Fatalf("batch outcome = %+v", outcome)
 	}

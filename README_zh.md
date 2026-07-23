@@ -41,7 +41,7 @@
 | 🧱 **topic / group / message / dlq / acl / schema / fleet** | topic:list · describe · create · alter · delete · purge（按后端能力开放）。消费组:list · lag · reset-offset。消息:非破坏性 peek · tail · 有界 mirror · produce。DLQ:list · peek · redrive · purge,映射各 broker 原生模型。ACL:list · grant · revoke(按后端能力开放)。Schema:list · describe · check · register · delete(按原生 schema registry 能力开放)。Fleet:跨已配置 context 的只读状态与 topic 视图。 |
 | 🔐 **R0–R3 治理** | 每个操作由 fail-closed 的 `mqclass` 引擎分级;保护上下文与内部/系统 topic 升一档;AI 调用方永远无法自我授权。 |
 | 🎯 **真实爆炸半径预览** | `reset-offset --dry-run` 和 `purge --dry-run` 从实时 broker 计算真实的每分区消息 delta —— 不靠猜。预览只读,绝不变更。 |
-| 👀 **非破坏性 peek/tail** | 把消息以指纹形式查看或流式读取,不消费、不移动游标(Kafka 直接分区读取、Pulsar Reader、RabbitMQ 仅 peek 使用 get+requeue)。无法保证非破坏的 broker 上,操作 **失败关闭**而非静默消费。 |
+| 👀 **非破坏性 peek/tail** | 把消息以指纹形式查看或流式读取,不消费、不移动游标(Kafka 直接分区读取、Pulsar Reader)。无法保证非破坏的 broker 上,操作 **失败关闭**而非静默消费。 |
 | 🧭 **诚实的能力声明** | broker 各不相同 —— mqgov 如实报告每个 broker 实际支持什么(`capabilities -o json`),其余一律 **`NOT_IMPLEMENTED` 失败关闭**,绝不伪造。 |
 | 📜 **防篡改审计** | 每个操作哈希链记录(sha256 指纹 + 计数,**不含消息体/key/header**);`audit verify` 检测篡改。 |
 | 🔒 **TLS 证书 TOFU** | Kafka、RabbitMQ、Pulsar 的 TLS 连接首次使用时绑定服务端 leaf 证书 SPKI-SHA256 到 `.mqgov-cli/tls_known_hosts`;后续 SPKI 不一致即连接硬失败。 |
@@ -55,16 +55,16 @@
 | topic list / describe / create | ✅ | ✅ | ✅ | ✅ |
 | topic delete | ✅ | ✅ | ✅ | ❌ `NOT_IMPLEMENTED`⁴ |
 | produce | ✅ | ✅ | ✅ | ✅ |
-| **非破坏性 peek** | ✅ | ✅(Reader) | ✅(get+requeue) | ❌ `NOT_IMPLEMENTED`¹ |
+| **非破坏性 peek** | ✅ | ✅(Reader) | ❌ `NOT_IMPLEMENTED`² | ❌ `NOT_IMPLEMENTED`¹ |
 | **非破坏性 tail** | ✅ | ✅(Reader) | ❌ `NOT_IMPLEMENTED`² | ❌ `NOT_IMPLEMENTED`¹ |
 | **offset lag / reset** | ✅ | ✅(游标) | ❌(无 offset) | ❌ |
 | alter 分区 | ✅ | ✅ | ❌ | ❌ |
 | purge | ✅ | ✅ | ✅ | ❌ |
-| **DLQ list / peek / redrive / purge** | 显式 topic peek/purge ✅;list/redrive ❌ | list/peek ✅ `{topic}-{subscription}-DLQ`;redrive/purge ❌ | ✅ DLX 队列 | list ✅ `%DLQ%group`;其他 ❌ |
+| **DLQ list / peek / redrive / purge** | 显式 topic peek/purge ✅;list/redrive ❌ | list/peek ✅ `{topic}-{subscription}-DLQ`;redrive/purge ❌ | list/redrive/purge ✅;peek ❌ | list ✅ `%DLQ%group`;其他 ❌ |
 | **ACL list / grant / revoke** | ✅ | ✅ namespace/topic permissions | ✅ user-vhost permissions | ❌ `NOT_IMPLEMENTED`³ |
 | **schema list / describe / check / register / delete** | ✅ Confluent Schema Registry | ✅ 内建 admin schema API | ❌ `NOT_IMPLEMENTED` | ❌ `NOT_IMPLEMENTED` |
 
-¹ RocketMQ 的 Go v2 `PullConsumer` 会进入消费组生命周期并提交 offset,无法保证非破坏性 peek/tail —— mqgov 选择失败关闭,而非静默推进 offset。² RabbitMQ 没有向前的非破坏性 tail,读取语义是 consume/requeue。不支持的操作一律返回 `NOT_IMPLEMENTED`(exit 12),绝不假装成功。
+¹ RocketMQ 的 Go v2 `PullConsumer` 会进入消费组生命周期并提交 offset,无法保证非破坏性 peek/tail —— mqgov 选择失败关闭,而非静默推进 offset。² RabbitMQ 的读取语义是 consume/requeue,无法证明真正的非消费 peek 或向前 tail。不支持的操作一律返回 `NOT_IMPLEMENTED`(exit 12),绝不假装成功。
 
 ³ RocketMQ broker ACL 存在 broker 侧 `plain_acl.yml` 中,但 `rocketmq-client-go/v2` 没有公开、cgo-free、干净的 ACL admin API 可读写该配置。mqgov 不 shell out 到 Java `mqadmin`,也不手搓 remoting 命令;在 Go 客户端提供干净 API 前,请通过 broker 配置或官方 mqadmin 带外管理 RocketMQ ACL。
 
@@ -137,6 +137,8 @@ mqgov audit query --since 1h -o json
 | **R2** | 升级变更(`topic alter`、RocketMQ `topic create`、`group create/delete`、`acl grant`、已有 subject 的 `schema register`、向**保护** topic produce/mirror) | `--yes` **且**非空 `--ticket` |
 | **R3** | 破坏性 / 不可逆操作（`group reset-offset`、topic/DLQ purge、受支持的 topic/schema delete、受支持的 DLQ redrive、宽泛 ACL 变更、内部 topic produce/mirror）、受保护的 RocketMQ topic upsert，及治理控制变更（`ctx set/use/delete/import/migrate-credentials`、`ctx role set/unset`、确认执行的 `audit prune`） | 以上 **再加**该操作专属的 `--allow-*` 标志 |
 
+所有 broker 访问（包括 mutation 的元数据/影响范围 preflight）都对读审计持久化采取失败关闭：mqgov 先持久化 `ReadAuditRecord` intent，完成本地 R0/context 角色授权后才构造或连接 broker client；同一 `operationId` 的 outcome 持久化成功后，才允许输出读取结果，或继续高级 mutation 授权、mutation intent 与写入。intent 或授权失败时 client 构造次数为零；outcome 失败会同时抑制输出与 mutation，并以保留 backend 原始原因的 `LOCAL_IO_ERROR` 返回。记录只包含有界请求指纹/字节数与结果/操作计数，不包含响应正文或列表。`capabilities -o json` 会声明 `supported.readAudit: "required-intent-outcome"`、范围 `all-backend-reads-and-mutation-preflights` 以及强制消息批量上限。
+
 R3 的 allow 标志:`--allow-offset-reset`、`--allow-topic-purge`、`--allow-topic-delete`、`--allow-topic-upsert`、`--allow-destructive-acl`、`--allow-internal-produce`、`--allow-schema-delete`、`--allow-context-change`、`--allow-context-delete`、`--allow-role-change`、`--allow-audit-prune`。
 
 **保护上下文、保护 topic、内部/系统 topic 都使档位升一级。** 例如向 `__consumer_offsets` 生产被当作破坏性 R3 操作,需要 `--allow-internal-produce`。
@@ -163,7 +165,7 @@ R3 的 allow 标志:`--allow-offset-reset`、`--allow-topic-purge`、`--allow-to
 
 ```bash
 # 读(R0)
-mqgov topic list     [--pattern <name|glob>] -o json
+mqgov topic list     [--pattern <exact-name>] -o json
 mqgov topic describe <topic> -o json
 
 # 写
@@ -175,6 +177,8 @@ mqgov topic purge  <topic> [--dlq] --dry-run                                    
 mqgov topic purge  <topic> [--dlq] --yes --ticket <t> --allow-topic-purge          # R3
 mqgov topic delete <topic> --yes --ticket <t> --allow-topic-delete                 # 支持该操作的后端 R3；RocketMQ NOT_IMPLEMENTED
 ```
+
+列表命令的 `--pattern` 是精确名称过滤器；包含 glob 元字符（`*`、`?`、`[`、`]`）时会被明确拒绝。
 </details>
 
 <details>
@@ -208,16 +212,16 @@ mqgov message mirror  <source-topic> --to-context <ctx> --to-topic <topic> --lim
 mqgov message produce <topic> [--key <k>] [--body <text>] --yes                    # R1(内部 topic 为 R3 + --allow-internal-produce)
 ```
 
-`peek` 和 `tail` 绝不消费消息、不移动游标,只返回 sha256 指纹(`keySha256`、`bodySha256`、size、可选 timestamp)—— 绝不返回消息体。peek count 必须为正数;结果保持 broker 读取顺序、绝不超过 `--count`,到达当前边界时返回真实的较小数量。RabbitMQ 会先把不同消息作为未确认批次保留,完成指纹计算后再整体 requeue;恢复失败则命令失败。`tail` 受 `--max-messages` 与 `--timeout` 约束;`--follow` 也只会流式读取到这些边界或取消为止。
+`peek --count` 与 `tail --max-messages` 必须在 1–10,000 之间。命令层和 backend 层都会在分配内存或访问 broker 前拒绝超限值；tail 只使用小型初始 buffer，不按请求值直接巨量预分配。`peek` 和 `tail` 绝不消费消息、不移动游标，只返回 sha256 指纹（`keySha256`、`bodySha256`、size、可选 timestamp）——绝不返回消息体；结果保持 broker 读取顺序、不超过请求边界，到达当前边界时返回真实的较小数量。RabbitMQ 的普通消息/DLQ peek 返回 `NOT_IMPLEMENTED`，因为其队列 API 无法保证真正的非消费读取。`tail` 还受 `--timeout` 约束；`--follow` 也只会流式读取到这些边界或取消为止。读 outcome 持久化前不会释放 tail 结果。
 
-`message mirror` 是有界一次性拷贝,不是 daemon。它只解析一次源/目标 topic,随后分别按源 context 策略授权非破坏性读取、按持久化的 `--to-context` 策略授权目标 produce;任一失败都发生在消息读取和目标写入之前。源与目标分别审计各自的 context、target、请求/结果指纹和计数,不会记录 Key、Body、Headers。`--dry-run` / `--plan` 只读取/计数,不 produce。Kafka 与 Pulsar 可作为 mirror 源;RabbitMQ 与 RocketMQ 源镜像失败关闭为 `NOT_IMPLEMENTED`。Kafka 支持 `--from earliest|latest|offset:N|timestamp:<RFC3339>` 与 `--partition`;Pulsar 支持 `earliest|latest|timestamp:<RFC3339>` 和全分区读取。
+`message mirror` 是有界一次性拷贝，不是 daemon；`--limit` 只能为 1–1,000。源 intent 在源授权与 client 构造前持久化；随后消息只在进程内暂存，并同时受本次请求条数与保守的 64 MiB 内存计费预算约束：Key/Body/Header 实际字节以及每条消息、每个 Header 的固定开销都会计费。源 outcome 必须先持久化，目标 mutation intent/produce 才能开始；源读取、审计或缓存任一失败都会擦除暂存副本并保证目标零写入。即使错误 backend 无视请求，也不能 emit 超过本次 `--limit`。`--dry-run` / `--plan` 遵循同一强制源审计对且绝不 produce。源与目标使用独立 context，只记录请求/结果指纹和计数，Key、Body、Headers 原文不会进入审计或输出。Kafka 与 Pulsar 可作为 mirror 源；RabbitMQ 与 RocketMQ 源镜像失败关闭为 `NOT_IMPLEMENTED`。Kafka 支持 `--from earliest|latest|offset:N|timestamp:<RFC3339>` 与 `--partition`；Pulsar 支持 `earliest|latest|timestamp:<RFC3339>` 和全分区读取。
 </details>
 
 <details>
 <summary><b>dlq</b> —— 死信队列治理</summary>
 
 ```bash
-mqgov dlq list [--topic <source-or-dlq>] [--group <group-or-sub>] [--pattern <name|glob>] -o json     # R0
+mqgov dlq list [--topic <source-or-dlq>] [--group <group-or-sub>] [--pattern <exact-name>] -o json     # R0
 mqgov dlq peek <dlq> [--topic <source>] [--group <group-or-sub>] [--count N] -o json                   # R0,仅指纹
 mqgov dlq redrive <dlq> --target <live-topic> [--count N] --dry-run -o json                            # R0 预览(RabbitMQ)
 mqgov dlq redrive <dlq> --target <live-topic> [--count N] --yes --ticket <t> --allow-internal-produce  # R3(RabbitMQ)
@@ -253,7 +257,7 @@ mqgov fleet status --all -o json
 mqgov fleet topics --contexts dev,staging --pattern orders -o json
 ```
 
-`fleet status` 对选中的 context 扇出 `Ping`、`Describe`、`Capabilities`。`fleet topics` 扇出 topic list,并在每行标明来源 context。context 选择必须且只能使用 `--all` 或 `--contexts a,b,c` 之一。Fleet 只有 R0 读:每个 context 的每次底层读取仍走和单 context 命令相同的 R0 分类与授权路径,并使用该 context 自己的已存凭据。部分失败会作为该 context 的 `denied`、`unreachable` 或 `error` 数据如实返回,命令整体仍退出 0。
+`fleet status` 对选中的 context 扇出 `Ping`、`Describe`、`Capabilities`。`fleet topics` 扇出 topic list,并在每行标明来源 context。context 选择必须且只能使用 `--all` 或 `--contexts a,b,c` 之一。Fleet 只有 R0 读：扇出前先持久化一个强制 batch-read intent，每个 context 仍使用自己的已存凭据与 R0 分类/授权路径，输出前再持久化一个聚合 outcome；审计只保存选择指纹及有界的成功/失败/结果计数。部分后端失败会作为该 context 的 `denied`、`unreachable` 或 `error` 数据如实返回且命令退出 0；审计持久化失败则返回 `LOCAL_IO_ERROR`，不输出 dashboard。
 </details>
 
 <details>
@@ -360,7 +364,7 @@ mqgov install claude --skills     # 也支持:codex、opencode、copilot、curso
 - **已验证发布标签** —— 仅当 signed annotated tag 经 GitHub 验证，且精确匹配 `package.json`、`CHANGELOG.md` 与最新拉取的 `origin/main` 时才开始发布；CI 与完整真实 broker 矩阵会在该标签提交上重跑。
 - **签名二进制** —— 每个发布产物用 [cosign](https://github.com/sigstore/cosign) 签名(keyless / OIDC)。`checksums.txt`(同样签名)覆盖所有平台。
 - **npm provenance** —— npm 包经 CI 用 OpenID Connect 发布,带 [provenance 证明](https://docs.npmjs.com/generating-provenance-statements),关联到本仓库与此工作流。
-- **校验安装** —— npm postinstall 经白名单主机下载二进制,并在安装前对照已签名的 `checksums.txt` 校验 SHA-256。
+- **校验安装** —— npm postinstall 只信任受 npm provenance 绑定、嵌入 `package.json` 的六个平台 SHA-256 摘要。镜像只能提供二进制字节,不能提供校验数据;校验后的文件会先 fsync,再原子替换旧文件,且不存在跳过校验的开关。
 - **防篡改审计** —— `mqgov audit verify --strict` 重走哈希链,报告任何缺口或改动。
 - **传输不裸奔** —— 仅 SASL/TLS 与 mTLS;mqgov 绝不提供 insecure-skip-verify 后门。Kafka、RabbitMQ、Pulsar 的 TLS broker/admin/Schema Registry 连接在正常 CA 校验之上增加 TOFU SPKI-SHA256 pinning;pin 存在 `.mqgov-cli/tls_known_hosts`。
 

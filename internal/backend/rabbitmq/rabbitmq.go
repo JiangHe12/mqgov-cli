@@ -41,6 +41,7 @@ type Options struct {
 	ClientCertFile string
 	ClientKeyFile  string
 	TLSPinPath     string
+	TLSNotify      tlspin.NotifyFunc
 	Timeout        time.Duration
 }
 
@@ -66,20 +67,27 @@ func New(opts Options) (*Broker, error) {
 	managementURL := buildManagementURL(opts)
 	var amqpTLSConfig *tls.Config
 	if baseTLSConfig != nil && rabbitMQAMQPUsesTLS(opts, amqpURL) {
-		amqpTLSConfig, err = tlspin.CloneForEndpoint(baseTLSConfig, opts.TLSPinPath, amqpURL, tlspin.NotifyStderr)
+		amqpTLSConfig, err = tlspin.CloneForEndpoint(baseTLSConfig, opts.TLSPinPath, amqpURL, rabbitMQTLSNotify(opts))
 		if err != nil {
 			return nil, err
 		}
 	}
 	httpClient := &http.Client{Timeout: timeout(opts)}
 	if baseTLSConfig != nil && strings.HasPrefix(strings.ToLower(strings.TrimSpace(managementURL)), "https://") {
-		managementTLSConfig, err := tlspin.CloneForEndpoint(baseTLSConfig, opts.TLSPinPath, managementURL, tlspin.NotifyStderr)
+		managementTLSConfig, err := tlspin.CloneForEndpoint(baseTLSConfig, opts.TLSPinPath, managementURL, rabbitMQTLSNotify(opts))
 		if err != nil {
 			return nil, err
 		}
 		httpClient.Transport = &http.Transport{TLSClientConfig: managementTLSConfig}
 	}
 	return &Broker{opts: opts, amqpURL: amqpURL, manageURL: managementURL, httpClient: httpClient, tlsConfig: amqpTLSConfig}, nil
+}
+
+func rabbitMQTLSNotify(opts Options) tlspin.NotifyFunc {
+	if opts.TLSNotify != nil {
+		return opts.TLSNotify
+	}
+	return tlspin.NotifyDiscard
 }
 
 func (b *Broker) Close() {
@@ -158,12 +166,12 @@ func (b *Broker) Capabilities() mqgov.Capabilities {
 	return mqgov.Capabilities{
 		Backend:            "rabbitmq",
 		ResourceTypes:      []string{"topic", "message", "acl", "dlq"},
-		Verbs:              []string{"list", "describe", "peek", "produce", "create", "delete", "purge", "grant-acl", "revoke-acl", "redrive"},
+		Verbs:              []string{"list", "describe", "produce", "create", "delete", "purge", "grant-acl", "revoke-acl", "redrive"},
 		SupportsOffsets:    false,
 		SupportsPartitions: true,
 		SupportsACL:        true,
 		SupportsDLQList:    true,
-		SupportsDLQPeek:    true,
+		SupportsDLQPeek:    false,
 		SupportsDLQRedrive: true,
 		SupportsDLQPurge:   true,
 		SupportsSchema:     false,
@@ -241,62 +249,12 @@ func (b *Broker) DeleteGroup(context.Context, mqgov.GroupCoordinate) error {
 	return apperrors.New(apperrors.CodeNotImplemented, "RabbitMQ does not support consumer groups", nil)
 }
 
-func (b *Broker) Peek(ctx context.Context, req mqgov.MessagePeekRequest) (mqgov.MessagePeekResult, error) {
-	if req.Count <= 0 {
-		return mqgov.MessagePeekResult{}, apperrors.New(apperrors.CodeUsageError, "peek count must be positive", nil)
-	}
-	if req.Partition != 0 || req.Offset != 0 {
-		return mqgov.MessagePeekResult{}, apperrors.New(
-			apperrors.CodeNotImplemented,
-			"RabbitMQ peek supports only partition 0 at the queue head",
-			nil,
-		)
-	}
-	var messages []mqgov.MessageFingerprint
-	_, err := withChannel(ctx, b, func(ch *amqp.Channel) (struct{}, error) {
-		var peekErr error
-		messages, peekErr = rabbitMQPeekMessages(ch, req.Coordinate.Topic, req.Count)
-		return struct{}{}, peekErr
-	})
-	if err != nil {
-		return mqgov.MessagePeekResult{}, classifyAMQPError(err)
-	}
-	return mqgov.MessagePeekResult{Coordinate: req.Coordinate, Partition: 0, Offset: req.Offset, Count: len(messages), Messages: messages}, nil
-}
-
-type rabbitMQMessageGetter interface {
-	Get(queue string, autoAck bool) (amqp.Delivery, bool, error)
-}
-
-func rabbitMQPeekMessages(getter rabbitMQMessageGetter, queue string, count int) (messages []mqgov.MessageFingerprint, retErr error) {
-	deliveries := make([]amqp.Delivery, 0, count)
-	defer func() {
-		if len(deliveries) == 0 {
-			return
-		}
-		if err := deliveries[len(deliveries)-1].Nack(true, true); err != nil {
-			retErr = fmt.Errorf("restore peeked RabbitMQ messages: %w", err)
-		}
-	}()
-	messages = make([]mqgov.MessageFingerprint, 0, count)
-	for len(messages) < count {
-		msg, ok, err := getter.Get(queue, false)
-		if err != nil {
-			return messages, err
-		}
-		if !ok {
-			return messages, nil
-		}
-		deliveries = append(deliveries, msg)
-		messages = append(messages, mqgov.FingerprintMessageAt(
-			0,
-			int64(len(messages)),
-			[]byte(msg.RoutingKey),
-			msg.Body,
-			msg.Timestamp,
-		))
-	}
-	return messages, nil
+func (*Broker) Peek(context.Context, mqgov.MessagePeekRequest) (mqgov.MessagePeekResult, error) {
+	return mqgov.MessagePeekResult{}, apperrors.New(
+		apperrors.CodeNotImplemented,
+		"RabbitMQ does not provide a non-consuming peek operation",
+		nil,
+	)
 }
 
 func (b *Broker) Produce(ctx context.Context, req mqgov.MessageProduceRequest) (mqgov.MessageProduceResult, error) {
@@ -377,23 +335,21 @@ func (b *Broker) ListDLQs(ctx context.Context, opts mqgov.DLQListOptions) ([]mqg
 	return items, nil
 }
 
-func (b *Broker) PeekDLQ(ctx context.Context, req mqgov.DLQPeekRequest) (mqgov.DLQPeekResult, error) {
-	result, err := b.Peek(ctx, mqgov.MessagePeekRequest{
-		Coordinate: req.DLQ,
-		Partition:  req.Partition,
-		Offset:     req.Offset,
-		Count:      req.Count,
-	})
-	if err != nil {
-		return mqgov.DLQPeekResult{}, err
-	}
-	return mqgov.DLQPeekResult{DLQ: req.DLQ, Count: result.Count, Messages: result.Messages}, nil
+func (*Broker) PeekDLQ(context.Context, mqgov.DLQPeekRequest) (mqgov.DLQPeekResult, error) {
+	return mqgov.DLQPeekResult{}, apperrors.New(
+		apperrors.CodeNotImplemented,
+		"RabbitMQ does not provide a non-consuming DLQ peek operation",
+		nil,
+	)
 }
 
 func (b *Broker) RedriveDLQ(ctx context.Context, req mqgov.DLQRedriveRequest) (mqgov.DLQRedriveResult, error) {
 	count := req.Count
 	if count <= 0 {
 		count = 100
+	}
+	if count > mqgov.MaxMessageBatchSize {
+		return mqgov.DLQRedriveResult{}, apperrors.New(apperrors.CodeUsageError, "redrive count exceeds the safe batch limit", nil)
 	}
 	if req.DLQ.Topic == req.Target.Topic {
 		return mqgov.DLQRedriveResult{}, apperrors.New(apperrors.CodeUsageError, "RabbitMQ redrive target must differ from the DLQ", nil)
@@ -412,52 +368,97 @@ func (b *Broker) RedriveDLQ(ctx context.Context, req mqgov.DLQRedriveRequest) (m
 		}
 		return mqgov.DLQRedriveResult{DLQ: req.DLQ, Target: req.Target, DryRun: true, Impact: []mqgov.PartitionImpact{{Partition: 0, Count: total}}, Total: total, Fingerprint: mqgov.ResourceFingerprints{Count: total}}, nil
 	}
-	total := int64(0)
-	_, err := withChannel(ctx, b, func(ch *amqp.Channel) (struct{}, error) {
-		if err := ch.Confirm(false); err != nil {
-			return struct{}{}, err
-		}
-		returns := ch.NotifyReturn(make(chan amqp.Return, 1))
-		for int(total) < count {
-			msg, ok, err := ch.Get(req.DLQ.Topic, false)
-			if err != nil {
-				return struct{}{}, err
-			}
-			if !ok {
-				return struct{}{}, nil
-			}
-			err = publishConfirmed(ctx, ch, returns, req.Target.Topic, amqp.Publishing{
-				DeliveryMode: amqp.Persistent,
-				Headers:      msg.Headers,
-				Body:         msg.Body,
-			})
-			if err != nil {
-				_ = msg.Nack(false, true)
-				return struct{}{}, err
-			}
-			if err := msg.Ack(false); err != nil {
-				return struct{}{}, err
-			}
-			total++
-		}
-		return struct{}{}, nil
+	batch, err := withChannel(ctx, b, func(ch *amqp.Channel) (rabbitMQRedriveBatchResult, error) {
+		return rabbitMQRedriveBatch(ctx, ch, req, count)
 	})
 	result := mqgov.DLQRedriveResult{
-		DLQ:         req.DLQ,
-		Target:      req.Target,
-		DryRun:      false,
-		Impact:      []mqgov.PartitionImpact{{Partition: 0, Count: total}},
-		Total:       total,
-		Fingerprint: mqgov.ResourceFingerprints{Count: total},
+		BatchOutcome: batch.outcome,
+		DLQ:          req.DLQ,
+		Target:       req.Target,
+		DryRun:       false,
+		Impact:       []mqgov.PartitionImpact{{Partition: 0, Count: batch.total}},
+		Total:        batch.total,
+		Fingerprint:  mqgov.ResourceFingerprints{Count: batch.total},
 	}
 	if err != nil {
-		var appErr *apperrors.AppError
-		if errors.As(err, &appErr) {
-			return result, err
-		}
-		return result, classifyAMQPError(err)
+		return result, rabbitMQRedriveFailure(batch.outcome, err)
 	}
 	return result, nil
+}
+
+type rabbitMQRedriveBatchResult struct {
+	total   int64
+	outcome mqgov.BatchOutcome
+}
+
+func rabbitMQRedriveBatch(ctx context.Context, ch *amqp.Channel, req mqgov.DLQRedriveRequest, count int) (rabbitMQRedriveBatchResult, error) {
+	var result rabbitMQRedriveBatchResult
+	if err := ch.Confirm(false); err != nil {
+		return result, err
+	}
+	returns := ch.NotifyReturn(make(chan amqp.Return, 1))
+	for int(result.total) < count {
+		msg, ok, err := ch.Get(req.DLQ.Topic, false)
+		if err != nil {
+			result.outcome.Failed++
+			return result, err
+		}
+		if !ok {
+			return result, nil
+		}
+		err = publishConfirmed(ctx, ch, returns, req.Target.Topic, amqp.Publishing{
+			DeliveryMode: amqp.Persistent,
+			Headers:      msg.Headers,
+			Body:         msg.Body,
+		})
+		if err != nil {
+			nackErr := msg.Nack(false, true)
+			if nackErr != nil || rabbitMQRedrivePublishIsUncertain(err) {
+				result.outcome.Uncertain++
+			} else {
+				result.outcome.Failed++
+			}
+			if nackErr != nil {
+				return result, fmt.Errorf("RabbitMQ redrive publish failed and source requeue was not confirmed: %w", errors.Join(err, nackErr))
+			}
+			return result, err
+		}
+		if err := msg.Ack(false); err != nil {
+			result.outcome.Uncertain++
+			return result, err
+		}
+		result.total++
+		result.outcome.Succeeded++
+	}
+	return result, nil
+}
+
+func rabbitMQRedrivePublishIsUncertain(err error) bool {
+	var appErr *apperrors.AppError
+	if !errors.As(err, &appErr) {
+		return true
+	}
+	return appErr.Code == apperrors.CodeBackendUnreachable || appErr.Code == apperrors.CodeNetworkError
+}
+
+func rabbitMQRedriveFailure(outcome mqgov.BatchOutcome, cause error) error {
+	var appErr *apperrors.AppError
+	if !errors.As(cause, &appErr) {
+		cause = classifyAMQPError(cause)
+	}
+	if outcome.Succeeded == 0 && outcome.Uncertain == 0 {
+		return cause
+	}
+	return apperrors.New(
+		apperrors.CodePartialFailure,
+		fmt.Sprintf(
+			"RabbitMQ redrive did not complete atomically (succeeded=%d failed=%d uncertain=%d)",
+			outcome.Succeeded,
+			outcome.Failed,
+			outcome.Uncertain,
+		),
+		cause,
+	)
 }
 
 func (b *Broker) PurgeDLQ(ctx context.Context, req mqgov.DLQPurgeRequest) (mqgov.DLQPurgeResult, error) {

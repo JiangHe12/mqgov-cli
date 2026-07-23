@@ -59,6 +59,18 @@ go mod tidy                             # must be a no-op
   `--allow-destructive-acl`, `--allow-internal-produce`,
   `--allow-schema-delete`, `--allow-context-change`,
   `--allow-context-delete`, `--allow-role-change`, `--allow-audit-prune`).
+- All broker access, including mutation metadata/impact preflights, is audit
+  fail-closed. Persist a `ReadAuditRecord` intent, then complete local
+  R0/context-role authorization before constructing or connecting a client.
+  Persist the paired outcome with the same `operationId` before releasing a
+  result or beginning advanced mutation authorization, mutation intent, or
+  write execution. Intent/authorization failure means zero client builds;
+  outcome persistence failure means no output and no mutation. Audit failures
+  return `LOCAL_IO_ERROR` and preserve the backend error cause. Records contain
+  only bounded request fingerprints/byte counts and operation/result counts.
+  Structured backend diagnostics such as TLS TOFU notices are redacted and
+  buffered within 64 KiB until that outcome is durable; third-party client
+  loggers that cannot participate in this ordering stay disabled.
 - Context creation/replacement/selection/import/credential migration, context deletion,
   and role changes are fixed R3 control-plane operations. Set/import/delete/role/migrate
   use the target's pre-change policy; a new target inherits the persisted current
@@ -102,8 +114,17 @@ go mod tidy                             # must be a no-op
   indeterminate states are not blindly queued. An indeterminate replay is
   renamed with `.indeterminate` and blocks later automatic replay until manual
   reconciliation by `mutationId + phase`.
+- Read intent/outcome records use the same serialized append queue and durable
+  replay machinery. A spooled read outcome is keyed by `operationId + phase`;
+  never substitute a `mutationId` or release buffered results while replay is
+  blocked.
 - Peek/tail must be non-destructive (no consume, no cursor/offset advance) or
   fail closed (`NotImplemented`) — never silently consume on an R0 read.
+  Peek/tail batches are capped at 10,000 at command and backend boundaries.
+  Mirror is capped at the exact requested limit (at most 1,000) and a
+  conservative 64 MiB accounting budget charging actual key/body/header bytes
+  plus fixed per-message/per-header overhead; source outcome durability
+  precedes every target mutation intent/write, including dry-run.
 - No insecure transport: SASL/TLS and mTLS via credstore; never an
   insecure-skip-verify option. A backend that does not support requested TLS
   fails closed; it never silently connects in plaintext. Kafka, RabbitMQ, and
@@ -123,7 +144,7 @@ go mod tidy                             # must be a no-op
   `OffsetManager` / `PartitionManager` / `ACLManager` / `Tailer` / `DLQManager` / `SchemaManager` interfaces, type-asserted
   and gated by `Supports*`. Unsupported capabilities fail closed with
   `NotImplemented` — never faked. Capabilities must reflect what the client
-  actually supports (e.g. RabbitMQ/RocketMQ `SupportsOffsets=false`; RabbitMQ/RocketMQ do not support non-destructive tail or mirror source; Kafka and Pulsar support mirror source through non-destructive reads; Kafka, RabbitMQ, and Pulsar support ACL, RocketMQ does not; Kafka explicit DLQ topics support peek/purge but not list/redrive, Pulsar supports DLQ list/peek but not redrive/purge, RabbitMQ supports all four DLQ verbs, and RocketMQ supports only DLQ list; Kafka and Pulsar support schema register/delete through native schema registries, RabbitMQ and RocketMQ do not).
+  actually supports (e.g. RabbitMQ/RocketMQ `SupportsOffsets=false`; RabbitMQ/RocketMQ do not support non-destructive peek, tail, or mirror source; Kafka and Pulsar support mirror source through non-destructive reads; Kafka, RabbitMQ, and Pulsar support ACL, RocketMQ does not; Kafka explicit DLQ topics support peek/purge but not list/redrive, Pulsar supports DLQ list/peek but not redrive/purge, RabbitMQ supports DLQ list/redrive/purge but not peek, and RocketMQ supports only DLQ list; Kafka and Pulsar support schema register/delete through native schema registries, RabbitMQ and RocketMQ do not).
 - Resolve exact topic metadata once before authorization, then reuse the bound
   coordinate and protected/internal classification for execution. Metadata
   lookup errors or mismatched coordinates fail closed before mutation intent.

@@ -11,6 +11,7 @@ import (
 
 	"github.com/JiangHe12/mqgov-cli/internal/mqclass"
 	"github.com/JiangHe12/mqgov-cli/internal/mqgov"
+	"github.com/JiangHe12/mqgov-cli/internal/mqgovctx"
 )
 
 func newDLQCmd(f *cliFlags) *cobra.Command {
@@ -28,27 +29,31 @@ func newDLQListCmd(f *cliFlags) *cobra.Command {
 		Short: "List native DLQs",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			backend, meta, err := buildBroker(f)
+			if err := validateExactPattern(pattern); err != nil {
+				return err
+			}
+			options := mqgov.DLQListOptions{Namespace: f.Namespace, Topic: topic, Group: group, Pattern: pattern}
+			items, opTarget, err := runMandatoryBrokerRead(f, readAuditSpec{
+				Action:   "mq.dlq.list",
+				Target:   audit.EventTarget{ResourceType: "dlq"},
+				Metadata: mutationValueMetadata("mq.dlq.list", options),
+			}, func(meta mqgovctx.Context) error {
+				return classifyAndAuthorize(f, meta, mqclass.OperationListDLQ, mqclass.Target{Topic: firstNonEmpty(topic, pattern), Group: group}, "")
+			}, func(backend mqgov.Broker, meta mqgovctx.Context) ([]mqgov.DLQDescription, error) {
+				if !backend.Capabilities().SupportsDLQList {
+					return nil, apperrors.New(apperrors.CodeNotImplemented, "backend does not support DLQ listing", nil)
+				}
+				manager, ok := mqgov.SupportsDLQ(backend)
+				if !ok {
+					return nil, apperrors.New(apperrors.CodeNotImplemented, "backend does not support DLQ governance", nil)
+				}
+				return manager.ListDLQs(cmd.Context(), options)
+			}, func(items []mqgov.DLQDescription) int {
+				return len(items)
+			})
 			if err != nil {
 				return err
 			}
-			defer backend.Close()
-			opTarget := operationTargetFromBroker(f, backend)
-			if !backend.Capabilities().SupportsDLQList {
-				return apperrors.New(apperrors.CodeNotImplemented, "backend does not support DLQ listing", nil)
-			}
-			manager, ok := mqgov.SupportsDLQ(backend)
-			if !ok {
-				return apperrors.New(apperrors.CodeNotImplemented, "backend does not support DLQ governance", nil)
-			}
-			if err := classifyAndAuthorize(f, meta, mqclass.OperationListDLQ, mqclass.Target{Topic: firstNonEmpty(topic, pattern), Group: group}, ""); err != nil {
-				return err
-			}
-			items, err := manager.ListDLQs(cmd.Context(), mqgov.DLQListOptions{Namespace: f.Namespace, Topic: topic, Group: group, Pattern: pattern})
-			if err != nil {
-				return err
-			}
-			appendAuditWarn(f, auditEventDLQ, meta, audit.EventTarget{ResourceType: "dlq"}, audit.StatusSuccess, fmt.Sprintf("list count=%d", len(items)), nil)
 			if f.Output == "json" {
 				return targetJSONList(f, "DLQList", items, len(items), len(items), opTarget)
 			}
@@ -61,7 +66,7 @@ func newDLQListCmd(f *cliFlags) *cobra.Command {
 	}
 	cmd.Flags().StringVar(&topic, "topic", "", "Source topic or explicit Kafka DLQ topic")
 	cmd.Flags().StringVar(&group, "group", "", "Consumer group or subscription")
-	cmd.Flags().StringVar(&pattern, "pattern", "", "Exact DLQ name or wildcard pattern")
+	cmd.Flags().StringVar(&pattern, "pattern", "", "Exact DLQ name")
 	return cmd
 }
 
@@ -79,34 +84,53 @@ func newDLQPeekCmd(f *cliFlags) *cobra.Command {
 			if err := validatePeekWindow(partition, offset, count); err != nil {
 				return err
 			}
-			backend, meta, err := buildBroker(f)
-			if err != nil {
-				return err
-			}
-			defer backend.Close()
-			opTarget := operationTargetFromBroker(f, backend)
-			if !backend.Capabilities().SupportsDLQPeek {
-				return apperrors.New(apperrors.CodeNotImplemented, "backend does not support non-destructive DLQ peek", nil)
-			}
-			manager, ok := mqgov.SupportsDLQ(backend)
-			if !ok {
-				return apperrors.New(apperrors.CodeNotImplemented, "backend does not support DLQ governance", nil)
-			}
 			dlq := args[0]
-			resolvedDLQ, err := resolveTopicTarget(cmd.Context(), backend, f, meta, effectiveDLQTopic(backend, dlq, topic, group), false)
+			result, opTarget, err := runMandatoryBrokerRead(f, readAuditSpec{
+				Action: "mq.dlq.peek",
+				Target: audit.EventTarget{ResourceType: "dlq", Resource: dlq},
+				Metadata: mutationValueMetadata("mq.dlq.peek", struct {
+					DLQ       string
+					Topic     string
+					Group     string
+					Partition int
+					Offset    int64
+					Count     int
+				}{
+					DLQ:       dlq,
+					Topic:     topic,
+					Group:     group,
+					Partition: partition,
+					Offset:    offset,
+					Count:     count,
+				}),
+			}, func(meta mqgovctx.Context) error {
+				target := declaredTopicTarget(meta, firstNonEmpty(f.Backend, meta.Backend, defaultFakeBackend), firstNonEmpty(topic, dlq), false)
+				target.Group = group
+				return classifyAndAuthorize(f, meta, mqclass.OperationPeekDLQ, target, "")
+			}, func(backend mqgov.Broker, meta mqgovctx.Context) (mqgov.DLQPeekResult, error) {
+				if !backend.Capabilities().SupportsDLQPeek {
+					return mqgov.DLQPeekResult{}, apperrors.New(apperrors.CodeNotImplemented, "backend does not support non-destructive DLQ peek", nil)
+				}
+				manager, ok := mqgov.SupportsDLQ(backend)
+				if !ok {
+					return mqgov.DLQPeekResult{}, apperrors.New(apperrors.CodeNotImplemented, "backend does not support DLQ governance", nil)
+				}
+				resolvedDLQ, resolveErr := resolveTopicTarget(cmd.Context(), backend, f, meta, effectiveDLQTopic(backend, dlq, topic, group), false)
+				if resolveErr != nil {
+					return mqgov.DLQPeekResult{}, resolveErr
+				}
+				classTarget := resolvedDLQ.Classification
+				classTarget.Group = group
+				if authorizeErr := classifyAndAuthorize(f, meta, mqclass.OperationPeekDLQ, classTarget, ""); authorizeErr != nil {
+					return mqgov.DLQPeekResult{}, authorizeErr
+				}
+				return manager.PeekDLQ(cmd.Context(), mqgov.DLQPeekRequest{DLQ: resolvedDLQ.Coordinate, Topic: topic, Group: group, Partition: partition, Offset: offset, Count: count})
+			}, func(result mqgov.DLQPeekResult) int {
+				return result.Count
+			})
 			if err != nil {
 				return err
 			}
-			classTarget := resolvedDLQ.Classification
-			classTarget.Group = group
-			if err := classifyAndAuthorize(f, meta, mqclass.OperationPeekDLQ, classTarget, ""); err != nil {
-				return err
-			}
-			result, err := manager.PeekDLQ(cmd.Context(), mqgov.DLQPeekRequest{DLQ: resolvedDLQ.Coordinate, Topic: topic, Group: group, Partition: partition, Offset: offset, Count: count})
-			if err != nil {
-				return err
-			}
-			appendAuditWarn(f, auditEventDLQ, meta, audit.EventTarget{ResourceType: "dlq", Resource: dlq}, audit.StatusSuccess, fmt.Sprintf("peek count=%d", result.Count), nil)
 			return targetJSONData(f, "DLQPeekResult", result, opTarget, operationTargetRead)
 		},
 	}
@@ -128,79 +152,103 @@ func newDLQRedriveCmd(f *cliFlags) *cobra.Command {
 		Short: "Redrive DLQ messages to a live non-DLQ topic",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			backend, meta, err := buildBroker(f)
-			if err != nil {
-				return err
-			}
-			defer backend.Close()
-			opTarget := operationTargetFromBroker(f, backend)
-			if !backend.Capabilities().SupportsDLQRedrive {
-				return apperrors.New(apperrors.CodeNotImplemented, "backend does not support DLQ redrive", nil)
-			}
-			manager, ok := mqgov.SupportsDLQ(backend)
-			if !ok {
-				return apperrors.New(apperrors.CodeNotImplemented, "backend does not support DLQ governance", nil)
-			}
-			dlq := args[0]
 			if target == "" {
 				return apperrors.New(apperrors.CodeUsageError, "redrive target topic is required", nil)
 			}
-			if count <= 0 {
-				return apperrors.New(apperrors.CodeUsageError, "redrive count must be positive", nil)
+			if count <= 0 || count > mqgov.MaxMessageBatchSize {
+				return apperrors.New(
+					apperrors.CodeUsageError,
+					fmt.Sprintf("redrive count must be between 1 and %d", mqgov.MaxMessageBatchSize),
+					nil,
+				)
 			}
-			dlqTopic := effectiveDLQTopic(backend, dlq, topic, group)
-			if target == dlqTopic {
-				return apperrors.New(apperrors.CodeUsageError, "redrive target must differ from the DLQ", nil)
-			}
+			dlq := args[0]
 			dryRun := f.DryRun || f.Plan
-			resolvedDLQ, err := resolveTopicTarget(cmd.Context(), backend, f, meta, dlqTopic, dryRun)
+			preflight, err := runMandatoryBrokerPreflight(f, readAuditSpec{
+				Action:   "mq.dlq.redrive.preflight",
+				Target:   audit.EventTarget{ResourceType: "dlq", Resource: dlq},
+				Metadata: mutationValueMetadata("mq.dlq.redrive.preflight", map[string]any{"dlq": dlq, "target": target, "count": count, "dryRun": dryRun}),
+			}, func(backend mqgov.Broker, meta mqgovctx.Context) (dlqRedrivePreflight, error) {
+				if !backend.Capabilities().SupportsDLQRedrive {
+					return dlqRedrivePreflight{}, apperrors.New(apperrors.CodeNotImplemented, "backend does not support DLQ redrive", nil)
+				}
+				manager, ok := mqgov.SupportsDLQ(backend)
+				if !ok {
+					return dlqRedrivePreflight{}, apperrors.New(apperrors.CodeNotImplemented, "backend does not support DLQ governance", nil)
+				}
+				dlqTopic := effectiveDLQTopic(backend, dlq, topic, group)
+				if target == dlqTopic {
+					return dlqRedrivePreflight{}, apperrors.New(apperrors.CodeUsageError, "redrive target must differ from the DLQ", nil)
+				}
+				resolvedDLQ, resolveErr := resolveTopicTarget(cmd.Context(), backend, f, meta, dlqTopic, dryRun)
+				if resolveErr != nil {
+					return dlqRedrivePreflight{}, resolveErr
+				}
+				resolvedTarget, resolveErr := resolveTopicTarget(cmd.Context(), backend, f, meta, target, dryRun)
+				if resolveErr != nil {
+					return dlqRedrivePreflight{}, resolveErr
+				}
+				request := mqgov.DLQRedriveRequest{DLQ: resolvedDLQ.Coordinate, Target: resolvedTarget.Coordinate, Topic: topic, Group: group, Count: count, DryRun: dryRun}
+				value := dlqRedrivePreflight{Manager: manager, Target: resolvedTarget, Request: request}
+				if !dryRun {
+					return value, nil
+				}
+				classTarget := resolvedTarget.Classification
+				classTarget.Group = group
+				if authorizeErr := classifyAndAuthorize(f, meta, mqclass.OperationRedriveDLQ, classTarget, ""); authorizeErr != nil {
+					return dlqRedrivePreflight{}, authorizeErr
+				}
+				value.Preview, resolveErr = manager.RedriveDLQ(cmd.Context(), request)
+				value.HasPreview = resolveErr == nil
+				return value, resolveErr
+			}, func(value dlqRedrivePreflight) int {
+				if value.HasPreview {
+					return int(value.Preview.Fingerprint.Count)
+				}
+				return 1
+			})
 			if err != nil {
 				return err
 			}
-			resolvedTarget, err := resolveTopicTarget(cmd.Context(), backend, f, meta, target, dryRun)
-			if err != nil {
-				return err
-			}
+			defer preflight.Backend.Close()
 			allow := allowInternalProduce
 			if dryRun {
 				allow = ""
 			}
-			classTarget := resolvedTarget.Classification
+			classTarget := preflight.Value.Target.Classification
 			classTarget.Group = group
-			if err := classifyAndAuthorize(f, meta, mqclass.OperationRedriveDLQ, classTarget, allow); err != nil {
-				return err
-			}
-			request := mqgov.DLQRedriveRequest{DLQ: resolvedDLQ.Coordinate, Target: resolvedTarget.Coordinate, Topic: topic, Group: group, Count: count, DryRun: dryRun}
-			if dryRun {
-				result, err := manager.RedriveDLQ(cmd.Context(), request)
-				if err != nil {
-					appendAuditWarn(f, auditEventDLQ, meta, audit.EventTarget{ResourceType: "dlq", Resource: dlq}, audit.StatusFailed, "redrive plan", err)
+			if !dryRun {
+				if err := classifyAndAuthorize(f, preflight.Context, mqclass.OperationRedriveDLQ, classTarget, allow); err != nil {
 					return err
 				}
-				appendAuditWarn(f, auditEventDLQ, meta, audit.EventTarget{ResourceType: "dlq", Resource: dlq}, audit.StatusSuccess, fmt.Sprintf("redrive plan count=%d", result.Fingerprint.Count), nil)
-				return targetJSONData(f, "DLQRedriveResult", result, opTarget, operationTargetWrite)
+			}
+			request := preflight.Value.Request
+			if dryRun {
+				return targetJSONData(f, "DLQRedriveResult", preflight.Value.Preview, preflight.Target, operationTargetWrite)
 			}
 			metadata := mutationValueMetadata("mq.dlq.redrive", request)
 			metadata.Items = count
 			handle, err := beginMutationAudit(f, mutationAuditSpec{
 				Action:   "mq.dlq.redrive",
-				Context:  meta,
+				Context:  preflight.Context,
 				Target:   audit.EventTarget{ResourceType: "dlq", Resource: dlq},
 				Metadata: metadata,
 			})
 			if err != nil {
 				return err
 			}
-			result, operationErr := manager.RedriveDLQ(cmd.Context(), request)
-			failed := 0
-			if operationErr != nil {
-				failed = 1
+			result, operationErr := preflight.Value.Manager.RedriveDLQ(cmd.Context(), request)
+			outcome := result.BatchOutcome
+			if outcome.Empty() {
+				outcome.Succeeded = int(result.Fingerprint.Count)
+				if operationErr != nil {
+					outcome.Failed = 1
+				}
 			}
-			succeeded := int(result.Fingerprint.Count)
-			if err := finishBatchMutationAudit(handle, succeeded+failed, succeeded, failed, operationErr); err != nil {
+			if err := finishBatchMutationAuditWithOutcome(handle, count, outcome, operationErr); err != nil {
 				return err
 			}
-			return targetJSONData(f, "DLQRedriveResult", result, opTarget, operationTargetWrite)
+			return targetJSONData(f, "DLQRedriveResult", result, preflight.Target, operationTargetWrite)
 		},
 	}
 	cmd.Flags().StringVar(&topic, "topic", "", "Source topic hint")
@@ -218,54 +266,72 @@ func newDLQPurgeCmd(f *cliFlags) *cobra.Command {
 		Short: "Purge DLQ messages",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			backend, meta, err := buildBroker(f)
-			if err != nil {
-				return err
-			}
-			defer backend.Close()
-			opTarget := operationTargetFromBroker(f, backend)
-			if !backend.Capabilities().SupportsDLQPurge {
-				return apperrors.New(apperrors.CodeNotImplemented, "backend does not support DLQ purge", nil)
-			}
-			manager, ok := mqgov.SupportsDLQ(backend)
-			if !ok {
-				return apperrors.New(apperrors.CodeNotImplemented, "backend does not support DLQ governance", nil)
-			}
 			dlq := args[0]
 			dryRun := f.DryRun || f.Plan
-			resolvedDLQ, err := resolveTopicTarget(cmd.Context(), backend, f, meta, effectiveDLQTopic(backend, dlq, topic, group), dryRun)
+			preflight, err := runMandatoryBrokerPreflight(f, readAuditSpec{
+				Action:   "mq.dlq.purge.preflight",
+				Target:   audit.EventTarget{ResourceType: "dlq", Resource: dlq},
+				Metadata: mutationValueMetadata("mq.dlq.purge.preflight", map[string]any{"dlq": dlq, "dryRun": dryRun}),
+			}, func(backend mqgov.Broker, meta mqgovctx.Context) (dlqPurgePreflight, error) {
+				if !backend.Capabilities().SupportsDLQPurge {
+					return dlqPurgePreflight{}, apperrors.New(apperrors.CodeNotImplemented, "backend does not support DLQ purge", nil)
+				}
+				manager, ok := mqgov.SupportsDLQ(backend)
+				if !ok {
+					return dlqPurgePreflight{}, apperrors.New(apperrors.CodeNotImplemented, "backend does not support DLQ governance", nil)
+				}
+				resolved, resolveErr := resolveTopicTarget(cmd.Context(), backend, f, meta, effectiveDLQTopic(backend, dlq, topic, group), dryRun)
+				if resolveErr != nil {
+					return dlqPurgePreflight{}, resolveErr
+				}
+				request := mqgov.DLQPurgeRequest{DLQ: resolved.Coordinate, Topic: topic, Group: group, DryRun: dryRun}
+				value := dlqPurgePreflight{Manager: manager, Resolved: resolved, Request: request}
+				if !dryRun {
+					return value, nil
+				}
+				classTarget := resolved.Classification
+				classTarget.Group = group
+				if authorizeErr := classifyAndAuthorize(f, meta, mqclass.OperationPurgeDLQ, classTarget, ""); authorizeErr != nil {
+					return dlqPurgePreflight{}, authorizeErr
+				}
+				value.Preview, resolveErr = manager.PurgeDLQ(cmd.Context(), request)
+				value.HasPreview = resolveErr == nil
+				return value, resolveErr
+			}, func(value dlqPurgePreflight) int {
+				if value.HasPreview {
+					return int(value.Preview.Fingerprint.Count)
+				}
+				return 1
+			})
 			if err != nil {
 				return err
 			}
+			defer preflight.Backend.Close()
 			allow := allowTopicPurge
 			if dryRun {
 				allow = ""
 			}
-			classTarget := resolvedDLQ.Classification
+			classTarget := preflight.Value.Resolved.Classification
 			classTarget.Group = group
-			if err := classifyAndAuthorize(f, meta, mqclass.OperationPurgeDLQ, classTarget, allow); err != nil {
-				return err
-			}
-			request := mqgov.DLQPurgeRequest{DLQ: resolvedDLQ.Coordinate, Topic: topic, Group: group, DryRun: dryRun}
-			if dryRun {
-				result, err := manager.PurgeDLQ(cmd.Context(), request)
-				if err != nil {
-					appendAuditWarn(f, auditEventDLQ, meta, audit.EventTarget{ResourceType: "dlq", Resource: dlq}, audit.StatusFailed, "purge plan", err)
+			if !dryRun {
+				if err := classifyAndAuthorize(f, preflight.Context, mqclass.OperationPurgeDLQ, classTarget, allow); err != nil {
 					return err
 				}
-				appendAuditWarn(f, auditEventDLQ, meta, audit.EventTarget{ResourceType: "dlq", Resource: dlq}, audit.StatusSuccess, fmt.Sprintf("purge plan count=%d", result.Fingerprint.Count), nil)
-				return targetJSONData(f, "DLQPurgeResult", result, opTarget, operationTargetWrite)
+			}
+			request := preflight.Value.Request
+			if dryRun {
+				return targetJSONData(f, "DLQPurgeResult", preflight.Value.Preview, preflight.Target, operationTargetWrite)
 			}
 			handle, err := beginMutationAudit(f, mutationAuditSpec{
 				Action:   "mq.dlq.purge",
-				Context:  meta,
+				Context:  preflight.Context,
 				Target:   audit.EventTarget{ResourceType: "dlq", Resource: dlq},
 				Metadata: mutationValueMetadata("mq.dlq.purge", request),
 			})
 			if err != nil {
 				return err
 			}
-			result, operationErr := manager.PurgeDLQ(cmd.Context(), request)
+			result, operationErr := preflight.Value.Manager.PurgeDLQ(cmd.Context(), request)
 			failed := 0
 			if operationErr != nil {
 				failed = 1
@@ -274,12 +340,28 @@ func newDLQPurgeCmd(f *cliFlags) *cobra.Command {
 			if err := finishBatchMutationAudit(handle, succeeded+failed, succeeded, failed, operationErr); err != nil {
 				return err
 			}
-			return targetJSONData(f, "DLQPurgeResult", result, opTarget, operationTargetWrite)
+			return targetJSONData(f, "DLQPurgeResult", result, preflight.Target, operationTargetWrite)
 		},
 	}
 	cmd.Flags().StringVar(&topic, "topic", "", "Source topic hint")
 	cmd.Flags().StringVar(&group, "group", "", "Consumer group or subscription hint")
 	return cmd
+}
+
+type dlqRedrivePreflight struct {
+	Manager    mqgov.DLQManager
+	Target     resolvedTopicTarget
+	Request    mqgov.DLQRedriveRequest
+	Preview    mqgov.DLQRedriveResult
+	HasPreview bool
+}
+
+type dlqPurgePreflight struct {
+	Manager    mqgov.DLQManager
+	Resolved   resolvedTopicTarget
+	Request    mqgov.DLQPurgeRequest
+	Preview    mqgov.DLQPurgeResult
+	HasPreview bool
 }
 
 func effectiveDLQTopic(backend mqgov.Broker, explicit, topic, group string) string {

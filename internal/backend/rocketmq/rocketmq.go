@@ -14,11 +14,30 @@ import (
 	rmqerrors "github.com/apache/rocketmq-client-go/v2/errors"
 	"github.com/apache/rocketmq-client-go/v2/primitive"
 	rmqproducer "github.com/apache/rocketmq-client-go/v2/producer"
+	"github.com/apache/rocketmq-client-go/v2/rlog"
 
 	"github.com/JiangHe12/opskit-core/v2/apperrors"
 
 	"github.com/JiangHe12/mqgov-cli/internal/mqgov"
 )
+
+func init() {
+	// rocketmq-client-go exposes only a process-global logger and emits admin
+	// success/error details before the caller regains control. Install a fixed
+	// no-op once, before any backend client can run; never swap or redirect the
+	// global logger around individual governed operations.
+	rlog.SetLogger(rocketMQNopLogger{})
+}
+
+type rocketMQNopLogger struct{}
+
+func (rocketMQNopLogger) Debug(string, map[string]interface{})   {}
+func (rocketMQNopLogger) Info(string, map[string]interface{})    {}
+func (rocketMQNopLogger) Warning(string, map[string]interface{}) {}
+func (rocketMQNopLogger) Error(string, map[string]interface{})   {}
+func (rocketMQNopLogger) Fatal(string, map[string]interface{})   {}
+func (rocketMQNopLogger) Level(string)                           {}
+func (rocketMQNopLogger) OutputPath(string) error                { return nil }
 
 type Options struct {
 	NameServers    []string

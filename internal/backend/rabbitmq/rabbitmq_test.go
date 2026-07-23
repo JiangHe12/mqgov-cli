@@ -2,31 +2,32 @@ package rabbitmq
 
 import (
 	"encoding/json"
-	"errors"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/JiangHe12/opskit-core/v2/apperrors"
-	amqp "github.com/rabbitmq/amqp091-go"
 
 	"github.com/JiangHe12/mqgov-cli/internal/mqgov"
 )
 
-type peekAcknowledger struct {
-	nackTag      uint64
-	nackMultiple bool
-	nackRequeue  bool
-	nackCalls    int
-	nackErr      error
-}
-
 type closeIdleTransport struct {
 	http.RoundTripper
 	calls int
+}
+
+func TestRedriveRejectsOversizedBatchBeforeBrokerAccess(t *testing.T) {
+	t.Parallel()
+	backend := &Broker{}
+
+	_, err := backend.RedriveDLQ(t.Context(), mqgov.DLQRedriveRequest{Count: mqgov.MaxMessageBatchSize + 1})
+
+	if code := apperrors.AsAppError(err).Code; code != apperrors.CodeUsageError {
+		t.Fatalf("RedriveDLQ() error = %v, code = %s, want USAGE_ERROR", err, code)
+	}
 }
 
 func (transport *closeIdleTransport) CloseIdleConnections() {
@@ -45,72 +46,25 @@ func TestCloseIsIdempotent(t *testing.T) {
 	}
 }
 
-func (*peekAcknowledger) Ack(uint64, bool) error { return nil }
-
-func (ack *peekAcknowledger) Nack(tag uint64, multiple, requeue bool) error {
-	ack.nackTag = tag
-	ack.nackMultiple = multiple
-	ack.nackRequeue = requeue
-	ack.nackCalls++
-	return ack.nackErr
-}
-
-func (*peekAcknowledger) Reject(uint64, bool) error { return nil }
-
-type peekDeliveryGetter struct {
-	deliveries []amqp.Delivery
-	index      int
-}
-
-func (getter *peekDeliveryGetter) Get(string, bool) (amqp.Delivery, bool, error) {
-	if getter.index >= len(getter.deliveries) {
-		return amqp.Delivery{}, false, nil
-	}
-	delivery := getter.deliveries[getter.index]
-	getter.index++
-	return delivery, true, nil
-}
-
-func TestRabbitMQPeekCollectsDistinctOrderedBatchBeforeRequeue(t *testing.T) {
+func TestRabbitMQPeekIsNotImplementedWithoutConnecting(t *testing.T) {
 	t.Parallel()
-	ack := &peekAcknowledger{}
-	keys := []string{"first", "second", "third"}
-	bodies := []string{"one", "two", "three"}
-	getter := &peekDeliveryGetter{deliveries: []amqp.Delivery{
-		{Acknowledger: ack, DeliveryTag: 1, RoutingKey: keys[0], Body: []byte(bodies[0]), Timestamp: time.Unix(1, 0)},
-		{Acknowledger: ack, DeliveryTag: 2, RoutingKey: keys[1], Body: []byte(bodies[1]), Timestamp: time.Unix(2, 0)},
-		{Acknowledger: ack, DeliveryTag: 3, RoutingKey: keys[2], Body: []byte(bodies[2]), Timestamp: time.Unix(3, 0)},
-	}}
+	backend := &Broker{}
 
-	messages, err := rabbitMQPeekMessages(getter, "orders", 5)
-	if err != nil {
-		t.Fatalf("rabbitMQPeekMessages() error = %v", err)
-	}
-	if len(messages) != 3 {
-		t.Fatalf("len(messages) = %d, want 3", len(messages))
-	}
-	for index := range bodies {
-		want := mqgov.FingerprintMessageAt(0, int64(index), []byte(keys[index]), []byte(bodies[index]), time.Unix(int64(index+1), 0))
-		if messages[index] != want {
-			t.Fatalf("messages[%d] = %+v, want %+v", index, messages[index], want)
-		}
-	}
-	if ack.nackCalls != 1 || ack.nackTag != 3 || !ack.nackMultiple || !ack.nackRequeue {
-		t.Fatalf("batch requeue = calls:%d tag:%d multiple:%t requeue:%t", ack.nackCalls, ack.nackTag, ack.nackMultiple, ack.nackRequeue)
+	if _, err := backend.Peek(t.Context(), mqgov.MessagePeekRequest{Coordinate: mqgov.TopicCoordinate{Topic: "orders"}, Count: 1}); apperrors.AsAppError(err).Code != apperrors.CodeNotImplemented {
+		t.Fatalf("Peek() error = %v, want %s", err, apperrors.CodeNotImplemented)
 	}
 }
 
-func TestRabbitMQPeekFailsWhenBatchCannotBeRestored(t *testing.T) {
+func TestRabbitMQDLQPeekIsNotImplementedWithoutConnecting(t *testing.T) {
 	t.Parallel()
-	ack := &peekAcknowledger{nackErr: errors.New("injected nack failure")}
-	getter := &peekDeliveryGetter{deliveries: []amqp.Delivery{{
-		Acknowledger: ack,
-		DeliveryTag:  1,
-		Body:         []byte("one"),
-	}}}
+	backend := &Broker{}
 
-	if _, err := rabbitMQPeekMessages(getter, "orders", 1); err == nil || !strings.Contains(err.Error(), "restore peeked RabbitMQ messages") {
-		t.Fatalf("rabbitMQPeekMessages() error = %v, want restore failure", err)
+	if _, err := backend.PeekDLQ(t.Context(), mqgov.DLQPeekRequest{DLQ: mqgov.TopicCoordinate{Topic: "orders.dlq"}, Count: 1}); apperrors.AsAppError(err).Code != apperrors.CodeNotImplemented {
+		t.Fatalf("PeekDLQ() error = %v, want %s", err, apperrors.CodeNotImplemented)
+	}
+	capabilities := backend.Capabilities()
+	if capabilities.SupportsDLQPeek || slices.Contains(capabilities.Verbs, "peek") {
+		t.Fatalf("capabilities advertise unsupported peek: %+v", capabilities)
 	}
 }
 
@@ -203,6 +157,43 @@ func TestRabbitMQDLQRedriveRejectsSuccessfulNoOp(t *testing.T) {
 	_, err := backend.RedriveDLQ(t.Context(), mqgov.DLQRedriveRequest{DLQ: dlq, Target: dlq, Count: 1})
 	if got := apperrors.AsAppError(err).Code; got != apperrors.CodeUsageError {
 		t.Fatalf("RedriveDLQ(same target) code = %s, want %s; err=%v", got, apperrors.CodeUsageError, err)
+	}
+}
+
+func TestRabbitMQRedriveFailureReportsPartialAndUncertainOutcomes(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		outcome mqgov.BatchOutcome
+		cause   error
+		want    apperrors.ErrorCode
+	}{
+		{
+			name:    "partial success",
+			outcome: mqgov.BatchOutcome{Succeeded: 2, Failed: 1},
+			cause:   apperrors.New(apperrors.CodeResourceNotFound, "target missing", nil),
+			want:    apperrors.CodePartialFailure,
+		},
+		{
+			name:    "uncertain publish",
+			outcome: mqgov.BatchOutcome{Uncertain: 1},
+			cause:   apperrors.New(apperrors.CodeBackendUnreachable, "confirmation timed out", nil),
+			want:    apperrors.CodePartialFailure,
+		},
+		{
+			name:    "deterministic failure before success",
+			outcome: mqgov.BatchOutcome{Failed: 1},
+			cause:   apperrors.New(apperrors.CodeResourceNotFound, "target missing", nil),
+			want:    apperrors.CodeResourceNotFound,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := apperrors.AsAppError(rabbitMQRedriveFailure(tt.outcome, tt.cause)).Code; got != tt.want {
+				t.Fatalf("rabbitMQRedriveFailure() code = %s, want %s", got, tt.want)
+			}
+		})
 	}
 }
 

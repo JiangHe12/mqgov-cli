@@ -1,8 +1,6 @@
 package cmd
 
 import (
-	"fmt"
-
 	"github.com/spf13/cobra"
 
 	"github.com/JiangHe12/opskit-core/v2/apperrors"
@@ -11,6 +9,7 @@ import (
 
 	"github.com/JiangHe12/mqgov-cli/internal/mqclass"
 	"github.com/JiangHe12/mqgov-cli/internal/mqgov"
+	"github.com/JiangHe12/mqgov-cli/internal/mqgovctx"
 )
 
 type aclFlags struct {
@@ -37,26 +36,25 @@ func newACLListCmd(f *cliFlags) *cobra.Command {
 		Short: "List broker ACLs",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			backend, meta, err := buildBroker(f)
-			if err != nil {
-				return err
-			}
-			defer backend.Close()
-			opTarget := operationTargetFromBroker(f, backend)
-			manager, ok := mqgov.SupportsACL(backend)
-			if !ok {
-				return apperrors.New(apperrors.CodeNotImplemented, "backend does not support ACL management", nil)
-			}
-			if err := classifyAndAuthorize(f, meta, mqclass.OperationListACL, mqclass.Target{ACL: aclClassTarget(flags)}, ""); err != nil {
-				return err
-			}
 			filter := mqgov.ACLFilter{Principal: flags.principal, Vhost: flags.vhost, ResourceType: flags.resourceType, ResourceName: flags.resourceName}
-			items, err := manager.ListACLs(cmd.Context(), filter)
+			items, opTarget, err := runMandatoryBrokerRead(f, readAuditSpec{
+				Action:   "mq.acl.list",
+				Target:   audit.EventTarget{ResourceType: "acl"},
+				Metadata: mutationValueMetadata("mq.acl.list", filter),
+			}, func(meta mqgovctx.Context) error {
+				return classifyAndAuthorize(f, meta, mqclass.OperationListACL, mqclass.Target{ACL: aclClassTarget(flags)}, "")
+			}, func(backend mqgov.Broker, _ mqgovctx.Context) ([]mqgov.ACLBinding, error) {
+				manager, ok := mqgov.SupportsACL(backend)
+				if !ok {
+					return nil, apperrors.New(apperrors.CodeNotImplemented, "backend does not support ACL management", nil)
+				}
+				return manager.ListACLs(cmd.Context(), filter)
+			}, func(items []mqgov.ACLBinding) int {
+				return len(items)
+			})
 			if err != nil {
-				appendAuditWarn(f, auditEventACL, meta, audit.EventTarget{ResourceType: "acl"}, audit.StatusFailed, aclFilterDiff(filter), err)
 				return err
 			}
-			appendAuditWarn(f, auditEventACL, meta, audit.EventTarget{ResourceType: "acl"}, audit.StatusSuccess, fmt.Sprintf("list count=%d filter=%s", len(items), aclFilterDiff(filter)), nil)
 			if f.Output == "json" {
 				return targetJSONList(f, "ACLList", items, len(items), len(items), opTarget)
 			}
@@ -89,39 +87,44 @@ func newACLGrantCmd(f *cliFlags) *cobra.Command {
 					"permission": binding.Permission,
 				})
 			}
-			backend, meta, err := buildBroker(f)
+			binding := aclBinding(flags)
+			preflight, err := runMandatoryBrokerPreflight(f, readAuditSpec{
+				Action:   "mq.acl.grant.preflight",
+				Target:   aclAuditTarget(binding),
+				Metadata: mutationValueMetadata("mq.acl.grant.preflight", binding),
+			}, func(backend mqgov.Broker, _ mqgovctx.Context) (mqgov.ACLManager, error) {
+				manager, ok := mqgov.SupportsACL(backend)
+				if !ok {
+					return nil, apperrors.New(apperrors.CodeNotImplemented, "backend does not support ACL management", nil)
+				}
+				return manager, nil
+			}, func(mqgov.ACLManager) int { return 1 })
 			if err != nil {
 				return err
 			}
-			defer backend.Close()
-			opTarget := operationTargetFromBroker(f, backend)
-			manager, ok := mqgov.SupportsACL(backend)
-			if !ok {
-				return apperrors.New(apperrors.CodeNotImplemented, "backend does not support ACL management", nil)
-			}
-			binding := aclBinding(flags)
+			defer preflight.Backend.Close()
 			target := aclClassTarget(flags)
 			allow := safety.AllowFlag("")
 			if mqclass.Classify(mqclass.OperationGrantACL, mqclass.Target{ACL: target}).Risk == safety.R3 {
 				allow = allowDestructiveACL
 			}
-			if err := classifyAndAuthorize(f, meta, mqclass.OperationGrantACL, mqclass.Target{ACL: target}, allow); err != nil {
+			if err := classifyAndAuthorize(f, preflight.Context, mqclass.OperationGrantACL, mqclass.Target{ACL: target}, allow); err != nil {
 				return err
 			}
 			handle, err := beginMutationAudit(f, mutationAuditSpec{
 				Action:   "mq.acl.grant",
-				Context:  meta,
+				Context:  preflight.Context,
 				Target:   aclAuditTarget(binding),
 				Metadata: mutationValueMetadata("mq.acl.grant", binding),
 			})
 			if err != nil {
 				return err
 			}
-			operationErr := manager.GrantACL(cmd.Context(), binding)
+			operationErr := preflight.Value.GrantACL(cmd.Context(), binding)
 			if err := finishMutationAudit(handle, mutationAuditOutcome{}, operationErr); err != nil {
 				return err
 			}
-			return targetJSONData(f, "ACLBinding", binding, opTarget, operationTargetWrite)
+			return targetJSONData(f, "ACLBinding", binding, preflight.Target, operationTargetWrite)
 		},
 	}
 	addACLBindingFlags(cmd, &flags)
@@ -143,34 +146,39 @@ func newACLRevokeCmd(f *cliFlags) *cobra.Command {
 					"permission": binding.Permission,
 				})
 			}
-			backend, meta, err := buildBroker(f)
+			binding := aclBinding(flags)
+			preflight, err := runMandatoryBrokerPreflight(f, readAuditSpec{
+				Action:   "mq.acl.revoke.preflight",
+				Target:   aclAuditTarget(binding),
+				Metadata: mutationValueMetadata("mq.acl.revoke.preflight", binding),
+			}, func(backend mqgov.Broker, _ mqgovctx.Context) (mqgov.ACLManager, error) {
+				manager, ok := mqgov.SupportsACL(backend)
+				if !ok {
+					return nil, apperrors.New(apperrors.CodeNotImplemented, "backend does not support ACL management", nil)
+				}
+				return manager, nil
+			}, func(mqgov.ACLManager) int { return 1 })
 			if err != nil {
 				return err
 			}
-			defer backend.Close()
-			opTarget := operationTargetFromBroker(f, backend)
-			manager, ok := mqgov.SupportsACL(backend)
-			if !ok {
-				return apperrors.New(apperrors.CodeNotImplemented, "backend does not support ACL management", nil)
-			}
-			binding := aclBinding(flags)
-			if err := classifyAndAuthorize(f, meta, mqclass.OperationRevokeACL, mqclass.Target{ACL: aclClassTarget(flags)}, allowDestructiveACL); err != nil {
+			defer preflight.Backend.Close()
+			if err := classifyAndAuthorize(f, preflight.Context, mqclass.OperationRevokeACL, mqclass.Target{ACL: aclClassTarget(flags)}, allowDestructiveACL); err != nil {
 				return err
 			}
 			handle, err := beginMutationAudit(f, mutationAuditSpec{
 				Action:   "mq.acl.revoke",
-				Context:  meta,
+				Context:  preflight.Context,
 				Target:   aclAuditTarget(binding),
 				Metadata: mutationValueMetadata("mq.acl.revoke", binding),
 			})
 			if err != nil {
 				return err
 			}
-			operationErr := manager.RevokeACL(cmd.Context(), binding)
+			operationErr := preflight.Value.RevokeACL(cmd.Context(), binding)
 			if err := finishMutationAudit(handle, mutationAuditOutcome{}, operationErr); err != nil {
 				return err
 			}
-			return targetJSONData(f, "ACLBinding", binding, opTarget, operationTargetWrite)
+			return targetJSONData(f, "ACLBinding", binding, preflight.Target, operationTargetWrite)
 		},
 	}
 	addACLBindingFlags(cmd, &flags)
@@ -214,11 +222,4 @@ func aclClassTarget(flags aclFlags) mqclass.ACLTarget {
 
 func aclAuditTarget(binding mqgov.ACLBinding) audit.EventTarget {
 	return audit.EventTarget{ResourceType: "acl", Resource: binding.ResourceType + "/" + binding.ResourceName}
-}
-
-func aclFilterDiff(filter mqgov.ACLFilter) string {
-	return "principal=" + filter.Principal +
-		" vhost=" + filter.Vhost +
-		" resourceType=" + filter.ResourceType +
-		" resourceName=" + filter.ResourceName
 }

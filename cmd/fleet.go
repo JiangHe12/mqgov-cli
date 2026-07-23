@@ -1,7 +1,7 @@
 package cmd
 
 import (
-	"fmt"
+	"errors"
 	"sort"
 	"strconv"
 	"strings"
@@ -11,7 +11,6 @@ import (
 	"github.com/JiangHe12/opskit-core/v2/apperrors"
 	"github.com/JiangHe12/opskit-core/v2/audit"
 
-	"github.com/JiangHe12/mqgov-cli/internal/backend/fake"
 	"github.com/JiangHe12/mqgov-cli/internal/mqclass"
 	"github.com/JiangHe12/mqgov-cli/internal/mqgov"
 	"github.com/JiangHe12/mqgov-cli/internal/mqgovctx"
@@ -30,6 +29,7 @@ type fleetStatusItem struct {
 	Cluster      string             `json:"cluster,omitempty"`
 	Namespace    string             `json:"namespace,omitempty"`
 	Capabilities mqgov.Capabilities `json:"capabilities,omitempty"`
+	cause        error
 }
 
 type fleetTopicItem struct {
@@ -41,6 +41,7 @@ type fleetTopicItem struct {
 	Namespace string                   `json:"namespace,omitempty"`
 	Topics    []mqgov.TopicDescription `json:"topics,omitempty"`
 	Count     int                      `json:"count"`
+	cause     error
 }
 
 type fleetContext struct {
@@ -66,11 +67,25 @@ func newFleetStatusCmd(f *cliFlags) *cobra.Command {
 				return err
 			}
 			opTarget := fleetOperationTarget(contexts)
+			metadata := mutationValueMetadata("mq.fleet.status", fleetContextNames(contexts))
+			metadata.Items = len(contexts)
+			auditHandle, err := beginReadAudit(f, readAuditSpec{
+				Action:      "mq.fleet.status",
+				ContextName: "fleet",
+				Target:      audit.EventTarget{ResourceType: "fleet"},
+				Metadata:    metadata,
+			})
+			if err != nil {
+				return err
+			}
 			results := make([]fleetStatusItem, 0, len(contexts))
 			for _, item := range contexts {
 				results = append(results, fleetStatusForContext(cmd, f, item))
 			}
-			appendFleetAudit(f, contexts, fleetStatusAudit(results))
+			succeeded, failed := fleetStatusCounts(results)
+			if err := persistReadAuditBatch(auditHandle, succeeded, failed, len(results), fleetStatusCause(results)); err != nil {
+				return err
+			}
 			if f.Output == "json" {
 				return targetJSONList(f, "FleetStatus", results, len(results), len(results), opTarget)
 			}
@@ -94,16 +109,41 @@ func newFleetTopicsCmd(f *cliFlags) *cobra.Command {
 		Short: "List topics across selected contexts",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			if err := validateExactPattern(pattern); err != nil {
+				return err
+			}
 			contexts, err := selectedFleetContexts(flags)
 			if err != nil {
 				return err
 			}
 			opTarget := fleetOperationTarget(contexts)
+			metadata := mutationValueMetadata("mq.fleet.topics", struct {
+				Contexts []string
+				Pattern  string
+				Limit    int
+			}{
+				Contexts: fleetContextNames(contexts),
+				Pattern:  pattern,
+				Limit:    limit,
+			})
+			metadata.Items = len(contexts)
+			auditHandle, err := beginReadAudit(f, readAuditSpec{
+				Action:      "mq.fleet.topics",
+				ContextName: "fleet",
+				Target:      audit.EventTarget{ResourceType: "fleet"},
+				Metadata:    metadata,
+			})
+			if err != nil {
+				return err
+			}
 			results := make([]fleetTopicItem, 0, len(contexts))
 			for _, item := range contexts {
 				results = append(results, fleetTopicsForContext(cmd, f, item, pattern, limit))
 			}
-			appendFleetAudit(f, contexts, fleetTopicsAudit(results))
+			succeeded, failed, resultCount := fleetTopicCounts(results)
+			if err := persistReadAuditBatch(auditHandle, succeeded, failed, resultCount, fleetTopicCause(results)); err != nil {
+				return err
+			}
 			if f.Output == "json" {
 				return targetJSONList(f, "FleetTopics", results, len(results), len(results), opTarget)
 			}
@@ -170,35 +210,35 @@ func fleetContextsByName(items map[string]mqgovctx.Context, names []string) ([]f
 }
 
 func fleetStatusForContext(cmd *cobra.Command, f *cliFlags, item fleetContext) fleetStatusItem {
+	if err := classifyAndAuthorize(f, item.item, mqclass.OperationClusterInfo, mqclass.Target{}, ""); err != nil {
+		return fleetStatusItem{Context: item.name, Status: fleetErrorStatus(err), Error: appErrorMessage(err), cause: err}
+	}
 	backend, err := buildBrokerForFleetContext(f, item)
 	if err != nil {
-		return fleetStatusItem{Context: item.name, Status: fleetErrorStatus(err), Error: appErrorMessage(err)}
+		return fleetStatusItem{Context: item.name, Status: fleetErrorStatus(err), Error: appErrorMessage(err), cause: err}
 	}
 	defer backend.Close()
-	if err := classifyAndAuthorize(f, item.item, mqclass.OperationClusterInfo, mqclass.Target{}, ""); err != nil {
-		return fleetStatusItem{Context: item.name, Status: fleetErrorStatus(err), Error: appErrorMessage(err)}
-	}
 	desc := backend.Describe()
 	caps := backend.Capabilities()
 	if err := backend.Ping(cmd.Context()); err != nil {
-		return fleetStatusItem{Context: item.name, Status: fleetErrorStatus(err), Error: appErrorMessage(err), Backend: desc.Backend, Cluster: desc.Cluster, Namespace: desc.Namespace, Capabilities: caps}
+		return fleetStatusItem{Context: item.name, Status: fleetErrorStatus(err), Error: appErrorMessage(err), Backend: desc.Backend, Cluster: desc.Cluster, Namespace: desc.Namespace, Capabilities: caps, cause: err}
 	}
 	return fleetStatusItem{Context: item.name, Status: audit.StatusSuccess, Backend: desc.Backend, Cluster: desc.Cluster, Namespace: desc.Namespace, Capabilities: caps}
 }
 
 func fleetTopicsForContext(cmd *cobra.Command, f *cliFlags, item fleetContext, pattern string, limit int) fleetTopicItem {
+	if err := classifyAndAuthorize(f, item.item, mqclass.OperationList, mqclass.Target{Topic: pattern}, ""); err != nil {
+		return fleetTopicItem{Context: item.name, Status: fleetErrorStatus(err), Error: appErrorMessage(err), cause: err}
+	}
 	backend, err := buildBrokerForFleetContext(f, item)
 	if err != nil {
-		return fleetTopicItem{Context: item.name, Status: fleetErrorStatus(err), Error: appErrorMessage(err)}
+		return fleetTopicItem{Context: item.name, Status: fleetErrorStatus(err), Error: appErrorMessage(err), cause: err}
 	}
 	defer backend.Close()
 	desc := backend.Describe()
-	if err := classifyAndAuthorize(f, item.item, mqclass.OperationList, mqclass.Target{Topic: pattern}, ""); err != nil {
-		return fleetTopicItem{Context: item.name, Status: fleetErrorStatus(err), Error: appErrorMessage(err), Backend: desc.Backend, Cluster: desc.Cluster, Namespace: desc.Namespace}
-	}
 	topics, err := backend.ListTopics(cmd.Context(), mqgov.TopicListOptions{Pattern: pattern, Limit: limit})
 	if err != nil {
-		return fleetTopicItem{Context: item.name, Status: fleetErrorStatus(err), Error: appErrorMessage(err), Backend: desc.Backend, Cluster: desc.Cluster, Namespace: desc.Namespace}
+		return fleetTopicItem{Context: item.name, Status: fleetErrorStatus(err), Error: appErrorMessage(err), Backend: desc.Backend, Cluster: desc.Cluster, Namespace: desc.Namespace, cause: err}
 	}
 	return fleetTopicItem{Context: item.name, Status: audit.StatusSuccess, Backend: desc.Backend, Cluster: desc.Cluster, Namespace: desc.Namespace, Topics: topics, Count: len(topics)}
 }
@@ -232,52 +272,65 @@ func fleetLocalFlags(f *cliFlags, contextName string) cliFlags {
 		AllowRoleChange:     f.AllowRoleChange,
 		AllowAuditPrune:     f.AllowAuditPrune,
 		trustedOperator:     f.trustedOperator,
+		brokerRuntime:       f.brokerRuntime,
+		readDiagnostics:     f.readDiagnostics,
+		readDiagnosticWrite: f.readDiagnosticWrite,
 	}
 }
 
 func buildBrokerFromContext(f *cliFlags, item mqgovctx.Context, name string) (mqgov.Broker, error) {
-	switch item.Backend {
-	case "kafka":
-		return buildKafkaBackend(f, item, name)
-	case "rabbitmq":
-		return buildRabbitMQBackend(f, item, name)
-	case "pulsar":
-		return buildPulsarBackend(f, item, name)
-	case "rocketmq":
-		return buildRocketMQBackend(f, item, name)
-	case "", defaultFakeBackend:
-		return fakeBroker(f, item), nil
-	default:
-		return nil, apperrors.New(apperrors.CodeNotImplemented, "backend is not supported", nil)
-	}
+	return buildBrokerForResolvedContext(f, item, name)
 }
 
-func fakeBroker(f *cliFlags, item mqgovctx.Context) mqgov.Broker {
-	return fake.New(firstNonEmpty(item.Cluster, f.Cluster, "fake"), firstNonEmpty(item.Namespace, f.Namespace))
-}
-
-func appendFleetAudit(f *cliFlags, contexts []fleetContext, diff string) {
+func fleetContextNames(contexts []fleetContext) []string {
 	names := make([]string, 0, len(contexts))
 	for _, item := range contexts {
 		names = append(names, item.name)
 	}
-	appendAuditWarn(f, auditEventFleet, mqgovctx.Context{}, audit.EventTarget{ResourceType: "fleet", Resource: strings.Join(names, ",")}, audit.StatusSuccess, diff, nil)
+	return names
 }
 
-func fleetStatusAudit(items []fleetStatusItem) string {
-	parts := make([]string, 0, len(items))
+func fleetStatusCounts(items []fleetStatusItem) (succeeded, failed int) {
 	for _, item := range items {
-		parts = append(parts, item.Context+"="+item.Status)
+		if item.Status == audit.StatusSuccess {
+			succeeded++
+		} else {
+			failed++
+		}
 	}
-	return "status " + strings.Join(parts, ",")
+	return succeeded, failed
 }
 
-func fleetTopicsAudit(items []fleetTopicItem) string {
-	parts := make([]string, 0, len(items))
+func fleetTopicCounts(items []fleetTopicItem) (succeeded, failed, resultCount int) {
 	for _, item := range items {
-		parts = append(parts, fmt.Sprintf("%s=%s count=%d", item.Context, item.Status, item.Count))
+		if item.Status == audit.StatusSuccess {
+			succeeded++
+			resultCount += item.Count
+		} else {
+			failed++
+		}
 	}
-	return "topics " + strings.Join(parts, ",")
+	return succeeded, failed, resultCount
+}
+
+func fleetStatusCause(items []fleetStatusItem) error {
+	causes := make([]error, 0)
+	for _, item := range items {
+		if item.cause != nil {
+			causes = append(causes, item.cause)
+		}
+	}
+	return errors.Join(causes...)
+}
+
+func fleetTopicCause(items []fleetTopicItem) error {
+	causes := make([]error, 0)
+	for _, item := range items {
+		if item.cause != nil {
+			causes = append(causes, item.cause)
+		}
+	}
+	return errors.Join(causes...)
 }
 
 func appErrorMessage(err error) string {

@@ -6,9 +6,12 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/JiangHe12/opskit-core/v2/apperrors"
+	"github.com/JiangHe12/opskit-core/v2/audit"
 	"github.com/JiangHe12/opskit-core/v2/credstore"
 
+	"github.com/JiangHe12/mqgov-cli/internal/mqclass"
 	"github.com/JiangHe12/mqgov-cli/internal/mqgov"
+	"github.com/JiangHe12/mqgov-cli/internal/mqgovctx"
 )
 
 type capabilitiesData struct {
@@ -38,8 +41,18 @@ type capBackend struct {
 }
 
 type capSupported struct {
-	ContextAPIVersions []string `json:"contextApiVersions"`
-	AuditAPIVersions   []string `json:"auditApiVersions"`
+	ContextAPIVersions []string      `json:"contextApiVersions"`
+	AuditAPIVersions   []string      `json:"auditApiVersions"`
+	ReadAudit          string        `json:"readAudit"`
+	ReadAuditScope     string        `json:"readAuditScope"`
+	ReadLimits         capReadLimits `json:"readLimits"`
+}
+
+type capReadLimits struct {
+	PeekMessages                int `json:"peekMessages"`
+	TailMessages                int `json:"tailMessages"`
+	MirrorMessages              int `json:"mirrorMessages"`
+	MirrorBufferAccountingBytes int `json:"mirrorBufferAccountingBytes"`
 }
 
 type capDomain struct {
@@ -64,12 +77,20 @@ func newCapabilitiesCmd(f *cliFlags) *cobra.Command {
 		Short: "Show mqgov capabilities",
 		Args:  cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
-			backend, _, err := buildBroker(f)
+			data, _, err := runMandatoryBrokerRead(f, readAuditSpec{
+				Action:   "mq.capabilities",
+				Target:   audit.EventTarget{ResourceType: "capabilities"},
+				Metadata: mutationValueMetadata("mq.capabilities", map[string]bool{"boundBackend": true}),
+			}, func(meta mqgovctx.Context) error {
+				return classifyAndAuthorize(f, meta, mqclass.OperationClusterInfo, mqclass.Target{}, "")
+			}, func(backend mqgov.Broker, _ mqgovctx.Context) (capabilitiesData, error) {
+				return buildCapabilities(backend.Capabilities()), nil
+			}, func(capabilitiesData) int {
+				return 1
+			})
 			if err != nil {
 				return err
 			}
-			defer backend.Close()
-			data := buildCapabilities(backend.Capabilities())
 			if f.Output == "json" {
 				return newPrinter(f).JSONData("Capabilities", data)
 			}
@@ -123,6 +144,14 @@ func buildCapabilities(backendCaps mqgov.Capabilities) capabilitiesData {
 		Supported: capSupported{
 			ContextAPIVersions: []string{"mqgov-cli.io/context/v1"},
 			AuditAPIVersions:   []string{auditAPIVersion},
+			ReadAudit:          "required-intent-outcome",
+			ReadAuditScope:     "all-backend-reads-and-mutation-preflights",
+			ReadLimits: capReadLimits{
+				PeekMessages:                maxPeekMessages,
+				TailMessages:                maxTailMessages,
+				MirrorMessages:              maxMirrorMessages,
+				MirrorBufferAccountingBytes: maxMirrorBufferedBytes,
+			},
 		},
 		Domain: capDomain{
 			Backend: capBackend{

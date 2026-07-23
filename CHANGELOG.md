@@ -2,6 +2,49 @@
 
 All notable changes to this project are documented in this file.
 
+## v0.6.3
+
+### Security
+
+- All broker reads and mutation preflights now persist a read intent before
+  authorization and client construction, and persist the correlated outcome
+  before releasing output or beginning mutation authorization and execution.
+  Audit failures fail closed without backend access, result release, or writes.
+- Backend diagnostics are redacted, bounded to 64 KiB, and deferred until the
+  read outcome is durable; third-party client logging that cannot participate
+  in this lifecycle remains disabled.
+- Message mirror source staging is capped by the exact requested limit of
+  1–1,000 messages and a conservative 64 MiB accounting budget, and the source
+  audit outcome must be durable before any target mutation.
+- npm installation now trusts only the exact six platform digests embedded in
+  the provenance-bound package manifest. Release automation verifies the signed
+  checksum and binary bundle before GitHub Release and npm publication, while
+  verified downloads use exclusive temporary files, bounded transfers, fsync,
+  and atomic replacement without a verification bypass.
+
+### Changed
+
+- **Fail-closed compatibility change:** RabbitMQ message and DLQ peek now return
+  `NOT_IMPLEMENTED` because consume-and-requeue cannot prove a truly
+  non-consuming read.
+- Peek and tail limits are bounded to 1–10,000 messages, and mirror limits are
+  bounded to 1–1,000 messages at both command and backend boundaries.
+- Updated `opskit-core/v2` to v2.0.2 for shared owner-only, no-follow,
+  durable-atomic context, encrypted credential, and TLS trust-pin storage.
+- Updated `golang.org/x/crypto`, `x/net`, `x/sys`, and `x/term` to their current
+  patched releases.
+
+### Fixed
+
+- Backend, cluster, and topic coordinates are normalized and bound consistently
+  across authorization and execution, including exact topic classification and
+  fail-closed metadata drift checks.
+- Batch operations now report bounded succeeded, failed, and uncertain counts
+  instead of treating partial backend results as complete success.
+- Invalid output formats are rejected before command execution.
+- Updated Cosign to v2.6.4 and hardened CI checks for installer tests and the
+  exact five-file npm package.
+
 ## v0.6.2
 
 ### Security

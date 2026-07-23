@@ -50,13 +50,7 @@ const (
 	allowRoleChange       = safety.AllowFlag("allow-role-change")
 	allowAuditPrune       = safety.AllowFlag("allow-audit-prune")
 	auditEventTopic       = audit.EventType("mq.topic")
-	auditEventGroup       = audit.EventType("mq.group")
 	auditEventMessage     = audit.EventType("mq.message")
-	auditEventDLQ         = audit.EventType("mq.dlq")
-	auditEventOffset      = audit.EventType("mq.offset")
-	auditEventACL         = audit.EventType("mq.acl")
-	auditEventSchema      = audit.EventType("mq.schema")
-	auditEventFleet       = audit.EventType("mq.fleet")
 	auditEventDiagnostic  = audit.EventType("mq.diagnostic")
 	defaultFakeBackend    = "fake"
 	defaultCommandTimeout = 30 * time.Second
@@ -107,6 +101,14 @@ type cliFlags struct {
 	metricAttrs         []attribute.KeyValue
 	trustedOperator     string
 	mutationAudit       *mutationAuditRuntime
+	brokerRuntime       *brokerCommandRuntime
+	mirrorRuntime       *mirrorCommandRuntime
+	readDiagnostics     *readDiagnosticBuffer
+	readDiagnosticWrite func([]byte) (int, error)
+}
+
+type brokerCommandRuntime struct {
+	buildResolved func(*cliFlags, mqgovctx.Context, string) (mqgov.Broker, error)
 }
 
 var versionInfo = struct {
@@ -316,34 +318,33 @@ func safeTelemetryErrorCode(err error) string {
 	return string(apperrors.AsAppError(err).Code)
 }
 
-func buildBroker(f *cliFlags) (mqgov.Broker, mqgovctx.Context, error) {
-	item, name, err := resolvedContext(f)
-	if err != nil {
-		return nil, mqgovctx.Context{}, err
+func buildBrokerForResolvedContext(f *cliFlags, item mqgovctx.Context, name string) (mqgov.Broker, error) {
+	if f.brokerRuntime != nil && f.brokerRuntime.buildResolved != nil {
+		return f.brokerRuntime.buildResolved(f, item, name)
 	}
 	backendName := firstNonEmpty(f.Backend, item.Backend, defaultFakeBackend)
 	if backendName != defaultFakeBackend {
 		if backendName == "kafka" {
 			backend, err := buildKafkaBackend(f, item, name)
-			return backend, item, err
+			return backend, err
 		}
 		if backendName == "rabbitmq" {
 			backend, err := buildRabbitMQBackend(f, item, name)
-			return backend, item, err
+			return backend, err
 		}
 		if backendName == "pulsar" {
 			backend, err := buildPulsarBackend(f, item, name)
-			return backend, item, err
+			return backend, err
 		}
 		if backendName == "rocketmq" {
 			backend, err := buildRocketMQBackend(f, item, name)
-			return backend, item, err
+			return backend, err
 		}
-		return nil, mqgovctx.Context{}, apperrors.New(apperrors.CodeNotImplemented, "backend is not supported", nil)
+		return nil, apperrors.New(apperrors.CodeNotImplemented, "backend is not supported", nil)
 	}
 	cluster := firstNonEmpty(f.Cluster, item.Cluster, "fake")
 	namespace := firstNonEmpty(f.Namespace, item.Namespace)
-	return fake.New(cluster, namespace), item, nil
+	return fake.New(cluster, namespace), nil
 }
 
 func buildPulsarBackend(f *cliFlags, item mqgovctx.Context, contextName string) (mqgov.Broker, error) {
@@ -362,6 +363,7 @@ func buildPulsarBackend(f *cliFlags, item mqgovctx.Context, contextName string) 
 		CACertFile:     firstNonEmpty(item.PulsarCACertFile, os.Getenv("PULSAR_CA_CERT_FILE")),
 		ClientCertFile: firstNonEmpty(item.PulsarClientCertFile, os.Getenv("PULSAR_CLIENT_CERT_FILE")),
 		ClientKeyFile:  firstNonEmpty(item.PulsarClientKeyFile, os.Getenv("PULSAR_CLIENT_KEY_FILE")),
+		TLSNotify:      readTLSNotify(f),
 		Timeout:        f.Timeout,
 	})
 }
@@ -405,6 +407,7 @@ func buildRabbitMQBackend(f *cliFlags, item mqgovctx.Context, contextName string
 		CACertFile:     firstNonEmpty(item.RabbitMQCACertFile, os.Getenv("RABBITMQ_CA_CERT_FILE")),
 		ClientCertFile: firstNonEmpty(item.RabbitMQClientCertFile, os.Getenv("RABBITMQ_CLIENT_CERT_FILE")),
 		ClientKeyFile:  firstNonEmpty(item.RabbitMQClientKeyFile, os.Getenv("RABBITMQ_CLIENT_KEY_FILE")),
+		TLSNotify:      readTLSNotify(f),
 		Timeout:        f.Timeout,
 	})
 }
@@ -432,6 +435,7 @@ func buildKafkaBackend(f *cliFlags, item mqgovctx.Context, contextName string) (
 		SchemaRegistryURL:      firstNonEmpty(item.KafkaSchemaRegistryURL, os.Getenv("KAFKA_SCHEMA_REGISTRY_URL")),
 		SchemaRegistryUsername: firstNonEmpty(item.KafkaSchemaRegistryUsername, os.Getenv("KAFKA_SCHEMA_REGISTRY_USERNAME")),
 		SchemaRegistryPassword: firstNonEmpty(os.Getenv("KAFKA_SCHEMA_REGISTRY_PASSWORD"), srPassword),
+		TLSNotify:              readTLSNotify(f),
 		Timeout:                f.Timeout,
 	})
 }
@@ -679,6 +683,17 @@ func validateOutput(output string) error {
 	default:
 		return apperrors.New(apperrors.CodeUsageError, "output format must be table, json, or plain", nil)
 	}
+}
+
+func validateExactPattern(pattern string) error {
+	if strings.ContainsAny(pattern, "*?[]") {
+		return apperrors.New(
+			apperrors.CodeUsageError,
+			"--pattern accepts an exact name only; glob metacharacters are not supported",
+			nil,
+		)
+	}
+	return nil
 }
 
 func outputFlagFromArgs(args []string) string {

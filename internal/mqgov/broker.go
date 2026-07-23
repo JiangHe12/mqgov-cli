@@ -2,6 +2,11 @@ package mqgov
 
 import "context"
 
+const (
+	MaxMessageBatchSize = 10_000
+	MaxMirrorBatchSize  = 1_000
+)
+
 type TopicCoordinate struct {
 	Cluster   string `json:"cluster,omitempty"`
 	Namespace string `json:"namespace,omitempty"`
@@ -54,6 +59,7 @@ type TopicPurgeRequest struct {
 }
 
 type TopicPurgeResult struct {
+	BatchOutcome
 	Coordinate  TopicCoordinate      `json:"coordinate"`
 	DLQ         bool                 `json:"dlq,omitempty"`
 	DryRun      bool                 `json:"dryRun"`
@@ -105,6 +111,7 @@ type DLQRedriveRequest struct {
 }
 
 type DLQRedriveResult struct {
+	BatchOutcome
 	DLQ         TopicCoordinate      `json:"dlq"`
 	Target      TopicCoordinate      `json:"target"`
 	DryRun      bool                 `json:"dryRun"`
@@ -276,12 +283,27 @@ type OffsetPlanRequest struct {
 }
 
 type OffsetPlan struct {
+	BatchOutcome
 	Group  GroupCoordinate   `json:"group"`
 	Topic  TopicCoordinate   `json:"topic"`
 	To     string            `json:"to"`
 	DryRun bool              `json:"dryRun"`
 	Impact []PartitionImpact `json:"impact"`
 	Total  int64             `json:"total"`
+}
+
+type BatchOutcome struct {
+	Succeeded int `json:"succeeded,omitempty"`
+	Failed    int `json:"failed,omitempty"`
+	Uncertain int `json:"uncertain,omitempty"`
+}
+
+func (outcome BatchOutcome) Count() int {
+	return outcome.Succeeded + outcome.Failed + outcome.Uncertain
+}
+
+func (outcome BatchOutcome) Empty() bool {
+	return outcome.Count() == 0
 }
 
 type PartitionImpact struct {

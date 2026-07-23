@@ -1,15 +1,20 @@
 package cmd
 
 import (
+	"bytes"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/JiangHe12/opskit-core/v2/apperrors"
+	"github.com/JiangHe12/opskit-core/v2/audit"
 	corectx "github.com/JiangHe12/opskit-core/v2/ctx"
 
+	"github.com/JiangHe12/mqgov-cli/internal/mqgov"
 	"github.com/JiangHe12/mqgov-cli/internal/mqgovctx"
 )
 
@@ -134,11 +139,70 @@ func TestFleetAuditRecordsContextsAndCounts(t *testing.T) {
 		t.Fatalf("ReadFile(audit.log) error = %v", err)
 	}
 	text := string(data)
-	if !strings.Contains(text, "mq.fleet") ||
-		!strings.Contains(text, "dev-a") ||
-		!strings.Contains(text, `"detailFingerprint":"sha256:`) ||
-		!strings.Contains(text, `"detailBytes":`) {
+	if !strings.Contains(text, `"kind":"ReadAuditRecord"`) ||
+		!strings.Contains(text, `"action":"mq.fleet.topics"`) ||
+		!strings.Contains(text, `"operationId":`) ||
+		!strings.Contains(text, `"payloadFingerprint":"sha256:`) ||
+		!strings.Contains(text, `"items":2`) ||
+		!strings.Contains(text, `"resultCount":8`) {
 		t.Fatalf("audit log missing fleet summary: %s", text)
+	}
+	if strings.Contains(text, "dev-a") || strings.Contains(text, "dev-b") {
+		t.Fatalf("audit log leaked fleet context names: %s", text)
+	}
+}
+
+func TestFleetIntentFailurePreventsBackendConstruction(t *testing.T) {
+	writeFleetTestConfig(t, map[string]mqgovctx.Context{"dev": {Backend: "fake"}})
+	buildCalls := 0
+	flags := newDefaultFlags()
+	flags.brokerRuntime = &brokerCommandRuntime{
+		buildResolved: func(*cliFlags, mqgovctx.Context, string) (mqgov.Broker, error) {
+			buildCalls++
+			return nil, errors.New("must not build")
+		},
+	}
+	flags.mutationAudit = &mutationAuditRuntime{
+		appendRecord: func(_ string, _ safeAuditRecord, _ audit.Options) error {
+			return errors.New("injected intent append failure")
+		},
+		now:    func() time.Time { return time.Unix(1700000000, 0).UTC() },
+		random: bytes.NewReader(bytes.Repeat([]byte{0x61}, 16)),
+	}
+
+	_, err := executeReadAuditTestCommand(t, flags, "-o", "json", "fleet", "status", "--contexts", "dev")
+
+	if code := apperrors.AsAppError(err).Code; code != apperrors.CodeLocalIOError {
+		t.Fatalf("fleet error = %v, code = %s, want LOCAL_IO_ERROR", err, code)
+	}
+	if buildCalls != 0 {
+		t.Fatalf("backend build calls = %d, want 0 before durable fleet intent", buildCalls)
+	}
+}
+
+func TestFleetAuthorizationFailurePreventsBackendConstruction(t *testing.T) {
+	writeFleetTestConfig(t, map[string]mqgovctx.Context{
+		"protected": {Base: corectx.Base{Roles: map[string]string{"bob": "reader"}}, Backend: "fake"},
+	})
+	buildCalls := 0
+	flags := newDefaultFlags()
+	flags.brokerRuntime = &brokerCommandRuntime{
+		buildResolved: func(*cliFlags, mqgovctx.Context, string) (mqgov.Broker, error) {
+			buildCalls++
+			return nil, errors.New("must not build")
+		},
+	}
+
+	output, err := executeReadAuditTestCommand(t, flags, "-o", "json", "--operator", "alice", "fleet", "status", "--contexts", "protected")
+	if err != nil {
+		t.Fatalf("fleet partial dashboard error = %v; output=%s", err, output)
+	}
+	if buildCalls != 0 {
+		t.Fatalf("backend build calls = %d, want 0 after fleet authorization failure", buildCalls)
+	}
+	items := decodeFleetStatusItems(t, output)
+	if len(items) != 1 || items[0].Status != "denied" {
+		t.Fatalf("fleet items = %+v, want one denied item", items)
 	}
 }
 
