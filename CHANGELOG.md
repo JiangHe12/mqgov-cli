@@ -2,6 +2,34 @@
 
 All notable changes to this project are documented in this file.
 
+## [Unreleased]
+
+## v0.6.4
+
+### Security
+
+- Pulsar topic creation now treats the built-in `pulsar` tenant and `system`
+  namespace as internal scope, and malformed scope metadata fails closed.
+  Topic deletion falls back to the non-partitioned endpoint only for an
+  explicit not-partitioned response; malformed or unavailable metadata no
+  longer permits a destructive fallback.
+- Kafka purge, DLQ, and mirror operations now preserve per-partition failure
+  and uncertainty, report attempted partitions separately from affected
+  messages, and bind mirror authorization to the actual buffered message
+  count. Protected source context and topic each raise risk exactly once.
+
+### Fixed
+
+- Upgraded `opskit-core` to `v2.0.3` so TLS TOFU trust writes preserve
+  committed-post-commit-error state and report a first-use pin that was already
+  persisted before a later durability failure.
+- Preserved RabbitMQ message keys in the reserved governed header, rejected
+  empty topic identifiers at command and backend boundaries, and added required
+  dual-endpoint TLS pinning tests for RabbitMQ and Pulsar, including same-CA
+  leaf rotation rejection.
+- Restored Node.js 14 compatibility in the npm installer without changing its
+  provenance or atomic-install checks.
+
 ## v0.6.3
 
 ### Security

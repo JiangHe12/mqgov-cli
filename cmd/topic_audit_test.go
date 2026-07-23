@@ -11,6 +11,7 @@ import (
 	"github.com/JiangHe12/opskit-core/v2/audit"
 
 	"github.com/JiangHe12/mqgov-cli/internal/mqclass"
+	"github.com/JiangHe12/mqgov-cli/internal/mqgov"
 	"github.com/JiangHe12/mqgov-cli/internal/mqgovctx"
 )
 
@@ -36,7 +37,7 @@ func TestRocketMQTopicCreateAuthorizationClosesR2AndR3Loop(t *testing.T) {
 	f.Yes = true
 	f.NonInter = true
 
-	target, allow := topicCreateAuthorizationTarget(mqgovctx.Context{}, "rocketmq", "orders")
+	target, allow := topicCreateAuthorizationTarget(mqgovctx.Context{}, "rocketmq", mqgov.TopicCoordinate{Topic: "orders"})
 	if err := classifyAndAuthorize(f, mqgovctx.Context{}, mqclass.OperationCreateTopic, target, allow); apperrors.AsAppError(err).Code != apperrors.CodeAuthorizationRequired {
 		t.Fatalf("RocketMQ create without ticket error = %v, want authorization required", err)
 	}
@@ -46,13 +47,32 @@ func TestRocketMQTopicCreateAuthorizationClosesR2AndR3Loop(t *testing.T) {
 	}
 
 	protected := mqgovctx.Context{Topics: []string{"orders"}}
-	target, allow = topicCreateAuthorizationTarget(protected, "rocketmq", "orders")
+	target, allow = topicCreateAuthorizationTarget(protected, "rocketmq", mqgov.TopicCoordinate{Topic: "orders"})
 	if err := classifyAndAuthorize(f, protected, mqclass.OperationCreateTopic, target, allow); apperrors.AsAppError(err).Code != apperrors.CodeAuthorizationRequired {
 		t.Fatalf("protected RocketMQ create without allow flag error = %v, want authorization required", err)
 	}
 	f.AllowTopicUpsert = true
 	if err := classifyAndAuthorize(f, protected, mqclass.OperationCreateTopic, target, allow); err != nil {
 		t.Fatalf("protected RocketMQ R3 create with exact allow flag error = %v", err)
+	}
+}
+
+func TestPulsarSystemScopeEscalatesTopicCreateBeforeMutation(t *testing.T) {
+	f := newDefaultFlags()
+	f.Yes = true
+	f.NonInter = true
+	coordinate := mqgov.TopicCoordinate{Namespace: "public/system", Topic: "orders"}
+
+	target, allow := topicCreateAuthorizationTarget(mqgovctx.Context{}, "pulsar", coordinate)
+	if !target.InternalTopic {
+		t.Fatalf("Pulsar system namespace target = %+v, want internal topic", target)
+	}
+	if err := classifyAndAuthorize(f, mqgovctx.Context{}, mqclass.OperationCreateTopic, target, allow); apperrors.AsAppError(err).Code != apperrors.CodeAuthorizationRequired {
+		t.Fatalf("Pulsar system namespace create without ticket error = %v, want authorization required", err)
+	}
+	f.Ticket = "OPS-123"
+	if err := classifyAndAuthorize(f, mqgovctx.Context{}, mqclass.OperationCreateTopic, target, allow); err != nil {
+		t.Fatalf("Pulsar system namespace R2 create with ticket error = %v", err)
 	}
 }
 
@@ -104,5 +124,18 @@ func TestTopicCreatePartialFailureAuditIsUncertain(t *testing.T) {
 	if outcome.Status != audit.StatusFailed || outcome.ErrorCode != string(apperrors.CodePartialFailure) ||
 		outcome.Uncertain != 1 || outcome.Succeeded != 0 || outcome.Failed != 0 {
 		t.Fatalf("topic create outcome = %+v, want one uncertain partial failure", outcome)
+	}
+}
+
+func TestPurgeMutationOutcomeNeverUsesAffectedMessageCountAsPartitionCount(t *testing.T) {
+	reported := mqgov.BatchOutcome{Succeeded: 1, Failed: 1, Uncertain: 1}
+	outcome, total := purgeMutationOutcome(reported, 99, errors.New("partial failure"))
+	if outcome != reported || total != 3 {
+		t.Fatalf("purgeMutationOutcome() = %+v total=%d, want reported partition outcome and total 3", outcome, total)
+	}
+
+	outcome, total = purgeMutationOutcome(mqgov.BatchOutcome{}, 2, errors.New("legacy backend failure"))
+	if outcome != (mqgov.BatchOutcome{Succeeded: 2, Uncertain: 1}) || total != 3 {
+		t.Fatalf("legacy purge outcome = %+v total=%d, want two completed resources and one uncertain resource", outcome, total)
 	}
 }

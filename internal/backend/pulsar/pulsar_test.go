@@ -515,3 +515,102 @@ func TestAlterNonPartitionedTopicReturnsClearError(t *testing.T) {
 		t.Fatalf("AlterTopic() message = %q", appErr.Message)
 	}
 }
+
+func TestDeleteTopicFailsClosedWhenPartitionMetadataIsNotExplicit(t *testing.T) {
+	tests := []struct {
+		name   string
+		status int
+		body   string
+	}{
+		{name: "authentication failure", status: http.StatusUnauthorized, body: `{"reason":"not authorized"}`},
+		{name: "server failure", status: http.StatusInternalServerError, body: `{"reason":"temporary failure"}`},
+		{name: "missing topic", status: http.StatusNotFound, body: `{"reason":"Topic not found"}`},
+		{name: "damaged response", status: http.StatusOK, body: `{"partitions":`},
+		{name: "missing partition count", status: http.StatusOK, body: `{}`},
+		{name: "null response", status: http.StatusOK, body: `null`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			deleteCalls := 0
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method == http.MethodDelete {
+					deleteCalls++
+					w.WriteHeader(http.StatusNoContent)
+					return
+				}
+				w.WriteHeader(tt.status)
+				_, _ = w.Write([]byte(tt.body))
+			}))
+			t.Cleanup(server.Close)
+			backend := &Broker{
+				opts:       Options{AdminURL: server.URL, Tenant: "public", Namespace: "default"},
+				httpClient: server.Client(),
+			}
+
+			err := backend.DeleteTopic(t.Context(), mqgov.TopicCoordinate{Topic: "orders"})
+			if err == nil {
+				t.Fatal("DeleteTopic() error = nil, want metadata failure")
+			}
+			if deleteCalls != 0 {
+				t.Fatalf("DeleteTopic() sent %d DELETE requests after uncertain metadata", deleteCalls)
+			}
+		})
+	}
+}
+
+func TestDeleteTopicUsesNonPartitionedDeleteOnlyAfterExplicitMetadata(t *testing.T) {
+	tests := []struct {
+		name           string
+		status         int
+		body           string
+		wantDeletePath string
+	}{
+		{
+			name:           "explicit non-partitioned response",
+			status:         http.StatusNotFound,
+			body:           `{"reason":"Topic is not partitioned"}`,
+			wantDeletePath: "/admin/v2/persistent/public/default/orders",
+		},
+		{
+			name:           "successful zero partition metadata",
+			status:         http.StatusOK,
+			body:           `0`,
+			wantDeletePath: "/admin/v2/persistent/public/default/orders",
+		},
+		{
+			name:           "partitioned metadata",
+			status:         http.StatusOK,
+			body:           `{"partitions":3}`,
+			wantDeletePath: "/admin/v2/persistent/public/default/orders/partitions",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var deletePaths []string
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method == http.MethodDelete {
+					deletePaths = append(deletePaths, r.URL.Path)
+					if r.URL.Query().Get("force") != "false" {
+						t.Errorf("DELETE force query = %q, want false", r.URL.Query().Get("force"))
+					}
+					w.WriteHeader(http.StatusNoContent)
+					return
+				}
+				w.WriteHeader(tt.status)
+				_, _ = w.Write([]byte(tt.body))
+			}))
+			t.Cleanup(server.Close)
+			backend := &Broker{
+				opts:       Options{AdminURL: server.URL, Tenant: "public", Namespace: "default"},
+				httpClient: server.Client(),
+			}
+
+			if err := backend.DeleteTopic(t.Context(), mqgov.TopicCoordinate{Topic: "orders"}); err != nil {
+				t.Fatalf("DeleteTopic() error = %v", err)
+			}
+			if len(deletePaths) != 1 || deletePaths[0] != tt.wantDeletePath {
+				t.Fatalf("DELETE paths = %v, want [%s]", deletePaths, tt.wantDeletePath)
+			}
+		})
+	}
+}

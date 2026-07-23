@@ -62,7 +62,7 @@ func newTopicDescribeCmd(f *cliFlags) *cobra.Command {
 	return &cobra.Command{
 		Use:   "describe TOPIC",
 		Short: "Describe a topic",
-		Args:  cobra.ExactArgs(1),
+		Args:  exactArgsWithTopic(1, 0),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			topic := args[0]
 			resolved, opTarget, err := runMandatoryBrokerRead(f, readAuditSpec{
@@ -97,7 +97,7 @@ func newTopicCreateCmd(f *cliFlags) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "create TOPIC",
 		Short: "Create a topic",
-		Args:  cobra.ExactArgs(1),
+		Args:  exactArgsWithTopic(1, 0),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if contextPlanOnly(f) {
 				return printBrokerChangePlan(f, "create", "topic", args[0], map[string]any{"partitions": partitions})
@@ -115,7 +115,7 @@ func newTopicCreateCmd(f *cliFlags) *cobra.Command {
 				return err
 			}
 			defer preflight.Backend.Close()
-			target, allow := topicCreateAuthorizationTarget(preflight.Context, preflight.Value.Backend, topic)
+			target, allow := topicCreateAuthorizationTarget(preflight.Context, preflight.Value.Backend, preflight.Value.Coordinate)
 			if err := classifyAndAuthorize(f, preflight.Context, mqclass.OperationCreateTopic, target, allow); err != nil {
 				return err
 			}
@@ -150,8 +150,9 @@ type topicPartitionPreflight struct {
 	Resolved resolvedTopicTarget
 }
 
-func topicCreateAuthorizationTarget(meta mqgovctx.Context, backend, topic string) (mqclass.Target, safety.AllowFlag) {
-	target := declaredTopicTarget(meta, backend, topic, false)
+func topicCreateAuthorizationTarget(meta mqgovctx.Context, backend string, coordinate mqgov.TopicCoordinate) (mqclass.Target, safety.AllowFlag) {
+	target := declaredTopicTarget(meta, backend, coordinate.Topic, false)
+	target.InternalTopic = target.InternalTopic || mqclass.IsInternalTopicScope(backend, coordinate.Namespace, coordinate.Topic)
 	if backend != "rocketmq" {
 		return target, ""
 	}
@@ -171,7 +172,7 @@ func newTopicAlterCmd(f *cliFlags) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "alter TOPIC",
 		Short: "Alter topic partitions/config",
-		Args:  cobra.ExactArgs(1),
+		Args:  exactArgsWithTopic(1, 0),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if contextPlanOnly(f) {
 				return printBrokerChangePlan(f, "alter", "topic", args[0], map[string]any{"partitions": partitions})
@@ -221,7 +222,7 @@ func newTopicDeleteCmd(f *cliFlags) *cobra.Command {
 	return &cobra.Command{
 		Use:   "delete TOPIC",
 		Short: "Delete a topic",
-		Args:  cobra.ExactArgs(1),
+		Args:  exactArgsWithTopic(1, 0),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if contextPlanOnly(f) {
 				if topicDeletePlanUsesRocketMQ(f) {
@@ -279,7 +280,7 @@ func newTopicPurgeCmd(f *cliFlags) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "purge TOPIC",
 		Short: "Purge topic or DLQ messages",
-		Args:  cobra.ExactArgs(1),
+		Args:  exactArgsWithTopic(1, 0),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			topic := args[0]
 			op := mqclass.OperationPurgeTopic
@@ -345,15 +346,7 @@ func newTopicPurgeCmd(f *cliFlags) *cobra.Command {
 				return err
 			}
 			result, operationErr := preflight.Value.Manager.PurgeTopic(cmd.Context(), request)
-			outcome := result.BatchOutcome
-			total := outcome.Count()
-			if outcome.Empty() {
-				outcome.Succeeded = int(result.Fingerprint.Count)
-				if operationErr != nil {
-					outcome.Failed = 1
-				}
-				total = outcome.Count()
-			}
+			outcome, total := purgeMutationOutcome(result.BatchOutcome, len(result.Impact), operationErr)
 			if err := finishBatchMutationAuditWithOutcome(handle, total, outcome, operationErr); err != nil {
 				return err
 			}
@@ -371,7 +364,21 @@ type topicPurgePreflight struct {
 	HasPreview bool
 }
 
+func purgeMutationOutcome(reported mqgov.BatchOutcome, completedUnits int, operationErr error) (mqgov.BatchOutcome, int) {
+	if !reported.Empty() {
+		return reported, reported.Count()
+	}
+	outcome := mqgov.BatchOutcome{Succeeded: completedUnits}
+	if operationErr != nil {
+		outcome.Uncertain = 1
+	}
+	return outcome, outcome.Count()
+}
+
 func topicCoord(f *cliFlags, meta mqgovctx.Context, backend mqgov.Broker, topic string) (mqgov.TopicCoordinate, error) {
+	if err := validateTopicName(topic); err != nil {
+		return mqgov.TopicCoordinate{}, err
+	}
 	scope, err := canonicalBrokerScope(f, meta, backend)
 	if err != nil {
 		return mqgov.TopicCoordinate{}, err

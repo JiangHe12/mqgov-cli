@@ -60,12 +60,14 @@ type TopicPurgeRequest struct {
 
 type TopicPurgeResult struct {
 	BatchOutcome
-	Coordinate  TopicCoordinate      `json:"coordinate"`
-	DLQ         bool                 `json:"dlq,omitempty"`
-	DryRun      bool                 `json:"dryRun"`
-	Impact      []PartitionImpact    `json:"impact"`
-	Total       int64                `json:"total"`
-	Fingerprint ResourceFingerprints `json:"fingerprint"`
+	Coordinate          TopicCoordinate      `json:"coordinate"`
+	DLQ                 bool                 `json:"dlq,omitempty"`
+	DryRun              bool                 `json:"dryRun"`
+	Impact              []PartitionImpact    `json:"impact"`
+	AttemptedPartitions int                  `json:"attemptedPartitions"`
+	AffectedMessages    int64                `json:"affectedMessages"`
+	Total               int64                `json:"total"`
+	Fingerprint         ResourceFingerprints `json:"fingerprint"`
 }
 
 type DLQListOptions struct {
@@ -128,11 +130,14 @@ type DLQPurgeRequest struct {
 }
 
 type DLQPurgeResult struct {
-	DLQ         TopicCoordinate      `json:"dlq"`
-	DryRun      bool                 `json:"dryRun"`
-	Impact      []PartitionImpact    `json:"impact"`
-	Total       int64                `json:"total"`
-	Fingerprint ResourceFingerprints `json:"fingerprint"`
+	BatchOutcome
+	DLQ                 TopicCoordinate      `json:"dlq"`
+	DryRun              bool                 `json:"dryRun"`
+	Impact              []PartitionImpact    `json:"impact"`
+	AttemptedPartitions int                  `json:"attemptedPartitions"`
+	AffectedMessages    int64                `json:"affectedMessages"`
+	Total               int64                `json:"total"`
+	Fingerprint         ResourceFingerprints `json:"fingerprint"`
 }
 
 type SchemaListOptions struct {
@@ -266,6 +271,7 @@ type MessageMirrorRequest struct {
 }
 
 type MessageMirrorResult struct {
+	BatchOutcome
 	Source      TopicCoordinate      `json:"source"`
 	Target      TopicCoordinate      `json:"target"`
 	DryRun      bool                 `json:"dryRun"`

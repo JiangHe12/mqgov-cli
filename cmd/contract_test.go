@@ -272,6 +272,36 @@ func TestAuthorizeProtectedContextEscalatesR1ToTicket(t *testing.T) {
 	}
 }
 
+func TestTopicCommandsRejectEmptyTopicNames(t *testing.T) {
+	tests := [][]string{
+		{"topic", "describe", ""},
+		{"topic", "create", "   "},
+		{"topic", "alter", ""},
+		{"topic", "delete", "\t"},
+		{"topic", "purge", ""},
+		{"message", "peek", ""},
+		{"message", "tail", " "},
+		{"message", "produce", ""},
+		{"message", "mirror", "", "--to-context", "dst", "--to-topic", "orders"},
+		{"group", "lag", "billing", ""},
+		{"group", "reset-offset", "billing", " "},
+	}
+	for _, args := range tests {
+		t.Run(strings.Join(args, "_"), func(t *testing.T) {
+			output, err := runCommandForTest(t, args...)
+			if output != "" {
+				t.Fatalf("output = %q, want none", output)
+			}
+			if got := apperrors.AsAppError(err).Code; got != apperrors.CodeUsageError {
+				t.Fatalf("error = %v, code = %s, want %s", err, got, apperrors.CodeUsageError)
+			}
+		})
+	}
+	if err := validateMirrorWindow("dst", "   ", 1); apperrors.AsAppError(err).Code != apperrors.CodeUsageError {
+		t.Fatalf("whitespace mirror target error = %v, want usage error", err)
+	}
+}
+
 func TestListPatternFlagsRejectGlobMetacharacters(t *testing.T) {
 	tests := []struct {
 		name string

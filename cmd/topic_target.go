@@ -24,6 +24,9 @@ func resolveTopicTarget(
 	topic string,
 	plan bool,
 ) (resolvedTopicTarget, error) {
+	if err := validateTopicName(topic); err != nil {
+		return resolvedTopicTarget{}, err
+	}
 	coordinate, err := topicCoord(f, meta, backend, topic)
 	if err != nil {
 		return resolvedTopicTarget{}, err

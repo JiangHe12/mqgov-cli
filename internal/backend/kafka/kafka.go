@@ -596,28 +596,29 @@ func (b *Broker) PurgeTopic(ctx context.Context, req mqgov.TopicPurgeRequest) (m
 		return mqgov.TopicPurgeResult{}, err
 	}
 	impact, total := purgeImpact(start, end)
-	if !req.DryRun {
-		responses, deleteErr := b.deleteRecords(ctx, end)
-		impact, total = appliedDeleteRecordsImpact(start, responses)
-		if deleteErr != nil {
-			return mqgov.TopicPurgeResult{
-				Coordinate:  req.Coordinate,
-				DLQ:         req.DLQ,
-				DryRun:      false,
-				Impact:      impact,
-				Total:       total,
-				Fingerprint: mqgov.ResourceFingerprints{Count: total},
-			}, deleteErr
-		}
+	result := mqgov.TopicPurgeResult{
+		Coordinate:          req.Coordinate,
+		DLQ:                 req.DLQ,
+		DryRun:              req.DryRun,
+		Impact:              impact,
+		AttemptedPartitions: listedOffsetsPartitionCount(end),
+		AffectedMessages:    total,
+		Total:               total,
+		Fingerprint:         mqgov.ResourceFingerprints{Count: total},
 	}
-	return mqgov.TopicPurgeResult{
-		Coordinate:  req.Coordinate,
-		DLQ:         req.DLQ,
-		DryRun:      req.DryRun,
-		Impact:      impact,
-		Total:       total,
-		Fingerprint: mqgov.ResourceFingerprints{Count: total},
-	}, nil
+	if req.DryRun {
+		return result, nil
+	}
+
+	responses, deleteErr := b.deleteRecords(ctx, end)
+	result.Impact, result.Total = appliedDeleteRecordsImpact(start, responses)
+	result.AffectedMessages = result.Total
+	result.Fingerprint.Count = result.Total
+	result.BatchOutcome, err = kafkaDeleteRecordsOutcome(end, responses)
+	if deleteErr != nil || err != nil || result.Failed > 0 || result.Uncertain > 0 {
+		return result, kafkaDeleteRecordsFailure(result.BatchOutcome, errors.Join(deleteErr, err))
+	}
+	return result, nil
 }
 
 func (b *Broker) ListDLQs(context.Context, mqgov.DLQListOptions) ([]mqgov.DLQDescription, error) {
@@ -642,7 +643,16 @@ func (b *Broker) RedriveDLQ(context.Context, mqgov.DLQRedriveRequest) (mqgov.DLQ
 
 func (b *Broker) PurgeDLQ(ctx context.Context, req mqgov.DLQPurgeRequest) (mqgov.DLQPurgeResult, error) {
 	result, err := b.PurgeTopic(ctx, mqgov.TopicPurgeRequest{Coordinate: req.DLQ, DLQ: true, DryRun: req.DryRun})
-	return mqgov.DLQPurgeResult{DLQ: req.DLQ, DryRun: result.DryRun, Impact: result.Impact, Total: result.Total, Fingerprint: result.Fingerprint}, err
+	return mqgov.DLQPurgeResult{
+		BatchOutcome:        result.BatchOutcome,
+		DLQ:                 req.DLQ,
+		DryRun:              result.DryRun,
+		Impact:              result.Impact,
+		AttemptedPartitions: result.AttemptedPartitions,
+		AffectedMessages:    result.AffectedMessages,
+		Total:               result.Total,
+		Fingerprint:         result.Fingerprint,
+	}, err
 }
 
 func (b *Broker) ListSchemas(ctx context.Context, opts mqgov.SchemaListOptions) ([]mqgov.SchemaSubject, error) {
@@ -1022,7 +1032,20 @@ func (b *Broker) startEndOffsets(ctx context.Context, topic string) (kadm.Listed
 	if err != nil {
 		return nil, nil, backendErr(err)
 	}
+	if err := validatePurgeOffsets(start, end); err != nil {
+		return nil, nil, err
+	}
 	return start, end, nil
+}
+
+func validatePurgeOffsets(start, end kadm.ListedOffsets) error {
+	if err := start.Error(); err != nil {
+		return topicNotFoundErr(err)
+	}
+	if err := end.Error(); err != nil {
+		return topicNotFoundErr(err)
+	}
+	return nil
 }
 
 func (b *Broker) deleteRecords(ctx context.Context, offsets kadm.ListedOffsets) (kadm.DeleteRecordsResponses, error) {
@@ -1037,10 +1060,60 @@ func (b *Broker) deleteRecords(ctx context.Context, offsets kadm.ListedOffsets) 
 	if err != nil {
 		return responses, backendErr(err)
 	}
-	if err := responses.Error(); err != nil {
-		return responses, backendErr(err)
-	}
 	return responses, nil
+}
+
+func kafkaDeleteRecordsOutcome(
+	requested kadm.ListedOffsets,
+	responses kadm.DeleteRecordsResponses,
+) (mqgov.BatchOutcome, error) {
+	var outcome mqgov.BatchOutcome
+	var firstErr error
+	for topic, partitions := range requested {
+		for partition := range partitions {
+			response, found := responses.Lookup(topic, partition)
+			if !found {
+				outcome.Uncertain++
+				if firstErr == nil {
+					firstErr = fmt.Errorf("missing Kafka delete-records response for topic %q partition %d", topic, partition)
+				}
+				continue
+			}
+			if response.Err != nil {
+				outcome.Failed++
+				if firstErr == nil {
+					firstErr = response.Err
+				}
+				continue
+			}
+			outcome.Succeeded++
+		}
+	}
+	return outcome, firstErr
+}
+
+func listedOffsetsPartitionCount(offsets kadm.ListedOffsets) int {
+	total := 0
+	for _, partitions := range offsets {
+		total += len(partitions)
+	}
+	return total
+}
+
+func kafkaDeleteRecordsFailure(outcome mqgov.BatchOutcome, cause error) error {
+	if outcome.Succeeded == 0 && outcome.Uncertain == 0 {
+		return backendErr(cause)
+	}
+	return apperrors.New(
+		apperrors.CodePartialFailure,
+		fmt.Sprintf(
+			"Kafka delete-records did not complete atomically (succeeded-partitions=%d failed-partitions=%d uncertain-partitions=%d)",
+			outcome.Succeeded,
+			outcome.Failed,
+			outcome.Uncertain,
+		),
+		cause,
+	)
 }
 
 func (b *Broker) peekClient(req mqgov.MessagePeekRequest) (*kgo.Client, error) {

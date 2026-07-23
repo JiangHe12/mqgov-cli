@@ -45,7 +45,7 @@ func newMessagePeekCmd(f *cliFlags) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "peek TOPIC",
 		Short: "Peek message fingerprints without bodies",
-		Args:  cobra.ExactArgs(1),
+		Args:  exactArgsWithTopic(1, 0),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if err := validatePeekWindow(partition, offset, count); err != nil {
 				return err
@@ -112,7 +112,7 @@ func newMessageTailCmd(f *cliFlags) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "tail TOPIC",
 		Short: "Tail message fingerprints without bodies",
-		Args:  cobra.ExactArgs(1),
+		Args:  exactArgsWithTopic(1, 0),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if err := validateTailWindow(maxMessages); err != nil {
 				return err
@@ -240,7 +240,7 @@ func newMessageProduceCmd(f *cliFlags) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "produce TOPIC",
 		Short: "Produce a message",
-		Args:  cobra.ExactArgs(1),
+		Args:  exactArgsWithTopic(1, 0),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if contextPlanOnly(f) {
 				return printBrokerChangePlan(f, "produce", "message", args[0], map[string]any{
@@ -300,7 +300,7 @@ func newMessageMirrorCmd(f *cliFlags) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "mirror SOURCE_TOPIC",
 		Short: "Copy a bounded batch of messages to another context",
-		Args:  cobra.ExactArgs(1),
+		Args:  exactArgsWithTopic(1, 0),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			sourceTopic := args[0]
 			if err := validateMirrorWindow(toContext, toTopic, limit); err != nil {
@@ -341,8 +341,7 @@ func newMessageMirrorCmd(f *cliFlags) *cobra.Command {
 					sourceTopic,
 					false,
 				)
-				sourcePreflightTarget.ProtectedTopic = sourcePreflightTarget.ProtectedTopic || sourceMeta.Protected
-				if authorizeErr := classifyAndAuthorize(f, sourceMeta, mqclass.OperationPeek, sourcePreflightTarget, ""); authorizeErr != nil {
+				if authorizeErr := authorizeMirrorSource(f, sourceMeta, sourcePreflightTarget); authorizeErr != nil {
 					return mirrorReadPhase{}, authorizeErr
 				}
 				targetMeta, targetFlags, err := resolveMirrorTargetForCommand(f, toContext)
@@ -405,12 +404,13 @@ func newMessageMirrorCmd(f *cliFlags) *cobra.Command {
 				return targetJSONData(f, "MessageMirrorResult", readPhase.Result, readPhase.OperationTarget, operationTargetWrite)
 			}
 
-			handle, err := beginMutationAudit(f, mirrorTargetMutationAuditSpec(toContext, readPhase.TargetMeta, readPhase.Request, limit))
+			handle, err := beginMutationAudit(f, mirrorTargetMutationAuditSpec(toContext, readPhase.TargetMeta, readPhase.Request, len(readPhase.Messages)))
 			if err != nil {
 				return err
 			}
-			succeeded, failed, operationErr := produceMirroredMessages(cmd.Context(), targetBackend, readPhase.Request.Target, readPhase.Messages)
-			if auditErr := finishBatchMutationAudit(handle, limit, succeeded, failed, operationErr); auditErr != nil {
+			outcome, operationErr := produceMirroredMessages(cmd.Context(), targetBackend, readPhase.Request.Target, readPhase.Messages)
+			readPhase.Result.BatchOutcome = outcome
+			if auditErr := finishBatchMutationAuditWithOutcome(handle, len(readPhase.Messages), outcome, operationErr); auditErr != nil {
 				return auditErr
 			}
 			return targetJSONData(f, "MessageMirrorResult", readPhase.Result, readPhase.OperationTarget, operationTargetWrite)
@@ -454,7 +454,7 @@ func validateMirrorWindow(toContext, toTopic string, limit int) error {
 	if toContext == "" {
 		return apperrors.New(apperrors.CodeUsageError, "--to-context is required", nil)
 	}
-	if toTopic == "" {
+	if strings.TrimSpace(toTopic) == "" {
 		return apperrors.New(apperrors.CodeUsageError, "--to-topic is required", nil)
 	}
 	if limit <= 0 {
@@ -599,8 +599,7 @@ func resolveAuthorizedMirrorTargets(
 	dryRun bool,
 ) (resolvedTopicTarget, resolvedTopicTarget, error) {
 	sourcePreflightTarget := declaredTopicTarget(sourceMeta, sourceBackend.Describe().Backend, sourceTopic, false)
-	sourcePreflightTarget.ProtectedTopic = sourcePreflightTarget.ProtectedTopic || sourceMeta.Protected
-	if err := classifyAndAuthorize(f, sourceMeta, mqclass.OperationPeek, sourcePreflightTarget, ""); err != nil {
+	if err := authorizeMirrorSource(f, sourceMeta, sourcePreflightTarget); err != nil {
 		return resolvedTopicTarget{}, resolvedTopicTarget{}, err
 	}
 	targetPreflightTarget := declaredTopicTarget(targetMeta, targetBackend.Describe().Backend, targetTopic, dryRun)
@@ -612,13 +611,12 @@ func resolveAuthorizedMirrorTargets(
 	if err != nil {
 		return resolvedTopicTarget{}, resolvedTopicTarget{}, err
 	}
-	sourceResolved.Classification.ProtectedTopic = sourceResolved.Classification.ProtectedTopic || sourceMeta.Protected
 	targetResolved, err := resolveTopicTarget(ctx, targetBackend, targetFlags, targetMeta, targetTopic, dryRun)
 	if err != nil {
 		return resolvedTopicTarget{}, resolvedTopicTarget{}, err
 	}
 	if !sameTopicClassification(sourcePreflightTarget, sourceResolved.Classification) {
-		if err := classifyAndAuthorize(f, sourceMeta, mqclass.OperationPeek, sourceResolved.Classification, ""); err != nil {
+		if err := authorizeMirrorSource(f, sourceMeta, sourceResolved.Classification); err != nil {
 			return resolvedTopicTarget{}, resolvedTopicTarget{}, err
 		}
 	}
@@ -629,6 +627,15 @@ func resolveAuthorizedMirrorTargets(
 		}
 	}
 	return sourceResolved, targetResolved, nil
+}
+
+func authorizeMirrorSource(f *cliFlags, meta mqgovctx.Context, target mqclass.Target) error {
+	result := mqclass.Classify(mqclass.OperationPeek, target)
+	risk := result.Risk
+	if meta.Protected && risk < safety.R3 {
+		risk++
+	}
+	return authorizeResolvedRisk(f, risk, meta, "")
 }
 
 func mirrorTargetAllow(target mqclass.Target, dryRun bool) safety.AllowFlag {
@@ -745,7 +752,8 @@ func produceMirroredMessages(
 	target mqgov.Broker,
 	coordinate mqgov.TopicCoordinate,
 	messages []mqgov.Message,
-) (succeeded int, failed int, operationErr error) {
+) (mqgov.BatchOutcome, error) {
+	var outcome mqgov.BatchOutcome
 	for _, message := range messages {
 		if _, err := target.Produce(ctx, mqgov.MessageProduceRequest{
 			Coordinate: coordinate,
@@ -753,11 +761,62 @@ func produceMirroredMessages(
 			Body:       message.Body,
 			Headers:    message.Headers,
 		}); err != nil {
-			return succeeded, 1, err
+			if mirrorProduceFailureIsUncertain(err) {
+				outcome.Uncertain++
+			} else {
+				outcome.Failed++
+			}
+			return outcome, mirrorProduceFailure(outcome, err)
 		}
-		succeeded++
+		outcome.Succeeded++
 	}
-	return succeeded, 0, nil
+	return outcome, nil
+}
+
+func mirrorProduceFailureIsUncertain(err error) bool {
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	switch apperrors.AsAppError(err).Code {
+	case apperrors.CodeUsageError,
+		apperrors.CodeAuthFailed,
+		apperrors.CodeResourceNotFound,
+		apperrors.CodeResourceAlreadyExists,
+		apperrors.CodeValidationFailed,
+		apperrors.CodeConflict,
+		apperrors.CodeNotImplemented:
+		return false
+	case apperrors.CodeNetworkError,
+		apperrors.CodeLocalIOError,
+		apperrors.CodeServerError,
+		apperrors.CodeBackendUnreachable,
+		apperrors.CodeBackendError,
+		apperrors.CodeAuthorizationRequired,
+		apperrors.CodePartialFailure,
+		apperrors.CodeNoChangeRequired,
+		apperrors.CodeUnsupportedProtocol,
+		apperrors.CodeCredentialStoreError,
+		apperrors.CodeCredentialStoreMissing:
+		return true
+	default:
+		return true
+	}
+}
+
+func mirrorProduceFailure(outcome mqgov.BatchOutcome, cause error) error {
+	if outcome.Succeeded == 0 && outcome.Uncertain == 0 {
+		return cause
+	}
+	return apperrors.New(
+		apperrors.CodePartialFailure,
+		fmt.Sprintf(
+			"message mirror did not complete atomically (succeeded=%d failed=%d uncertain=%d)",
+			outcome.Succeeded,
+			outcome.Failed,
+			outcome.Uncertain,
+		),
+		cause,
+	)
 }
 
 func resolveMirrorTarget(f *cliFlags, name string) (mqgovctx.Context, *cliFlags, error) {

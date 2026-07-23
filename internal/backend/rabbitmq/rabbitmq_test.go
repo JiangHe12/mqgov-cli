@@ -30,6 +30,32 @@ func TestRedriveRejectsOversizedBatchBeforeBrokerAccess(t *testing.T) {
 	}
 }
 
+func TestRabbitMQPublishingPreservesMessageKey(t *testing.T) {
+	t.Parallel()
+	key := []byte("order-42")
+	requestHeaders := map[string][]byte{"trace-id": []byte("abc")}
+	publishing := rabbitMQPublishing(mqgov.MessageProduceRequest{
+		Key:     key,
+		Body:    []byte("body"),
+		Headers: requestHeaders,
+	})
+
+	storedKey, ok := publishing.Headers[rabbitMQMessageKeyHeader].([]byte)
+	if !ok || !slices.Equal(storedKey, key) {
+		t.Fatalf("RabbitMQ key header = %#v, want %q", publishing.Headers[rabbitMQMessageKeyHeader], key)
+	}
+	if storedTrace, ok := publishing.Headers["trace-id"].([]byte); !ok || !slices.Equal(storedTrace, requestHeaders["trace-id"]) {
+		t.Fatalf("RabbitMQ trace header = %#v, want %q", publishing.Headers["trace-id"], requestHeaders["trace-id"])
+	}
+	key[0] = 'X'
+	if string(storedKey) != "order-42" {
+		t.Fatalf("RabbitMQ key header changed with caller buffer: %q", storedKey)
+	}
+	if _, exists := requestHeaders[rabbitMQMessageKeyHeader]; exists {
+		t.Fatal("rabbitMQPublishing() mutated caller headers")
+	}
+}
+
 func (transport *closeIdleTransport) CloseIdleConnections() {
 	transport.calls++
 }

@@ -287,6 +287,7 @@ test('release workflow verifies signed assets and embeds the provenance-bound ma
   const installerSource = fs.readFileSync(path.join(__dirname, '..', 'scripts', 'install.js'), 'utf8');
   const workflow = fs.readFileSync(path.join(__dirname, '..', '.github', 'workflows', 'release.yml'), 'utf8');
 
+  assert.doesNotMatch(installerSource, /\|\|=/);
   assert.doesNotMatch(installerSource, /SKIP_VERIFY|checksums\.txt|downloadToString|parseChecksums/);
   assert.equal((workflow.match(/cosign-release: 'v2\.6\.4'/g) || []).length, 4);
   assert.ok((workflow.match(/cosign verify-blob/g) || []).length >= 4);

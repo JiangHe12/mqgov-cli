@@ -64,6 +64,67 @@ func TestMirrorAuthorizationsBindIndependentContextNames(t *testing.T) {
 	})
 }
 
+func TestMirrorSourceProtectionDimensionsEachEscalateOnce(t *testing.T) {
+	tests := []struct {
+		name       string
+		meta       mqgovctx.Context
+		target     mqclass.Target
+		wantTicket bool
+	}{
+		{
+			name: "protected context only is R1",
+			meta: mqgovctx.Context{Base: corectx.Base{Protected: true}, Backend: "fake"},
+			target: mqclass.Target{
+				Backend: "fake",
+				Topic:   "orders",
+			},
+		},
+		{
+			name: "protected topic only is R1",
+			meta: mqgovctx.Context{Backend: "fake"},
+			target: mqclass.Target{
+				Backend:        "fake",
+				Topic:          "orders",
+				ProtectedTopic: true,
+			},
+		},
+		{
+			name:       "protected context and topic are R2",
+			meta:       mqgovctx.Context{Base: corectx.Base{Protected: true}, Backend: "fake"},
+			wantTicket: true,
+			target: mqclass.Target{
+				Backend:        "fake",
+				Topic:          "orders",
+				ProtectedTopic: true,
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			flags := newDefaultFlags()
+			flags.NonInter = true
+			if err := authorizeMirrorSource(flags, tt.meta, tt.target); apperrors.AsAppError(err).Code != apperrors.CodeAuthorizationRequired {
+				t.Fatalf("authorization without confirmation error = %v, want authorization required", err)
+			}
+			flags.Yes = true
+			err := authorizeMirrorSource(flags, tt.meta, tt.target)
+			if !tt.wantTicket {
+				if err != nil {
+					t.Fatalf("R1 authorization with confirmation error = %v", err)
+				}
+				return
+			}
+			if apperrors.AsAppError(err).Code != apperrors.CodeAuthorizationRequired {
+				t.Fatalf("R2 authorization without ticket error = %v, want authorization required", err)
+			}
+			flags.Ticket = "OPS-1"
+			if err := authorizeMirrorSource(flags, tt.meta, tt.target); err != nil {
+				t.Fatalf("R2 authorization with ticket error = %v", err)
+			}
+		})
+	}
+}
+
 func TestMirrorAuditsBindSourceAndDestinationSeparately(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -565,12 +626,61 @@ func TestPeekCommandsRejectOversizedCountsBeforeBackendConstruction(t *testing.T
 	}
 }
 
+func TestProduceMirroredMessagesReportsTimeoutAsUncertainPartialFailure(t *testing.T) {
+	target := newMirrorSpyBroker("target", nil)
+	target.produceErrAt = 2
+	target.produceErr = apperrors.New(apperrors.CodeBackendError, "produce timed out", context.DeadlineExceeded)
+	messages := []mqgov.Message{{Body: []byte("first")}, {Body: []byte("second")}, {Body: []byte("third")}}
+
+	outcome, err := produceMirroredMessages(t.Context(), target, mqgov.TopicCoordinate{Topic: "orders"}, messages)
+	if outcome != (mqgov.BatchOutcome{Succeeded: 1, Uncertain: 1}) {
+		t.Fatalf("mirror outcome = %+v, want one success and one uncertain produce", outcome)
+	}
+	if got := apperrors.AsAppError(err).Code; got != apperrors.CodePartialFailure {
+		t.Fatalf("mirror error code = %s, want %s; err=%v", got, apperrors.CodePartialFailure, err)
+	}
+	if target.produceCalls != 2 {
+		t.Fatalf("produce calls = %d, want stop after uncertain second produce", target.produceCalls)
+	}
+}
+
+func TestProduceMirroredMessagesReportsPriorSuccessAsPartialFailure(t *testing.T) {
+	target := newMirrorSpyBroker("target", nil)
+	target.produceErrAt = 2
+	target.produceErr = apperrors.New(apperrors.CodeAuthFailed, "produce rejected", nil)
+	messages := []mqgov.Message{{Body: []byte("first")}, {Body: []byte("second")}}
+
+	outcome, err := produceMirroredMessages(t.Context(), target, mqgov.TopicCoordinate{Topic: "orders"}, messages)
+	if outcome != (mqgov.BatchOutcome{Succeeded: 1, Failed: 1}) {
+		t.Fatalf("mirror outcome = %+v, want one success and one definitive failure", outcome)
+	}
+	if got := apperrors.AsAppError(err).Code; got != apperrors.CodePartialFailure {
+		t.Fatalf("mirror error code = %s, want %s; err=%v", got, apperrors.CodePartialFailure, err)
+	}
+}
+
+func TestProduceMirroredMessagesKeepsFirstDefinitiveFailure(t *testing.T) {
+	target := newMirrorSpyBroker("target", nil)
+	target.produceErrAt = 1
+	target.produceErr = apperrors.New(apperrors.CodeAuthFailed, "produce rejected", nil)
+
+	outcome, err := produceMirroredMessages(t.Context(), target, mqgov.TopicCoordinate{Topic: "orders"}, []mqgov.Message{{Body: []byte("first")}})
+	if outcome != (mqgov.BatchOutcome{Failed: 1}) {
+		t.Fatalf("mirror outcome = %+v, want one definitive failure", outcome)
+	}
+	if got := apperrors.AsAppError(err).Code; got != apperrors.CodeAuthFailed {
+		t.Fatalf("mirror error code = %s, want %s; err=%v", got, apperrors.CodeAuthFailed, err)
+	}
+}
+
 type mirrorSpyBroker struct {
 	mqgov.Broker
 	label        string
 	events       *[]string
 	messages     []mqgov.Message
 	mirrorErr    error
+	produceErr   error
+	produceErrAt int
 	produceCalls int
 }
 
@@ -610,6 +720,9 @@ func (broker *mirrorSpyBroker) MirrorMessages(
 func (broker *mirrorSpyBroker) Produce(_ context.Context, request mqgov.MessageProduceRequest) (mqgov.MessageProduceResult, error) {
 	broker.produceCalls++
 	broker.addEvent("produce")
+	if broker.produceErrAt > 0 && broker.produceCalls == broker.produceErrAt {
+		return mqgov.MessageProduceResult{}, broker.produceErr
+	}
 	return mqgov.MessageProduceResult{
 		Coordinate: mqgov.MessageCoordinate{TopicCoordinate: request.Coordinate},
 		Fingerprint: mqgov.Fingerprints(

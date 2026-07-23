@@ -209,6 +209,27 @@ func IsInternalTopic(backend, topic string) bool {
 		name == "tbw102"
 }
 
+func IsInternalTopicScope(backend, namespace, topic string) bool {
+	if IsInternalTopic(backend, topic) {
+		return true
+	}
+	if !strings.EqualFold(strings.TrimSpace(backend), "pulsar") {
+		return false
+	}
+	scope := strings.TrimSpace(namespace)
+	parts := strings.Split(scope, "/")
+	if scope != namespace ||
+		len(parts) != 2 ||
+		parts[0] == "" ||
+		parts[1] == "" ||
+		strings.TrimSpace(parts[0]) != parts[0] ||
+		strings.TrimSpace(parts[1]) != parts[1] {
+		return true
+	}
+	return strings.EqualFold(parts[0], "pulsar") ||
+		strings.EqualFold(parts[1], "system")
+}
+
 func broadACLGrant(target ACLTarget) bool {
 	if target.Unknown {
 		return true

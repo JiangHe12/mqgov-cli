@@ -54,6 +54,8 @@ type Broker struct {
 	close      sync.Once
 }
 
+const rabbitMQMessageKeyHeader = "x-mqgov-message-key"
+
 func New(opts Options) (*Broker, error) {
 	if err := validateTLSConnectionURLs(opts); err != nil {
 		return nil, err
@@ -259,11 +261,7 @@ func (*Broker) Peek(context.Context, mqgov.MessagePeekRequest) (mqgov.MessagePee
 
 func (b *Broker) Produce(ctx context.Context, req mqgov.MessageProduceRequest) (mqgov.MessageProduceResult, error) {
 	_, err := withChannel(ctx, b, func(ch *amqp.Channel) (struct{}, error) {
-		return struct{}{}, ch.PublishWithContext(ctx, "", req.Coordinate.Topic, false, false, amqp.Publishing{
-			DeliveryMode: amqp.Persistent,
-			Headers:      headers(req.Headers),
-			Body:         req.Body,
-		})
+		return struct{}{}, ch.PublishWithContext(ctx, "", req.Coordinate.Topic, false, false, rabbitMQPublishing(req))
 	})
 	if err != nil {
 		return mqgov.MessageProduceResult{}, classifyAMQPError(err)
@@ -272,6 +270,21 @@ func (b *Broker) Produce(ctx context.Context, req mqgov.MessageProduceRequest) (
 		Coordinate:  mqgov.MessageCoordinate{TopicCoordinate: req.Coordinate, Partition: 0, Offset: 0},
 		Fingerprint: mqgov.Fingerprints(req.Key, req.Body, 1),
 	}, nil
+}
+
+func rabbitMQPublishing(req mqgov.MessageProduceRequest) amqp.Publishing {
+	publishingHeaders := headers(req.Headers)
+	if req.Key != nil {
+		if publishingHeaders == nil {
+			publishingHeaders = make(amqp.Table, 1)
+		}
+		publishingHeaders[rabbitMQMessageKeyHeader] = bytes.Clone(req.Key)
+	}
+	return amqp.Publishing{
+		DeliveryMode: amqp.Persistent,
+		Headers:      publishingHeaders,
+		Body:         req.Body,
+	}
 }
 
 func (b *Broker) AlterTopic(context.Context, mqgov.TopicAlterRequest) (mqgov.TopicDescription, error) {

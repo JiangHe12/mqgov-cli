@@ -146,7 +146,7 @@ func newGroupLagCmd(f *cliFlags) *cobra.Command {
 	return &cobra.Command{
 		Use:   "lag GROUP TOPIC",
 		Short: "Show group lag",
-		Args:  cobra.ExactArgs(2),
+		Args:  exactArgsWithTopic(2, 1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			group, topic := args[0], args[1]
 			plan, opTarget, err := runMandatoryBrokerRead(f, readAuditSpec{
@@ -192,7 +192,7 @@ func newGroupResetOffsetCmd(f *cliFlags) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "reset-offset GROUP TOPIC",
 		Short: "Plan or reset group offsets",
-		Args:  cobra.ExactArgs(2),
+		Args:  exactArgsWithTopic(2, 1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			group, topic := args[0], args[1]
 			dryRun := f.DryRun || f.Plan

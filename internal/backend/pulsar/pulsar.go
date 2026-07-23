@@ -317,11 +317,15 @@ func (b *Broker) CreateTopic(ctx context.Context, req mqgov.TopicCreateRequest) 
 
 func (b *Broker) DeleteTopic(ctx context.Context, coord mqgov.TopicCoordinate) error {
 	path := b.topicPath(coord.Topic)
-	if meta, err := b.partitionedMetadata(ctx, coord.Topic); err == nil && meta.Partitions > 0 {
+	meta, err := b.partitionedMetadata(ctx, coord.Topic)
+	if err != nil && !isExplicitNonPartitionedMetadataError(err) {
+		return err
+	}
+	if err == nil && meta.Partitions > 0 {
 		_, err := b.adminJSON(ctx, http.MethodDelete, path+"/partitions?force=false", nil)
 		return err
 	}
-	_, err := b.adminJSON(ctx, http.MethodDelete, path+"?force=false", nil)
+	_, err = b.adminJSON(ctx, http.MethodDelete, path+"?force=false", nil)
 	return err
 }
 
@@ -1089,15 +1093,23 @@ func (b *Broker) partitionedMetadata(ctx context.Context, topic string) (partiti
 	if len(bytes.TrimSpace(body)) == 0 {
 		return partitionedTopicMetadata{}, apperrors.New(apperrors.CodeResourceNotFound, "topic not found", nil)
 	}
-	var partitions int
+	var partitions *int
 	if err := json.Unmarshal(body, &partitions); err == nil {
-		return partitionedTopicMetadata{Partitions: partitions}, nil
+		if partitions == nil || *partitions < 0 {
+			return partitionedTopicMetadata{}, backendErr(errors.New("invalid Pulsar partition metadata count"))
+		}
+		return partitionedTopicMetadata{Partitions: *partitions}, nil
 	}
-	var meta partitionedTopicMetadata
-	if err := json.Unmarshal(body, &meta); err != nil {
+	var envelope struct {
+		Partitions *int `json:"partitions"`
+	}
+	if err := json.Unmarshal(body, &envelope); err != nil {
 		return partitionedTopicMetadata{}, backendErr(fmt.Errorf("decode Pulsar partition metadata: %w", err))
 	}
-	return meta, nil
+	if envelope.Partitions == nil || *envelope.Partitions < 0 {
+		return partitionedTopicMetadata{}, backendErr(errors.New("pulsar partition metadata is missing a valid partition count"))
+	}
+	return partitionedTopicMetadata{Partitions: *envelope.Partitions}, nil
 }
 
 func (b *Broker) ensureSubscriptionInactive(ctx context.Context, group, topic string) error {
@@ -1502,13 +1514,44 @@ func (b *Broker) adminJSONWithContentType(ctx context.Context, method, path stri
 	}
 }
 
-func pulsarAdminResponseError(status int, body []byte) error {
-	return fmt.Errorf(
+type pulsarAdminHTTPError struct {
+	status                 int
+	responseBytes          int
+	responseSHA256         string
+	explicitNonPartitioned bool
+}
+
+func (err *pulsarAdminHTTPError) Error() string {
+	return fmt.Sprintf(
 		"pulsar admin status %d response-bytes=%d response-sha256=%s",
-		status,
-		len(body),
-		mqgov.SHA256Hex(body),
+		err.status,
+		err.responseBytes,
+		err.responseSHA256,
 	)
+}
+
+func pulsarAdminResponseError(status int, body []byte) error {
+	return &pulsarAdminHTTPError{
+		status:                 status,
+		responseBytes:          len(body),
+		responseSHA256:         mqgov.SHA256Hex(body),
+		explicitNonPartitioned: status == http.StatusNotFound && pulsarResponseExplicitlyNonPartitioned(body),
+	}
+}
+
+func pulsarResponseExplicitlyNonPartitioned(body []byte) bool {
+	var response struct {
+		Reason string `json:"reason"`
+	}
+	if err := json.Unmarshal(body, &response); err != nil {
+		return false
+	}
+	return strings.EqualFold(strings.TrimSpace(response.Reason), "Topic is not partitioned")
+}
+
+func isExplicitNonPartitionedMetadataError(err error) bool {
+	var responseErr *pulsarAdminHTTPError
+	return errors.As(err, &responseErr) && responseErr.explicitNonPartitioned
 }
 
 func (b *Broker) fqn(topic string) string {

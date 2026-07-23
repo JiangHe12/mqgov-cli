@@ -242,7 +242,7 @@ func newDLQRedriveCmd(f *cliFlags) *cobra.Command {
 			if outcome.Empty() {
 				outcome.Succeeded = int(result.Fingerprint.Count)
 				if operationErr != nil {
-					outcome.Failed = 1
+					outcome.Uncertain = 1
 				}
 			}
 			if err := finishBatchMutationAuditWithOutcome(handle, count, outcome, operationErr); err != nil {
@@ -332,12 +332,8 @@ func newDLQPurgeCmd(f *cliFlags) *cobra.Command {
 				return err
 			}
 			result, operationErr := preflight.Value.Manager.PurgeDLQ(cmd.Context(), request)
-			failed := 0
-			if operationErr != nil {
-				failed = 1
-			}
-			succeeded := int(result.Fingerprint.Count)
-			if err := finishBatchMutationAudit(handle, succeeded+failed, succeeded, failed, operationErr); err != nil {
+			outcome, total := purgeMutationOutcome(result.BatchOutcome, len(result.Impact), operationErr)
+			if err := finishBatchMutationAuditWithOutcome(handle, total, outcome, operationErr); err != nil {
 				return err
 			}
 			return targetJSONData(f, "DLQPurgeResult", result, preflight.Target, operationTargetWrite)

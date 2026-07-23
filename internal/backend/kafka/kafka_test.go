@@ -15,6 +15,7 @@ import (
 
 	"github.com/JiangHe12/opskit-core/v2/apperrors"
 	"github.com/twmb/franz-go/pkg/kadm"
+	"github.com/twmb/franz-go/pkg/kerr"
 
 	"github.com/JiangHe12/mqgov-cli/internal/mqgov"
 )
@@ -101,6 +102,150 @@ func TestAppliedDeleteRecordsImpactCountsOnlySuccessfulPartitions(t *testing.T) 
 	}
 	if got := impact[0]; got.Partition != 0 || got.From != 4 || got.To != 10 || got.Count != 6 {
 		t.Fatalf("impact[0] = %+v, want partition=0 from=4 to=10 count=6", got)
+	}
+}
+
+func TestValidatePurgeOffsetsFailsClosedOnPartitionErrors(t *testing.T) {
+	t.Parallel()
+	valid := kadm.ListedOffsets{
+		"orders": {
+			0: {Topic: "orders", Partition: 0, Offset: 4},
+		},
+	}
+	tests := []struct {
+		name     string
+		start    kadm.ListedOffsets
+		end      kadm.ListedOffsets
+		wantCode apperrors.ErrorCode
+	}{
+		{
+			name: "start partition error",
+			start: kadm.ListedOffsets{
+				"orders": {
+					0: {Topic: "orders", Partition: 0, Err: kerr.UnknownTopicOrPartition},
+				},
+			},
+			end:      valid,
+			wantCode: apperrors.CodeResourceNotFound,
+		},
+		{
+			name:  "end partition error",
+			start: valid,
+			end: kadm.ListedOffsets{
+				"orders": {
+					0: {Topic: "orders", Partition: 0, Err: errors.New("partition unavailable")},
+				},
+			},
+			wantCode: apperrors.CodeBackendError,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			err := validatePurgeOffsets(tt.start, tt.end)
+			if got := apperrors.AsAppError(err).Code; got != tt.wantCode {
+				t.Fatalf("validatePurgeOffsets() error = %v, code = %s, want %s", err, got, tt.wantCode)
+			}
+		})
+	}
+	if err := validatePurgeOffsets(valid, valid); err != nil {
+		t.Fatalf("validatePurgeOffsets(valid) error = %v", err)
+	}
+}
+
+func TestKafkaDeleteRecordsOutcomeUsesPartitionUnits(t *testing.T) {
+	t.Parallel()
+	requested := kadm.ListedOffsets{
+		"orders": {
+			0: {Topic: "orders", Partition: 0, Offset: 10},
+			1: {Topic: "orders", Partition: 1, Offset: 20},
+			2: {Topic: "orders", Partition: 2, Offset: 30},
+		},
+	}
+	responses := kadm.DeleteRecordsResponses{
+		"orders": {
+			0: {Topic: "orders", Partition: 0, LowWatermark: 10},
+			1: {Topic: "orders", Partition: 1, Err: errors.New("partition unavailable")},
+		},
+	}
+
+	outcome, err := kafkaDeleteRecordsOutcome(requested, responses)
+	if outcome != (mqgov.BatchOutcome{Succeeded: 1, Failed: 1, Uncertain: 1}) {
+		t.Fatalf("outcome = %+v, want one successful, failed, and uncertain partition", outcome)
+	}
+	if err == nil {
+		t.Fatal("kafkaDeleteRecordsOutcome() error = nil, want first partition error")
+	}
+	if got := apperrors.AsAppError(kafkaDeleteRecordsFailure(outcome, err)).Code; got != apperrors.CodePartialFailure {
+		t.Fatalf("partial delete-records error code = %s, want %s", got, apperrors.CodePartialFailure)
+	}
+
+	result := mqgov.TopicPurgeResult{
+		BatchOutcome:        outcome,
+		AttemptedPartitions: listedOffsetsPartitionCount(requested),
+		AffectedMessages:    6,
+		Total:               6,
+		Fingerprint:         mqgov.ResourceFingerprints{Count: 6},
+	}
+	payload, marshalErr := json.Marshal(result)
+	if marshalErr != nil {
+		t.Fatalf("json.Marshal() error = %v", marshalErr)
+	}
+	for _, field := range []string{
+		`"attemptedPartitions":3`,
+		`"affectedMessages":6`,
+		`"succeeded":1`,
+		`"failed":1`,
+		`"uncertain":1`,
+	} {
+		if !strings.Contains(string(payload), field) {
+			t.Fatalf("purge JSON = %s, want %s", payload, field)
+		}
+	}
+
+	for name, empty := range map[string]any{
+		"topic purge": mqgov.TopicPurgeResult{},
+		"DLQ purge":   mqgov.DLQPurgeResult{},
+	} {
+		emptyPayload, err := json.Marshal(empty)
+		if err != nil {
+			t.Fatalf("json.Marshal(%s) error = %v", name, err)
+		}
+		for _, field := range []string{`"attemptedPartitions":0`, `"affectedMessages":0`} {
+			if !strings.Contains(string(emptyPayload), field) {
+				t.Fatalf("%s JSON = %s, want explicit %s", name, emptyPayload, field)
+			}
+		}
+	}
+}
+
+func TestKafkaDeleteRecordsMissingResponsesAreUncertain(t *testing.T) {
+	t.Parallel()
+	requested := kadm.ListedOffsets{
+		"orders": {
+			0: {Topic: "orders", Partition: 0, Offset: 10},
+			1: {Topic: "orders", Partition: 1, Offset: 20},
+		},
+	}
+
+	outcome, err := kafkaDeleteRecordsOutcome(requested, nil)
+	if outcome != (mqgov.BatchOutcome{Uncertain: 2}) {
+		t.Fatalf("outcome = %+v, want two uncertain partitions", outcome)
+	}
+	if err == nil {
+		t.Fatal("kafkaDeleteRecordsOutcome() error = nil, want missing-response error")
+	}
+	if got := apperrors.AsAppError(kafkaDeleteRecordsFailure(outcome, err)).Code; got != apperrors.CodePartialFailure {
+		t.Fatalf("uncertain delete-records error code = %s, want %s", got, apperrors.CodePartialFailure)
+	}
+}
+
+func TestKafkaDeleteRecordsAllDefinitiveFailuresRemainBackendError(t *testing.T) {
+	t.Parallel()
+	outcome := mqgov.BatchOutcome{Failed: 2}
+	err := kafkaDeleteRecordsFailure(outcome, errors.New("authorization rejected"))
+	if got := apperrors.AsAppError(err).Code; got != apperrors.CodeBackendError {
+		t.Fatalf("all-failed delete-records error code = %s, want %s", got, apperrors.CodeBackendError)
 	}
 }
 

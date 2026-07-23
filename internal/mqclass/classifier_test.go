@@ -206,3 +206,33 @@ func TestClassifyAdversarialEscalation(t *testing.T) {
 		})
 	}
 }
+
+func TestPulsarInternalTopicScopeIncludesTenantAndNamespace(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		backend   string
+		namespace string
+		topic     string
+		want      bool
+	}{
+		{name: "system tenant", backend: "pulsar", namespace: "pulsar/default", topic: "orders", want: true},
+		{name: "system namespace", backend: "PULSAR", namespace: "public/system", topic: "orders", want: true},
+		{name: "ordinary Pulsar scope", backend: "pulsar", namespace: "public/default", topic: "orders", want: false},
+		{name: "ordinary Kafka namespace with same name", backend: "kafka", namespace: "public/system", topic: "orders", want: false},
+		{name: "malformed Pulsar scope fails closed", backend: "pulsar", namespace: "system", topic: "orders", want: true},
+		{name: "empty Pulsar scope fails closed", backend: "pulsar", namespace: "", topic: "orders", want: true},
+		{name: "Pulsar scope with empty tenant fails closed", backend: "pulsar", namespace: "/default", topic: "orders", want: true},
+		{name: "Pulsar scope with extra segment fails closed", backend: "pulsar", namespace: "public/default/extra", topic: "orders", want: true},
+		{name: "Pulsar scope with ambiguous whitespace fails closed", backend: "pulsar", namespace: "public /default", topic: "orders", want: true},
+		{name: "internal name remains internal", backend: "pulsar", namespace: "public/default", topic: "__change_events", want: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := IsInternalTopicScope(tt.backend, tt.namespace, tt.topic); got != tt.want {
+				t.Fatalf("IsInternalTopicScope(%q, %q, %q) = %v, want %v", tt.backend, tt.namespace, tt.topic, got, tt.want)
+			}
+		})
+	}
+}

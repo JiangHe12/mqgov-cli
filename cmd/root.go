@@ -475,10 +475,6 @@ func authorizeForContextWithConfirmation(
 	confirmed bool,
 	contextName string,
 ) error {
-	operator, err := trustedOperatorIdentity(f)
-	if err != nil {
-		return err
-	}
 	risk := safety.EffectiveRisk(base, safety.ContextMeta{
 		Env:             meta.Env,
 		Protected:       meta.Protected,
@@ -486,6 +482,30 @@ func authorizeForContextWithConfirmation(
 		TicketValidator: meta.TicketValidator,
 		Roles:           meta.Roles,
 	})
+	return authorizeResolvedRiskForContextWithConfirmation(f, risk, meta, required, confirmed, contextName)
+}
+
+func authorizeResolvedRisk(
+	f *cliFlags,
+	risk safety.Risk,
+	meta mqgovctx.Context,
+	required safety.AllowFlag,
+) error {
+	return authorizeResolvedRiskForContextWithConfirmation(f, risk, meta, required, f.Yes, f.contextName())
+}
+
+func authorizeResolvedRiskForContextWithConfirmation(
+	f *cliFlags,
+	risk safety.Risk,
+	meta mqgovctx.Context,
+	required safety.AllowFlag,
+	confirmed bool,
+	contextName string,
+) error {
+	operator, err := trustedOperatorIdentity(f)
+	if err != nil {
+		return err
+	}
 	err = safety.Authorize(risk, safety.Options{
 		Yes:                confirmed,
 		NonInteractive:     f.NonInter,
@@ -522,6 +542,22 @@ func grantedAllowFlags(f *cliFlags) map[safety.AllowFlag]bool {
 func classifyAndAuthorize(f *cliFlags, meta mqgovctx.Context, op mqclass.Operation, target mqclass.Target, allow safety.AllowFlag) error {
 	result := mqclass.Classify(op, target)
 	return authorize(f, result.Risk, meta, allow)
+}
+
+func exactArgsWithTopic(count, topicIndex int) cobra.PositionalArgs {
+	return func(cmd *cobra.Command, args []string) error {
+		if err := cobra.ExactArgs(count)(cmd, args); err != nil {
+			return err
+		}
+		return validateTopicName(args[topicIndex])
+	}
+}
+
+func validateTopicName(topic string) error {
+	if strings.TrimSpace(topic) == "" {
+		return apperrors.New(apperrors.CodeUsageError, "topic name must not be empty", nil)
+	}
+	return nil
 }
 
 func ticketValidator(path, contextName, operator string) safety.TicketValidator {
