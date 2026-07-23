@@ -28,6 +28,10 @@ func TestMain(m *testing.M) {
 		}
 		os.Exit(0)
 	}
+	if err := configureTestProcessOwner(); err != nil {
+		_, _ = fmt.Fprintf(os.Stderr, "configure test process owner: %v\n", err)
+		os.Exit(2)
+	}
 	testHome, err := createCommandTestHome()
 	if err != nil {
 		_, _ = fmt.Fprintf(os.Stderr, "create isolated test home: %v\n", err)
